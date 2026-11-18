@@ -1,0 +1,40 @@
+{
+  "defaultProvider": "deepseek",
+  "workspace": ".",
+  "traceDir": ".traces",
+  "limits": { "maxSteps": 20, "timeoutSec": 300, "contextTokens": 24000 },
+  "guard": {
+    "policy": { "read": "allow", "write": "ask", "exec": "ask", "network": "ask" },
+    "denyCommands": []
+  },
+  "providers": {
+
+    "deepseek": {
+      "type": "openai-compat",
+      "baseURL": "https://api.deepseek.com",
+      "apiKey": "${DEEPSEEK_API_KEY}",
+      "model": "deepseek-chat"
+    },
+    "openai": {
+      "type": "openai-compat",
+      "baseURL": "https://api.openai.com/v1",
+      "apiKey": "${OPENAI_API_KEY}",
+      "model": "gpt-4o-mini"
+    },
+    "claude": {
+      "type": "anthropic",
+      "apiKey": "${ANTHROPIC_API_KEY}",
+      "model": "claude-sonnet-4-5"
+    },
+
+    "codex": { "type": "cli", "preset": "codex", "timeoutSec": 900 },
+    "claude-code": { "type": "cli", "preset": "claude-code" },
+    "cursor-cli": { "type": "cli", "preset": "cursor-cli" },
+    "cursor": { "type": "cursor-sdk", "apiKey": "${CURSOR_API_KEY}", "model": "composer-2" }
+  },
+  "channels": {
+    "server": { "host": "127.0.0.1", "port": 8787 },
+    "toolPolicy": "readonly",
+    "autoApprove": false
+  }
+}

@@ -1,0 +1,68 @@
+# ───────── 依赖与构建产物 ─────────
+node_modules/
+dist/
+out/
+release/
+
+# ───────── 数据与配置：一律不上传（开发时数据目录就是项目根目录） ─────────
+# 配置文件（可能含 Key、令牌、本机路径、飞书空间等）；模板请用 *.example.json
+harness.config.json
+harness.config.*.json
+!harness.config.example.json
+!harness.config.*.example.json
+
+# 密钥 / 令牌 / 环境变量（模板请用 .env.example）
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 应用运行产生的数据：运行记录、缓存、每日图片、用户自建的技能、会话
+.traces/
+.traces-test/
+.harness/
+models-cache.json
+home-cache.json
+daily/
+/skills/
+*.sqlite
+*.db
+
+# Electron 用户数据（调试时 --user-data-dir 指到项目里的情况）
+.ud/
+user-data/
+
+# 日志、临时文件、本机编辑器设置
+*.log
+npm-debug.log*
+*.tmp
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 连接、插件、数据库授权等用户数据：一律不上传（连接密码是加密的，但也不该进仓库）
+connections.json
+connection-secrets.json
+plugin-consent.json
+plugin-repos.json
+plugin-db-grants.json
+db-audit.jsonl
+db-audit.jsonl.1
+automations.json
+defects.json
+plugin-data/
+/plugins/
+
+# 兜底：任何带 secret / credential / token 字样的数据文件，以及插件私有存储，一律不上传
+*secrets*.json
+*credential*.json
+*token*.json
+.host-storage.json
+connections.*.json
+connection-*.json
+
+.vitest/

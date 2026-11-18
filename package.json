@@ -1,0 +1,89 @@
+{
+  "name": "m-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "多模型、可接入办公 OA 的 Agent Harness（引擎 + CLI + 桌面端 + 飞书/钉钉通道）",
+  "author": "M-Harness",
+  "main": "out/main/index.cjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "harness": "./bin/harness.mjs"
+  },
+  "scripts": {
+    "harness": "tsx src/cli/index.ts",
+    "dev:serve": "tsx watch src/cli/index.ts serve",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.desktop.json",
+    "desktop": "electron-vite dev",
+    "desktop:build": "electron-vite build",
+    "desktop:start": "electron-vite preview",
+    "desktop:smoke": "node scripts/desktop-smoke.mjs",
+    "desktop:pack": "electron-vite build && electron-builder --dir",
+    "desktop:dist": "electron-vite build && electron-builder"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "electron-updater": "^6.8.11",
+    "lunar-javascript": "^1.7.8",
+    "mysql2": "^3.24.6",
+    "pg": "^8.23.1",
+    "pg-cursor": "^2.22.1",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.23.1",
+    "@types/pg-cursor": "^2.7.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.3.3",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.0",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  },
+  "optionalDependencies": {
+    "@cursor/sdk": "^1.4.0"
+  },
+  "build": {
+    "appId": "com.mharness.desktop",
+    "productName": "M-Harness",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/@cursor/sdk/**"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

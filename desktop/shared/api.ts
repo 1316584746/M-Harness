@@ -1,0 +1,470 @@
+import type { HarnessEvent, Msg } from "../../src/core/types";
+
+export type { HarnessEvent, Msg };
+
+export interface ProviderInfo {
+  name: string;
+  desc: string;
+  kind: "model" | "agent";
+  /** 配置里的默认模型名（cli 没有） */
+  model?: string;
+  /** 创建失败的原因（如缺 Key），为空表示可用 */
+  problem?: string;
+}
+
+export interface RepoStatusDTO {
+  exists: boolean;
+  branch?: string;
+  changed: number;
+  ahead: number;
+  behind: number;
+  last?: string;
+  error?: string;
+}
+
+export interface KeyProbeDTO {
+  ok: boolean;
+  models?: string[];
+  /** 模型 id → 展示名 */
+  labels?: Record<string, string>;
+  user?: { name?: string; email?: string; keyName?: string; createdAt?: string; note?: string };
+  error?: string;
+  /** 取自缓存（providerModels 才有）：true 表示这次没有联网 */
+  cached?: boolean;
+  /** 这份列表的获取时间（毫秒时间戳） */
+  at?: number;
+}
+
+/** 首页：天气（按 IP 定位或指定城市） */
+export interface WeatherDTO {
+  ok: boolean;
+  error?: string;
+  /** true = 按本机 IP 定位；false = 用户指定的城市 */
+  byIp: boolean;
+  ip?: string;
+  city?: string;
+  region?: string;
+  country?: string;
+  current?: { temp: number; feels: number; humidity: number; wind: number; code: number; text: string; icon: string };
+  daily?: Array<{ date: string; max: number; min: number; code: number; text: string; icon: string; pop?: number }>;
+  /** 获取时间（毫秒时间戳） */
+  at?: number;
+  cached?: boolean;
+  /** 联网失败，显示的是旧数据 */
+  stale?: boolean;
+}
+
+/** 首页：每日一图一句 */
+export interface DailyDTO {
+  /** yyyy-mm-dd */
+  date: string;
+  /** data URL；断网且从没下载过时为空，界面用渐变色代替 */
+  image?: string;
+  title?: string;
+  copyright?: string;
+  quote: { text: string; author?: string };
+}
+
+/** 应用更新状态 */
+export interface UpdateStateDTO {
+  state: "idle" | "checking" | "none" | "available" | "downloading" | "downloaded" | "error" | "unconfigured";
+  /** 当前版本 */
+  current: string;
+  /** 最新版本（检查成功后才有） */
+  latest?: string;
+  /** Release 说明 */
+  notes?: string;
+  /** Release 页面 */
+  url?: string;
+  /** 下载进度 0-100 */
+  percent?: number;
+  error?: string;
+  checkedAt?: number;
+  /** 生效的仓库（owner/repo） */
+  repo?: string;
+  /** 能否应用内下载并重启安装；否则「更新」会打开下载页 */
+  canAutoInstall: boolean;
+}
+
+export type IntegrationKind = "lark" | "meegle" | "dws";
+
+export interface IntegrationStatusDTO {
+  installed: boolean;
+  authenticated: boolean;
+  version?: string;
+  user?: string;
+  /** 飞书 open_id（lark） */
+  openId?: string;
+  host?: string;
+  detail?: string;
+}
+
+export interface IntegrationUpdateDTO {
+  supported: boolean;
+  ok: boolean;
+  current?: string;
+  latest?: string;
+  hasUpdate?: boolean;
+  url?: string;
+  message: string;
+}
+
+export interface HostProbeDTO {
+  ok: boolean;
+  user?: { name?: string; username?: string; email?: string; createdAt?: string; note?: string };
+  error?: string;
+}
+
+export interface RepoSyncDTO {
+  ok: boolean;
+  branch?: string;
+  base?: string;
+  switched: boolean;
+  pulled: boolean;
+  skipped?: string;
+  error?: string;
+}
+
+export interface RepoInfo {
+  name: string;
+  path: string;
+  url?: string;
+  platform?: string;
+  /** 基线分支（配置里填的，没填就是自动探测出来的默认分支）；找不到为空 */
+  base?: string;
+  status: RepoStatusDTO;
+}
+
+/** 工作台：待办（飞书项目 / 钉钉） */
+export interface TodoItemDTO {
+  id: string;
+  title: string;
+  source: "feishu" | "dingtalk";
+  due?: number;
+  start?: number;
+  end?: number;
+  node?: string;
+  overdue?: boolean;
+  sub?: string;
+  url?: string;
+  /** 进行中的需求（有我负责的进行中节点 / 子任务） */
+  active?: boolean;
+  /** 我在这个需求下负责的节点和子任务 */
+  children?: TodoChildDTO[];
+}
+export interface TodoChildDTO {
+  id: string;
+  title: string;
+  kind: "node" | "subtask";
+  /** 子任务所在的节点 */
+  parent?: string;
+  start?: number;
+  end?: number;
+  done?: boolean;
+  active?: boolean;
+  /** 人天 */
+  days?: number;
+  /** 负责人 */
+  owner?: string;
+  /** 排期是在本软件里填的（界面用，不来自飞书） */
+  local?: boolean;
+}
+export interface TodoSourceDTO {
+  enabled: boolean;
+  ok: boolean;
+  items: TodoItemDTO[];
+  error?: string;
+  /** 当前登录的账号 */
+  user?: string;
+}
+export interface WorkbenchTodosDTO {
+  feishu: TodoSourceDTO;
+  dingtalk: TodoSourceDTO;
+  /** 合并、排序后的待办 */
+  items: TodoItemDTO[];
+}
+
+export interface RepoInspectDTO {
+  ok: boolean;
+  error?: string;
+  root?: string;
+  name?: string;
+  url?: string;
+  branch?: string;
+  platform?: string;
+}
+
+export interface AppState {
+  home: string;
+  configFile: string;
+  configText: string;
+  configError?: string;
+  defaultProvider: string;
+  workspace: string;
+  traceDir: string;
+  providers: ProviderInfo[];
+  larkConfigured: boolean;
+  channel: ChannelStatus;
+}
+
+export interface ChannelStatus {
+  running: boolean;
+  logs: string[];
+}
+
+export interface RunRequest {
+  runKey: string;
+  input: string;
+  provider: string;
+  history: Msg[];
+  workspace?: string;
+  /** 只对本次覆盖该 provider 的默认模型 */
+  model?: string;
+  /** 本次不提供给模型的工具名 */
+  disabledTools?: string[];
+}
+
+export interface ToolInfo {
+  name: string;
+  /** 第一行说明 */
+  desc: string;
+  risk: "read" | "write" | "exec" | "network";
+}
+
+export interface McpToolDTO {
+  /** 原始工具名 */
+  name: string;
+  desc: string;
+  risk: "read" | "write" | "exec" | "network";
+  enabled: boolean;
+}
+
+export interface McpServerDTO {
+  name: string;
+  state: "disabled" | "idle" | "connecting" | "ready" | "error";
+  error?: string;
+  transport: "stdio" | "http";
+  /** 命令行或地址 */
+  target: string;
+  tools: McpToolDTO[];
+}
+
+export interface SkillDTO {
+  name: string;
+  description: string;
+  /** project：工作区；app：本应用新建；custom：自定义目录；user：用户目录 */
+  source: "project" | "app" | "custom" | "user";
+  dir: string;
+  enabled: boolean;
+  /** 只有应用内新建的技能可以在界面里编辑 / 删除 */
+  editable: boolean;
+}
+
+export interface RuleFileDTO {
+  file: string;
+  title: string;
+  kind: "always" | "optional";
+  description?: string;
+  chars: number;
+}
+
+export interface RunOutcome {
+  reason: "final" | "max_steps" | "aborted" | "error";
+  text: string;
+  error?: string;
+  steps: number;
+  tokens: number;
+  messages: Msg[];
+  traceFile: string;
+  runId: string;
+}
+
+export interface ApprovalRequest {
+  id: string;
+  runKey: string;
+  tool: string;
+  risk: string;
+  reason: string;
+  args: unknown;
+}
+
+export interface TraceInfo {
+  file: string;
+  name: string;
+  mtime: number;
+  size: number;
+  input: string;
+  provider: string;
+  /** 结束原因：final / error / aborted / max_steps，未结束为空 */
+  reason: string;
+}
+
+export interface TraceLineDTO {
+  ts: number;
+  event: HarnessEvent;
+}
+
+/** preload 暴露给渲染进程的 API（window.harness） */
+export interface HarnessApi {
+  getState(): Promise<AppState>;
+  saveConfig(text: string): Promise<{ ok: boolean; error?: string }>;
+  pickWorkspace(): Promise<string | null>;
+  pickFolder(title?: string): Promise<string | null>;
+  /** 已登记仓库及其当前状态（分支、未提交改动、领先/落后） */
+  listRepos(): Promise<RepoInfo[]>;
+  /** 这些仓库（配置里的名字）相对 HEAD 的改动行数合计 */
+  /** 自动化任务 */
+  automationList(): Promise<import("./automation").Automation[]>;
+  automationSave(input: Partial<import("./automation").Automation> & Pick<import("./automation").Automation, "name" | "prompt" | "schedule">): Promise<{ ok: boolean; id?: string; error?: string }>;
+  automationRemove(id: string): Promise<boolean>;
+  automationToggle(id: string, on: boolean): Promise<{ ok: boolean; error?: string }>;
+  automationRun(id: string): Promise<{ ok: boolean; error?: string }>;
+  automationAbort(id: string): Promise<void>;
+  /** 正在运行（含排队）的任务 id */
+  automationRunning(): Promise<string[]>;
+  onAutomationChanged(cb: () => void): () => void;
+  /** 「设置 → 连接」里新增 / 修改 / 删除 / 启停了连接 */
+  onConnectionsChanged(cb: () => void): () => void;
+  /** 指派给我的缺陷（飞书项目缺陷 / 钉钉待办），没接项目管理工具时 enabled=false */
+  defectsGet(): Promise<import("./defects").DefectsResult>;
+  defectsRefresh(): Promise<import("./defects").DefectsResult>;
+  /** 打开列表后调用：当前这些都算看过了（去掉「新」标记） */
+  defectsSeen(): Promise<void>;
+  defectsTransitions(key: string): Promise<import("./defects").DefectTransitions>;
+  defectsTransition(key: string, transitionId: string): Promise<import("./defects").DefectActResult>;
+  onDefectsChanged(cb: (r: import("./defects").DefectsResult) => void): () => void;
+  /** 点了系统通知：打开缺陷列表 */
+  onDefectsOpen(cb: () => void): () => void;
+  /** 关联仓库时同步到基线分支最新代码 */
+  repoSync(name: string): Promise<RepoSyncDTO>;
+  repoDiffStat(names: string[]): Promise<{ added: number; deleted: number; files: number }>;
+  /** 任务的专属文件夹；open=true 时同时在资源管理器里打开，返回路径 */
+  taskFolder(id: string, open?: boolean): Promise<string>;
+  /** 插件商店数据；refresh=true 时忽略缓存重新拉远程插件源 */
+  pluginMarket(refresh?: boolean): Promise<import("./plugins").MarketResult>;
+  /** 从链接下载插件包并解析（不安装） */
+  pluginFetchUrl(url: string): Promise<{ ok: boolean; entries?: import("./plugins").PluginEntry[]; skipped?: string[]; error?: string }>;
+  /** 让 DBX 弹出某个插件的安装确认 */
+  /** 把目录里的插件直接装到本软件（下载 + 校验 + 解压），不需要 DBX */
+  pluginInstall(id: string): Promise<{ ok: boolean; version?: string; error?: string }>;
+  pluginUninstall(id: string): Promise<{ ok: boolean; error?: string }>;
+  connectionList(): Promise<import("./connections").Connection[]>;
+  connectionSave(input: import("./connections").ConnectionInput): Promise<{ ok: boolean; conn?: import("./connections").Connection; error?: string }>;
+  connectionRemove(id: string): Promise<{ ok: boolean; error?: string }>;
+  connectionToggle(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>;
+  /** 测试连接（秘密留空时用已保存的），不会把秘密返回给界面 */
+  connectionTest(input: import("./connections").ConnectionInput): Promise<import("./connections").ConnTestResult>;
+  /** 「设置 → 代码托管」里有没有 GitLab 令牌，能不能一键建 GitLab 连接 */
+  gitlabHostsInfo(): Promise<{ hasToken: boolean; url: string; exists: boolean }>;
+  connectionFromHosts(): Promise<{ ok: boolean; conn?: import("./connections").Connection; error?: string }>;
+  /** 装本地选的 / 拖进来的 .dbxp 包（只能校验包内文件） */
+  pluginInstallPackage(bytes: Uint8Array): Promise<PluginInstallResult>;
+  /** 从链接安装 .dbxp */
+  pluginInstallUrl(url: string): Promise<PluginInstallResult>;
+  pluginRepos(): Promise<import("./plugins").PluginRepo[]>;
+  pluginRepoAdd(r: { id: string; name?: string; url: string }): Promise<{ ok: boolean; error?: string }>;
+  pluginRepoRemove(id: string): Promise<{ ok: boolean; error?: string }>;
+  pluginRepoToggle(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>;
+  pluginOpenDir(): Promise<{ ok: boolean; error?: string }>;
+  /** 数据库页：按「设置 → 连接」里的数据库连接浏览和修改（只有开发 / 测试环境的库能改） */
+  dbDatabases(connectionId: string): Promise<import("./db").DbResp<string[]>>;
+  dbSchemas(ref: import("./db").DbScopeRef): Promise<import("./db").DbResp<import("./db").DbSchemaInfo[]>>;
+  dbExtensions(ref: import("./db").DbScopeRef): Promise<import("./db").DbResp<import("./db").DbExtension[]>>;
+  dbEventTriggers(ref: import("./db").DbScopeRef): Promise<import("./db").DbResp<import("./db").DbEventTrigger[]>>;
+  dbTables(ref: import("./db").DbScopeRef): Promise<import("./db").DbResp<import("./db").DbTableInfo[]>>;
+  dbStructure(ref: import("./db").DbTableRef): Promise<import("./db").DbResp<import("./db").DbStructure>>;
+  dbData(req: import("./db").DbDataReq): Promise<import("./db").DbResp<import("./db").DbQueryResult>>;
+  dbCount(req: import("./db").DbDataReq): Promise<import("./db").DbResp<number>>;
+  dbQuery(req: import("./db").DbQueryRequest): Promise<import("./db").DbResp<import("./db").DbQueryResult>>;
+  dbApply(req: import("./db").DbApplyReq): Promise<import("./db").DbResp<import("./db").DbApplyResult>>;
+  /** 带界面的已装插件（右侧栏） */
+  pluginUiList(): Promise<import("./pluginhost").UiPlugin[]>;
+  /** 连接类插件（如 XXL-JOB）可选的连接，来自「设置 → 连接」 */
+  pluginConnections(id: string): Promise<import("./pluginhost").PluginConn[]>;
+  /** 用户确认信任并允许运行带本机程序的插件 */
+  pluginTrust(id: string, grants?: string[]): Promise<boolean>;
+  pluginDbAccess(id: string): Promise<import("./pluginhost").PluginDbAccess>;
+  pluginSetGrants(id: string, ids: string[]): Promise<void>;
+  /** 插件界面发来的请求（backend.invoke 等），由主进程转给插件后台 */
+  pluginRequest(id: string, method: string, params: unknown): Promise<import("./pluginhost").PluginReply>;
+  onPluginEvent(cb: (e: { id: string; method: string; params: unknown }) => void): () => void;
+  /** 工作台：我的待办（飞书项目 + 钉钉），没启用的来源 enabled=false */
+  workbenchTodos(): Promise<WorkbenchTodosDTO>;
+  inspectRepo(dir: string): Promise<RepoInspectDTO>;
+  cloneRepo(url: string, parentDir: string, name: string): Promise<{ ok: boolean; path?: string; error?: string }>;
+  openPath(p: string): Promise<void>;
+  /** 读 / 写数据目录下 .env 中的变量（API Key 放这里，不进配置文件） */
+  getSecret(name: string): Promise<string>;
+  setSecret(name: string, value: string): Promise<{ ok: boolean; error?: string }>;
+  /** 用（可能尚未保存的）Key 向服务商校验、取模型列表，并尽可能取回 Key 所属账号信息 */
+  listModels(req: { type: string; baseURL?: string; apiKey?: string }): Promise<KeyProbeDTO>;
+  /** 用（可能尚未保存的）令牌向代码托管平台查询所属账号 */
+  /** 当前可提供给模型的全部工具（对话框里「工具」下拉用） */
+  listTools(): Promise<ToolInfo[]>;
+  /** 某个已配置 provider 可选的模型列表（用它已保存的 Key 实时获取） */
+  providerModels(name: string, opts?: { refresh?: boolean; cacheOnly?: boolean }): Promise<KeyProbeDTO>;
+  /** 选择一个文件，返回绝对路径 */
+  pickFile(title?: string): Promise<string | null>;
+  /** 拖入窗口的文件对应的本地绝对路径 */
+  pathForFile(file: File): string;
+  /** 仓库的本地 + 远端分支名，用于分支下拉候选 */
+  listBranches(dir: string): Promise<string[]>;
+  probeGitHost(req: { platform: string; baseURL?: string; token?: string }): Promise<HostProbeDTO>;
+  /** 检测飞书项目 CLI（meegle）是否可用、是否已登录 */
+  feishuProjectStatus(): Promise<{ installed: boolean; authenticated: boolean; host?: string; version?: string; user?: string; detail?: string }>;
+  /** 集成卡片：lark-cli / meegle / dws 的版本、登录账号 */
+  integrationStatus(kind: IntegrationKind): Promise<IntegrationStatusDTO>;
+  /** 检查更新（lark-cli、dws 支持；meegle 没有更新检查接口） */
+  integrationCheckUpdate(kind: IntegrationKind): Promise<IntegrationUpdateDTO>;
+  /** 飞书项目里当前账号的空间列表（给「默认空间」下拉用） */
+  feishuSpaces(): Promise<{ ok: boolean; spaces?: Array<{ name: string; key: string; simpleName?: string }>; error?: string }>;
+  /** MCP 服务的连接状态与工具（会触发尚未连接的服务开始连接，界面轮询即可） */
+  mcpStatus(): Promise<McpServerDTO[]>;
+  mcpReconnect(name: string): Promise<McpServerDTO[]>;
+  listSkills(): Promise<SkillDTO[]>;
+  /** 技能的 SKILL.md 全文 */
+  readSkill(name: string): Promise<{ ok: boolean; content?: string; error?: string }>;
+  saveSkill(req: { name: string; description: string; content: string }): Promise<{ ok: boolean; error?: string }>;
+  deleteSkill(name: string): Promise<{ ok: boolean; error?: string }>;
+  /** 当前工作区里识别到的项目规则（AGENTS.md / .cursor/rules） */
+  rulesPreview(): Promise<RuleFileDTO[]>;
+  homeWeather(opts?: { refresh?: boolean; city?: string }): Promise<WeatherDTO>;
+  homeDaily(): Promise<DailyDTO>;
+  /** 首页「今日待办」：来自「待办 Todo」插件（没装 / 没信任时 state 不是 ok） */
+  homeTodos(): Promise<import("./todos").HomeTodosDTO>;
+  updateState(): Promise<UpdateStateDTO>;
+  /** 立即检查更新（设置改了仓库后也调这个） */
+  updateCheck(): Promise<UpdateStateDTO>;
+  /** 下载更新；不能应用内安装时打开 Release 页面 */
+  updateDownload(): Promise<UpdateStateDTO>;
+  /** 退出并安装已下载的更新 */
+  updateInstall(): Promise<void>;
+  onUpdate(cb: (s: UpdateStateDTO) => void): () => void;
+  /** 界面缩放（1 = 100%） */
+  setZoom(factor: number): Promise<void>;
+  /** 同步窗口标题栏按钮（最小化/最大化/关闭）的配色 */
+  setTheme(theme: "light" | "dark"): Promise<void>;
+
+  run(req: RunRequest): Promise<RunOutcome>;
+  abort(runKey: string): Promise<void>;
+  respondApproval(id: string, approved: boolean, remember: boolean): Promise<void>;
+
+  listTraces(): Promise<TraceInfo[]>;
+  readTrace(file: string): Promise<TraceLineDTO[]>;
+
+
+  channelStart(): Promise<{ ok: boolean; error?: string }>;
+  channelStop(): Promise<void>;
+
+  onRunEvent(cb: (runKey: string, event: HarnessEvent) => void): () => void;
+  onApproval(cb: (req: ApprovalRequest) => void): () => void;
+  onChannelLog(cb: (line: string) => void): () => void;
+}
+
+export interface PluginInstallResult {
+  ok: boolean;
+  id?: string;
+  name?: string;
+  version?: string;
+  error?: string;
+}

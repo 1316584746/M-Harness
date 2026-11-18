@@ -1,0 +1,35 @@
+{
+  "defaultProvider": "deepseek",
+  "workspace": ".",
+  "providers": {
+    "deepseek": {
+      "type": "openai-compat",
+      "baseURL": "https://api.deepseek.com",
+      "apiKey": "${DEEPSEEK_API_KEY}",
+      "model": "deepseek-chat"
+    },
+    "codex": { "type": "cli", "preset": "codex", "timeoutSec": 900 }
+  },
+  "channels": {
+    "server": { "host": "0.0.0.0", "port": 8787 },
+    "toolPolicy": "readonly",
+    "autoApprove": false,
+    "larkCli": {
+      "bin": "lark-cli",
+      "groupRequireMention": true,
+      "replyFormat": "markdown",
+      "allowUsers": []
+    },
+    "feishu": {
+      "appId": "${FEISHU_APP_ID}",
+      "appSecret": "${FEISHU_APP_SECRET}",
+      "verificationToken": "${FEISHU_VERIFICATION_TOKEN}",
+      "encryptKey": "${FEISHU_ENCRYPT_KEY}",
+      "groupRequireMention": true
+    },
+    "dingtalk": {
+      "appSecret": "${DINGTALK_APP_SECRET}",
+      "allowUsers": []
+    }
+  }
+}
