@@ -169,7 +169,8 @@ describe("GitLab：用「代码托管」里的令牌一键建连接", () => {
     fs.writeFileSync(path.join(home, "harness.config.json"), JSON.stringify({ defaultProvider: "x", providers: { x: { type: "openai-compat", baseURL: "http://127.0.0.1:1", apiKey: "k", model: "m" } }, gitHosts: { gitlab: { baseURL: "https://git.corp.local/gitlab/" } } }));
     const old = process.env.GITLAB_TOKEN;
     try {
-      delete process.env.GITLAB_TOKEN;
+      // 置空而不是删除：删了的话，读配置时会把项目目录里 .env 的真令牌又加载进来
+      process.env.GITLAB_TOKEN = "";
       const b = new Backend(home, { send() {} });
       expect(b.gitlabHostsInfo()).toEqual({ hasToken: false, url: "https://git.corp.local/gitlab", exists: false });
       expect((b.connectionFromHosts()).ok).toBe(false);

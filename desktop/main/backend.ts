@@ -5,13 +5,13 @@ import { LarkCliChannel } from "../../src/channels/lark-cli";
 import { SessionManager } from "../../src/channels/session";
 import { dropMockProviders, loadConfig, parseConfig, type HarnessConfig } from "../../src/config";
 import { readTrace } from "../../src/core/trace";
-import type { HarnessEvent, Tool } from "../../src/core/types";
+import type { AskAnswer, AskQuestion, HarnessEvent, Tool } from "../../src/core/types";
 import { McpManager } from "../../src/mcp/manager";
 import { loadProjectRules } from "../../src/prompt/rules";
 import { SKILL_NAME } from "../../src/prompt/skills";
 import { Runtime } from "../../src/runtime";
 import { probeKey } from "../../src/models/probe";
-import { dwsCheckUpdate, dwsStatus, larkCheckUpdate, larkStatus } from "../../src/tools/cli-status";
+import { dwsCheckUpdate, dwsStatus, installCli, larkCheckUpdate, larkStatus, loginCli, type LoginHooks } from "../../src/tools/cli-status";
 import { feishuProjectSpaces, feishuProjectStatus } from "../../src/tools/feishu-project";
 import { PluginMarket } from "./plugins";
 import { AutomationEngine, type RunResult } from "./automation";
@@ -19,19 +19,28 @@ import { DefectWatcher } from "./defects";
 import { dingtalkTransition, dingtalkTransitions, feishuTransition, feishuTransitions, fetchDingtalkDefects, fetchFeishuDefects } from "./defects-source";
 import { ENTRY_NAME, type DefectActResult, type DefectsResult, type DefectTransitions } from "../shared/defects";
 import { DbxBridge } from "./dbx";
+import { DshPlugins } from "./dsh-host";
+import { netError } from "./neterr";
 import { PluginHost } from "./pluginhost";
+import { PluginAi, type AiHost } from "./plugin-ai";
 import { ConnectionStore, plainBox, type SecretBox } from "./connections";
 import { testConnection } from "./conn-test";
 import { DbEngine } from "./db-engine";
 import { DEFAULTS, type ConnTestResult, type Connection, type ConnectionInput } from "../shared/connections";
-import { PluginRepos } from "./pluginrepos";
+import { lostRepos, REPOS_BACKUP } from "./config-guard";
+import { checkRepoUrl, PluginRepos, seedRepos } from "./pluginrepos";
 import type { PluginReply, UiPlugin } from "../shared/pluginhost";
 import { TODO_PLUGIN_ID, pickTodayTodos, type HomeTodosDTO } from "../shared/todos";
 import type { Automation } from "../shared/automation";
-import { DBX_CATALOG_URL, DBX_SOURCE, type MarketResult, type PluginRepo } from "../shared/plugins";
-import { fetchDingtalkTodos, fetchFeishuTodos, sortTodos, type TodoSource } from "../../src/tools/workbench";
+import { applyInstall, applyUninstall, DBX_CATALOG_URL, installedOf, isForeignId, OFFICIAL_REPO_URL, parseMarketplace, partsText, type LocalPluginInfo, type MarketResult, type PluginEntry, type PluginRepo, type PlatformInfo, type ResourceItem, type ResourceScan } from "../shared/plugins";
+import { BUNDLED } from "./plugin-catalog";
+import { importGithubRepo, parseGithubUrl } from "./repo-import";
+import { copySkillFiles, PLATFORM_IDS, PLATFORM_NAME, platformFound, scanLocalFolder, scanPlatform, type LocalScan, type PlatformId } from "./local-import";
+import { createChat, fetchWorkItemChat, inspectChat, parseChatRef, type WorkChat } from "../../src/tools/work-chat";
+import { fetchDingtalkTodos, fetchFeishuTodos, sortTodos, updateFeishuSubtask, type SubtaskResult, type SubtaskUpdate, type TodoSource } from "../../src/tools/workbench";
+import { patchChild } from "../shared/todoPatch";
 import { cloneRepo, detectBaseBranch, diffStat, inspectRepo, listBranches, repoStatus, syncBaseBranch } from "../../src/tools/git";
-import { authEnvFor, probeHost } from "../../src/tools/git-hosts";
+import { authEnvFor, hostEnabled, probeHost } from "../../src/tools/git-hosts";
 import type {
   AppState,
   ApprovalRequest,
@@ -108,6 +117,8 @@ export class Backend {
   private runs = new Map<string, AbortController>();
   private pending = new Map<string, Pending>();
   private alwaysAllow = new Set<string>();
+  private asks = new Map<string, { runKey: string; questions: AskQuestion[]; resolve: (a: AskAnswer[] | null) => void }>();
+  private askSeq = 0;
   private approvalSeq = 0;
   private lark?: LarkCliChannel;
   private channelLogs: string[] = [];
@@ -143,11 +154,11 @@ export class Backend {
   private reload(): void {
     try {
       const { config } = loadConfig(this.configFile);
-      this.rt = new Runtime(config, { mcp: this.mcp, home: this.home });
+      this.rt = new Runtime(config, { mcp: this.mcp, home: this.home, extra: this.pluginAiExtra });
       this.configError = undefined;
     } catch (e: any) {
       this.configError = e?.message ?? String(e);
-      this.rt ??= new Runtime(parseConfig({}), { mcp: this.mcp, home: this.home });
+      this.rt ??= new Runtime(parseConfig({}), { mcp: this.mcp, home: this.home, extra: this.pluginAiExtra });
     }
   }
 
@@ -184,11 +195,23 @@ export class Backend {
     };
   }
 
+  /** 配置文件当前的原文（界面改配置前重新读一遍，避免用过期的副本把别处刚改的盖掉） */
+  configText(): string {
+    return fs.readFileSync(this.configFile, "utf8");
+  }
+
   saveConfig(text: string): { ok: boolean; error?: string } {
     try {
       parseConfig(JSON.parse(text.replace(/^\uFEFF/, "")));
     } catch (e: any) {
       return { ok: false, error: e?.issues ? JSON.stringify(e.issues.slice(0, 3), null, 2) : (e?.message ?? String(e)) };
+    }
+    // 这次保存会让已登记的仓库变少：先把旧文件留一份（单个仓库被「移除」也会留，只留最近一次）
+    try {
+      const prev = fs.readFileSync(this.configFile, "utf8");
+      if (lostRepos(prev, text).length) fs.writeFileSync(path.join(this.home, REPOS_BACKUP), prev, "utf8");
+    } catch {
+      // 读不到旧文件就不备份，不挡保存
     }
     fs.writeFileSync(this.configFile, text, "utf8");
     const wasRunning = !!this.lark;
@@ -291,6 +314,23 @@ export class Backend {
     return { supported: false, ok: true, message: "meegle 没有提供更新检查，请到官方文档查看新版本" };
   }
 
+  /** 一键安装 / 升级官方 CLI（npm install -g）。登录仍需用户在终端完成 */
+  integrationInstall(kind: string) {
+    return installCli(kind, this.cliSpec(kind).bin);
+  }
+
+  /** 一键登录：走官方设备授权 / OAuth，链接由 hooks 交给界面打开；同一个 CLI 同时只允许一个登录流程 */
+  private loggingIn = new Set<string>();
+  async integrationLogin(kind: string, hooks: LoginHooks) {
+    if (this.loggingIn.has(kind)) return { ok: false, message: "已经有一个登录流程在进行" };
+    this.loggingIn.add(kind);
+    try {
+      return await loginCli(kind, this.cliSpec(kind), hooks);
+    } finally {
+      this.loggingIn.delete(kind);
+    }
+  }
+
   /** 工作台：只读拉取飞书项目 / 钉钉的待办；没启用的来源不调用 CLI */
   async workbenchTodos() {
     const fp = this.config.integrations.feishuProject;
@@ -300,7 +340,70 @@ export class Backend {
       fp ? fetchFeishuTodos(fp) : off,
       dp ? fetchDingtalkTodos({ ...dp, bin: this.config.integrations.dingtalk?.bin ?? "dws" }) : off,
     ]);
-    return { feishu, dingtalk, items: sortTodos([...feishu.items, ...dingtalk.items]) };
+    const res = { feishu, dingtalk, items: sortTodos([...feishu.items, ...dingtalk.items]) };
+    // 读成功的才落盘：下次打开工作台先显示这份，再在后台刷新（读一遍要十几秒）
+    if (feishu.ok || dingtalk.ok) {
+      try {
+        fs.writeFileSync(path.join(this.home, "workbench-cache.json"), JSON.stringify({ at: Date.now(), ...res }), "utf8");
+      } catch {
+        /* 缓存写不了不影响使用 */
+      }
+    }
+    return res;
+  }
+
+  /** 工作台：在飞书项目里完成 / 回滚子任务、改子任务排期（只有接了飞书项目才能用）；成功后把本地缓存也改成最新的 */
+  async workbenchSubtaskUpdate(req: SubtaskUpdate): Promise<SubtaskResult> {
+    const fp = this.config.integrations.feishuProject;
+    if (!fp) return { ok: false, error: "还没有接入飞书项目" };
+    const r = await updateFeishuSubtask(fp, req);
+    if (r.child) {
+      const cache = this.workbenchTodosCached();
+      if (cache) {
+        try {
+          const items = patchChild(cache.feishu.items as never, req.wid, req.subId, r.child) as unknown as typeof cache.feishu.items;
+          const merged = { ...cache, feishu: { ...cache.feishu, items }, items: patchChild(cache.items as never, req.wid, req.subId, r.child) as unknown as typeof cache.items };
+          fs.writeFileSync(path.join(this.home, "workbench-cache.json"), JSON.stringify(merged), "utf8");
+        } catch {
+          /* 缓存没改成只影响下次先显示的内容，刷新后会更新 */
+        }
+      }
+    }
+    return r;
+  }
+
+  /** 需求对应的飞书群（群 id 来自飞书项目的「拉群方式」字段，群名来自 lark-cli；群名读不到不影响） */
+  async workItemChat(req: { projectKey?: string; wid: string; url?: string; chatId?: string }): Promise<WorkChat> {
+    const lc = this.config.channels.larkCli;
+    const lark = lc ? { bin: lc.bin, binArgs: lc.binArgs } : undefined;
+    // 手动关联过群：直接查这个群，不再看飞书项目里的默认群
+    if (typeof req?.chatId === "string" && req.chatId) {
+      const id = parseChatRef(req.chatId);
+      return id ? inspectChat(lark, id) : { ok: false, error: "群 ID 格式不对，应该是 oc_ 开头的一串字母数字（也可以直接贴群链接）" };
+    }
+    const fp = this.config.integrations.feishuProject;
+    if (!fp) return { ok: false, error: "还没有接入飞书项目" };
+    return fetchWorkItemChat(fp, lark, {
+      projectKey: typeof req?.projectKey === "string" ? req.projectKey : undefined,
+      wid: String(req?.wid ?? ""),
+      url: typeof req?.url === "string" ? req.url : undefined,
+    });
+  }
+
+  /** 新建一个飞书群（以 lark-cli 当前登录的用户身份）并返回群信息；群 ID 由调用方存到任务上 */
+  async workItemChatCreate(req: { name: string; description?: string }): Promise<WorkChat> {
+    const lc = this.config.channels.larkCli;
+    return createChat(lc ? { bin: lc.bin, binArgs: lc.binArgs } : undefined, { name: String(req?.name ?? ""), description: typeof req?.description === "string" ? req.description : undefined });
+  }
+
+  /** 工作台待办：上一次读成功的结果（立即返回，没有就是 null）。只用来先显示，不代替 workbenchTodos */
+  workbenchTodosCached(): (Awaited<ReturnType<Backend["workbenchTodos"]>> & { at: number }) | null {
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(this.home, "workbench-cache.json"), "utf8"));
+      return j && typeof j.at === "number" && j.feishu && j.dingtalk && Array.isArray(j.items) ? j : null;
+    } catch {
+      return null;
+    }
   }
 
   private market = new PluginMarket();
@@ -341,7 +444,7 @@ export class Backend {
   /** 「设置 → 代码托管」里配过 GitLab 令牌吗？有的话可以一键建 GitLab 连接（令牌只在主进程里搬，不经过界面） */
   gitlabHostsInfo(): { hasToken: boolean; url: string; exists: boolean } {
     const url = (this.config.gitHosts?.gitlab?.baseURL || "https://gitlab.com").trim().replace(/\/+$/, "");
-    return { hasToken: !!this.getSecret("GITLAB_TOKEN"), url, exists: this.connections.list().some(c => c.kind === "gitlab" && c.name === Backend.HOSTS_GITLAB_NAME) };
+    return { hasToken: !!this.getSecret("GITLAB_TOKEN") && hostEnabled(this.config.gitHosts, "gitlab"), url, exists: this.connections.list().some(c => c.kind === "gitlab" && c.name === Backend.HOSTS_GITLAB_NAME) };
   }
 
   connectionFromHosts(): { ok: boolean; conn?: Connection; error?: string } {
@@ -413,23 +516,31 @@ export class Backend {
 
   private _repos?: PluginRepos;
   get pluginRepos(): PluginRepos {
-    return (this._repos ??= new PluginRepos(path.join(this.home, "plugin-repos.json"), {
-      id: "dbx",
-      name: DBX_SOURCE,
-      url: process.env.HARNESS_DBX_CATALOG || DBX_CATALOG_URL,
-      official: true,
-      enabled: true,
-    }));
+    // 起步预置官方仓库和 DBX 仓库；之后和别的仓库一样随便停用、删除。
+    // HARNESS_DBX_CATALOG / HARNESS_OFFICIAL_REPO（填 none 表示不预置）只在测试里用，让它们不联网
+    const off = process.env.HARNESS_OFFICIAL_REPO;
+    return (this._repos ??= new PluginRepos(path.join(this.home, "plugin-repos.json"), seedRepos(process.env.HARNESS_DBX_CATALOG || DBX_CATALOG_URL, off === "none" ? null : off || OFFICIAL_REPO_URL)));
   }
 
   pluginRepoList(): PluginRepo[] {
     return this.pluginRepos.list();
   }
 
-  async pluginRepoAdd(input: { id: string; name?: string; url: string }): Promise<{ ok: boolean; error?: string }> {
+  async pluginRepoAdd(input: { id?: string; name?: string; url: string }): Promise<{ ok: boolean; error?: string }> {
     try {
       this.pluginRepos.add(input);
       return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** 测试一个仓库地址：真的去读一次它的插件目录（不保存、不进缓存），成功给出插件数和几个名字，失败给原因 */
+  async pluginRepoTest(input: { name?: string; url: string }): Promise<{ ok: boolean; count?: number; names?: string[]; error?: string }> {
+    try {
+      const url = checkRepoUrl(String(input.url ?? ""));
+      const got = await this.dbx.testRepo({ id: "test", name: String(input.name ?? "").trim() || "测试", url, enabled: true });
+      return { ok: true, count: got.entries.length, names: got.entries.slice(0, 5).map(e => e.name) };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -477,16 +588,302 @@ export class Backend {
 
   private _dbx?: DbxBridge;
   private get dbx(): DbxBridge {
-    return (this._dbx ??= new DbxBridge(fetch, { extraRepos: () => this.pluginRepos.extra(), localDir: process.env.HARNESS_PLUGINS_DIR || path.join(this.home, "plugins"), catalogUrl: process.env.HARNESS_DBX_CATALOG || undefined, dataDir: process.env.HARNESS_DBX_DIR || undefined, mcp: process.env.HARNESS_DBX_MCP ? { command: process.env.HARNESS_DBX_MCP, args: [] } : undefined }));
+    return (this._dbx ??= new DbxBridge(fetch, { repos: () => this.pluginRepos.extra(), localDir: process.env.HARNESS_PLUGINS_DIR || path.join(this.home, "plugins"), catalogUrl: process.env.HARNESS_DBX_CATALOG || undefined, dataDir: process.env.HARNESS_DBX_DIR || undefined, mcp: process.env.HARNESS_DBX_MCP ? { command: process.env.HARNESS_DBX_MCP, args: [] } : undefined }));
   }
 
-  /** 插件商店：DBX 官方插件中心的插件，并带上本机 DBX 的情况（技能 / MCP / 规则 / 动作不是插件，在设置里管理） */
+  /** 插件商店：已启用的各个仓库里的插件（.dbxp），并带上本机 DBX 的情况。技能 / MCP / 规则 / 动作不是插件，在各自的设置页里管理 */
   async pluginMarket(refresh = false): Promise<MarketResult> {
     const r: MarketResult = { entries: [], errors: [], dbx: this.dbx.info() };
     const rep = await this.dbx.catalogReport(refresh);
     r.entries = rep.entries;
     r.errors.push(...rep.errors);
+    // 别家的插件（DSH、Codex、Claude）也放进「已安装」这张表里，界面不用分开处理
+    r.dbx!.local = { ...r.dbx!.local, ...this.dsh.localInfo(), ...this.bundleLocalInfo() };
     return r;
+  }
+
+  /** 已装的插件包（Codex / Claude）：从配置里的安装记录读 */
+  private bundleLocalInfo(): Record<string, LocalPluginInfo> {
+    const out: Record<string, LocalPluginInfo> = {};
+    let cfg: Record<string, any>;
+    try {
+      cfg = this.readConfigObj();
+    } catch {
+      return out;
+    }
+    const all = installedOf(cfg);
+    for (const [id, rec] of Object.entries(all)) {
+      if (rec.kind !== "bundle") continue;
+      const parts = { skills: 0, mcp: 0, actions: 0, rules: 0 };
+      for (const m of rec.members ?? []) {
+        const k = all[m]?.kind;
+        if (k === "skill") parts.skills++;
+        else if (k === "mcp") parts.mcp++;
+        else if (k === "action") parts.actions++;
+        else if (k === "rule") parts.rules++;
+      }
+      out[id] = { version: rec.version ?? "", name: rec.name, ecosystem: rec.ecosystem, summary: `已装进本软件：${partsText(parts)}（可到对应的设置页里单独开关或删除）`, ui: false, backend: false, permissions: [], kinds: ["bundle"], tools: 0 };
+    }
+    return out;
+  }
+
+  private _dsh?: DshPlugins;
+  /** DSH 插件：安装和运行（装在 <数据目录>/dsh） */
+  get dsh(): DshPlugins {
+    return (this._dsh ??= new DshPlugins({ dir: process.env.HARNESS_DSH_DIR || path.join(this.home, "dsh"), consentFile: path.join(this.home, "dsh-consent.json") }));
+  }
+
+  /** 装一个 Codex / Claude 插件包：把里面的技能、MCP、动作、规则拆开写进本软件的配置 */
+  private async installBundle(id: string): Promise<{ version?: string; note?: string }> {
+    const entry = await this.dbx.findEntry(id);
+    if (!entry || entry.install.kind !== "bundle") throw new Error("插件目录里没有这个插件");
+    const got = await this.dbx.loadItems(id);
+    if (!got?.items.length) throw new Error(`这个插件包里没有本软件能用的内容（技能、MCP、命令、规则）${got?.notes.length ? `：${got.notes.slice(0, 2).join("；")}` : ""}`);
+    const items = got.items;
+    const cfg = this.readConfigObj();
+    const prev = installedOf(cfg)[id];
+    const members: string[] = [];
+    const notes: string[] = [...got.notes];
+    const skills: Array<{ it: PluginEntry }> = [];
+    for (const it of items) {
+      const ins = it.install;
+      if (ins.kind === "dbx" || ins.kind === "dsh" || ins.kind === "bundle") continue;
+      if (ins.kind === "skill" && !installedOf(cfg)[it.key] && fs.existsSync(path.join(this.skillsDir, ins.name))) {
+        notes.push(`技能「${ins.name}」本地已有同名的，没覆盖`);
+        continue;
+      }
+      applyInstall(cfg, it);
+      members.push(it.key);
+      if (ins.kind === "skill") skills.push({ it });
+    }
+    if (!members.length) throw new Error(notes.join("；") || "没有可以装的内容");
+    // 更新：新版本里没有了的旧内容一并清掉
+    for (const old of prev?.members ?? []) {
+      if (members.includes(old)) continue;
+      const r = applyUninstall(cfg, old);
+      if (r?.kind === "skill") this.removeSkillDir(r.ref);
+    }
+    cfg.plugins.installed[id] = { kind: "bundle", name: entry.name, version: entry.version, ref: id, at: Date.now(), members, ecosystem: entry.ecosystem };
+    const saved = this.saveConfig(JSON.stringify(cfg, null, 2));
+    if (!saved.ok) throw new Error(saved.error ?? "写入配置失败");
+    for (const { it } of skills) {
+      const ins = it.install as Extract<PluginEntry["install"], { kind: "skill" }>;
+      const w = this.saveSkill({ name: ins.name, description: ins.description, content: ins.content });
+      if (!w.ok) throw new Error(w.error);
+      const failed = await this.downloadSkillFiles(path.join(this.skillsDir, ins.name), ins.files ?? []);
+      if (failed.length) notes.push(`技能「${ins.name}」有 ${failed.length} 个附带文件没下载下来`);
+    }
+    return { version: entry.version, note: notes.length ? notes.join("；") : undefined };
+  }
+
+  private removeSkillDir(name: string): void {
+    const root = path.resolve(this.skillsDir);
+    const dir = path.resolve(root, name);
+    if (dir.startsWith(root + path.sep)) fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  private uninstallBundle(id: string): boolean {
+    const cfg = this.readConfigObj();
+    const rec = installedOf(cfg)[id];
+    if (!rec || rec.kind !== "bundle") return false;
+    for (const m of rec.members ?? []) {
+      const r = applyUninstall(cfg, m);
+      if (r?.kind === "skill") this.removeSkillDir(r.ref);
+    }
+    delete cfg.plugins.installed[id];
+    const saved = this.saveConfig(JSON.stringify(cfg, null, 2));
+    if (!saved.ok) throw new Error(saved.error ?? "写入配置失败");
+    return true;
+  }
+
+  // ───────── 技能 / MCP / 规则 / 动作的「推荐」和「从 GitHub 导入」（不是插件，各在自己的设置页里用） ─────────
+
+  private resourceEntries = new Map<string, PluginEntry>();
+  private resourceScans = new Map<string, { at: number; entries: PluginEntry[]; skipped: string[] }>();
+
+  /** 这一项现在是不是还在配置里（用户在页面里删掉后，安装记录还在，所以要看实际有没有） */
+  private resourcePresent(cfg: Record<string, any>, rec: { kind: string; ref: string }): boolean {
+    if (rec.kind === "mcp") return !!cfg.mcpServers?.[rec.ref];
+    if (rec.kind === "action") return (cfg.actions ?? []).some((a: any) => a.id === rec.ref);
+    if (rec.kind === "rule") return (cfg.rules?.items ?? []).some((r: any) => r.id === rec.ref);
+    return fs.existsSync(path.join(this.skillsDir, rec.ref));
+  }
+
+  private toResourceItems(entries: PluginEntry[]): ResourceItem[] {
+    const cfg = this.readConfigObj();
+    const out: ResourceItem[] = [];
+    for (const e of entries) {
+      if (e.kind === "dbx" || e.kind === "dsh" || e.kind === "bundle") continue;
+      this.resourceEntries.set(e.key, e);
+      const rec = installedOf(cfg)[e.key];
+      out.push({
+        key: e.key,
+        kind: e.kind,
+        name: e.name,
+        description: e.description,
+        author: e.author,
+        tags: e.tags,
+        source: e.source,
+        homepage: e.homepage,
+        note: e.install.kind === "mcp" ? e.install.note : undefined,
+        added: !!rec && this.resourcePresent(cfg, rec),
+      });
+    }
+    return out;
+  }
+
+  /** 软件自带的推荐（常用的 MCP、技能、动作、规则）：哪一页就给哪一类 */
+  resourceRecommended(kind: string): ResourceItem[] {
+    return this.toResourceItems(BUNDLED.filter(e => e.kind === kind));
+  }
+
+  /** 从 GitHub 仓库（链接或 owner/repo）或资源文件的直链里找技能 / MCP / 动作 / 规则；一次扫描的结果缓存 10 分钟 */
+  async resourceScan(input: string): Promise<ResourceScan> {
+    try {
+      const raw = String(input ?? "").trim();
+      if (!raw) return { ok: false, error: "请填 GitHub 仓库链接（或 owner/repo）" };
+      const hit = this.resourceScans.get(raw);
+      if (hit && Date.now() - hit.at < 10 * 60_000) return { ok: true, items: this.toResourceItems(hit.entries), skipped: hit.skipped };
+      const gh = parseGithubUrl(raw);
+      let got: { entries: PluginEntry[]; skipped: string[] };
+      if (gh) {
+        const name = `${gh.owner}/${gh.repo}${gh.dir ? `/${gh.dir}` : ""}`;
+        got = await importGithubRepo(fetch, gh, name, () => {
+          throw new Error("这是 DBX 插件目录，里面是插件不是技能 / MCP，请到「插件中心 → 设置 → 插件仓库」里添加");
+        });
+      } else {
+        const url = checkRepoUrl(raw);
+        const res = await fetch(url, { signal: AbortSignal.timeout(20_000), headers: { accept: "application/json" } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        if (text.length > 2_000_000) throw new Error("文件太大（超过 2MB）");
+        let json: unknown;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          throw new Error("这个地址返回的不是 JSON 文件。请填 GitHub 仓库链接，或资源文件本身的直链");
+        }
+        const host = new URL(url).host;
+        const p = parseMarketplace(json, host);
+        got = { entries: p.entries, skipped: p.skipped };
+      }
+      this.resourceScans.set(raw, { at: Date.now(), ...got });
+      return { ok: true, items: this.toResourceItems(got.entries), skipped: got.skipped };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** 本机来源的技能：条目 key → 技能所在的本机文件夹（添加时把附带文件拷过来） */
+  private localSkillDirs = new Map<string, string>();
+
+  private fromLocal(scan: LocalScan, source: string): ResourceScan {
+    const p = parseMarketplace(scan.raw, source);
+    for (const e of p.entries) {
+      const dir = scan.skillDirs.get(e.id);
+      if (dir) this.localSkillDirs.set(e.key, dir);
+    }
+    return { ok: true, items: this.toResourceItems(p.entries), skipped: [...scan.notes, ...p.skipped] };
+  }
+
+  /** 「加载」：用户选一个本机文件夹，在里面找技能 / MCP / 动作 / 规则 */
+  async resourceScanLocal(dir: string): Promise<ResourceScan> {
+    try {
+      const d = String(dir ?? "").trim();
+      if (!d) return { ok: false, error: "请选择一个文件夹" };
+      return this.fromLocal(await scanLocalFolder(d), `本机:${d}`);
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** 「设置 → 模型」里添加过账号的平台（Cursor / Claude Code / Codex） */
+  private configuredPlatforms(): Set<PlatformId> {
+    const out = new Set<PlatformId>();
+    for (const c of Object.values(this.config.providers) as any[]) {
+      if (c?.type === "cursor-sdk") out.add("cursor");
+      else if (c?.type === "cli") {
+        const cmd = String(c.command ?? "").toLowerCase();
+        if (c.preset === "codex" || /codex/.test(cmd)) out.add("codex");
+        else if (c.preset === "claude-code" || /claude/.test(cmd)) out.add("claude");
+        else if (c.preset === "cursor-cli" || /cursor/.test(cmd)) out.add("cursor");
+      }
+    }
+    return out;
+  }
+
+  /** 「同步」能选的平台：哪些添加过账号、本机上有没有它的目录 */
+  resourceSyncPlatforms(): PlatformInfo[] {
+    const have = this.configuredPlatforms();
+    return PLATFORM_IDS.map(id => ({ id, name: PLATFORM_NAME[id], configured: have.has(id), found: platformFound(id) }));
+  }
+
+  /** 「同步」：列出这个平台在本机已经有的技能 / MCP / 动作 / 规则，让用户挑着同步过来 */
+  async resourceSyncScan(id: string): Promise<ResourceScan> {
+    try {
+      if (!(PLATFORM_IDS as string[]).includes(id)) return { ok: false, error: "不认识这个平台" };
+      return this.fromLocal(await scanPlatform(id as PlatformId), `同步:${PLATFORM_NAME[id as PlatformId]}`);
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  private readConfigObj(): Record<string, any> {
+    return JSON.parse(fs.readFileSync(this.configFile, "utf8").replace(/^\uFEFF/, "") || "{}");
+  }
+
+  /** 添加一项推荐 / 导入的技能、MCP、动作、规则：写进本软件的配置（技能同时写 SKILL.md） */
+  async resourceAdd(key: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const entry = this.resourceEntries.get(key);
+      if (!entry) return { ok: false, error: "找不到这一项了，请重新扫描一次" };
+      if (entry.install.kind === "dbx" || entry.install.kind === "dsh" || entry.install.kind === "bundle") return { ok: false, error: "这是插件，请到插件中心安装" };
+      const cfg = this.readConfigObj();
+      const ins = entry.install;
+      if (ins.kind === "skill" && !installedOf(cfg)[key] && fs.existsSync(path.join(this.skillsDir, ins.name))) {
+        return { ok: false, error: `已经有一个叫「${ins.name}」的技能了，先把它删掉或改名，免得被覆盖` };
+      }
+      applyInstall(cfg, entry);
+      const saved = this.saveConfig(JSON.stringify(cfg, null, 2));
+      if (!saved.ok) return { ok: false, error: saved.error ?? "写入配置失败" };
+      if (ins.kind === "skill") {
+        const w = this.saveSkill({ name: ins.name, description: ins.description, content: ins.content });
+        if (!w.ok) return { ok: false, error: w.error };
+        const localDir = this.localSkillDirs.get(key);
+        const skipped = localDir ? copySkillFiles(localDir, path.join(this.skillsDir, ins.name)) : await this.downloadSkillFiles(path.join(this.skillsDir, ins.name), ins.files ?? []);
+        if (skipped.length) return { ok: true, error: `技能已添加，但有 ${skipped.length} 个附带文件没${localDir ? "拷" : "下载"}过来：${skipped.slice(0, 3).join("、")}` };
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** 把技能文件夹里的附带文件（脚本、参考资料）下载到技能目录；返回没下下来的文件。每个最大 1MB，总共最多 8MB */
+  private async downloadSkillFiles(dir: string, files: Array<{ path: string; url: string }>): Promise<string[]> {
+    const failed: string[] = [];
+    let total = 0;
+    const root = path.resolve(dir);
+    for (const f of files) {
+      try {
+        const target = path.resolve(root, f.path);
+        if (!target.startsWith(root + path.sep)) throw new Error("路径不安全");
+        let res = await fetch(f.url, { signal: AbortSignal.timeout(20_000) }).catch(() => undefined);
+        if (!res?.ok) {
+          // raw.githubusercontent.com 连不上时换 jsDelivr 的镜像：raw.../owner/repo/ref/path → cdn.jsdelivr.net/gh/owner/repo@ref/path
+          const m = /^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/.exec(f.url);
+          res = m ? await fetch(`https://cdn.jsdelivr.net/gh/${m[1]}/${m[2]}@${m[3]}/${m[4]}`, { signal: AbortSignal.timeout(20_000) }) : res;
+        }
+        if (!res?.ok) throw new Error(`HTTP ${res?.status ?? "连不上"}`);
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > 1_000_000 || (total += buf.length) > 8_000_000) throw new Error("文件太大");
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, buf);
+      } catch {
+        failed.push(f.path);
+      }
+    }
+    return failed;
   }
 
   private _pluginHost?: PluginHost;
@@ -511,6 +908,33 @@ export class Backend {
     }));
   }
 
+  private _pluginAi?: PluginAi;
+  /** 让 AI 使用已装插件的工具（开关记在 plugin-ai.json） */
+  get pluginAi(): PluginAi {
+    return (this._pluginAi ??= new PluginAi(() => this.aiHost, path.join(this.home, "plugin-ai.json")));
+  }
+
+  /** AI 能用的插件来自两处：DBX 插件（PluginHost）和 DSH 插件（DshPlugins），按 id 前缀分流 */
+  private aiHost: AiHost = {
+    aiPlugins: () => [...this.pluginHost.aiPlugins(), ...this.dsh.aiPlugins()],
+    aiTools: id => (id.startsWith("dsh:") ? this.dsh.aiTools(id) : this.pluginHost.aiTools(id)),
+    aiCall: (id, tool, args, conn, timeoutMs) => (id.startsWith("dsh:") ? this.dsh.aiCall(id, tool, args, conn, timeoutMs) : this.pluginHost.aiCall(id, tool, args, conn, timeoutMs)),
+  };
+
+  /** 交给 Runtime 的：用到时才建插件运行时，没开 AI 使用时什么都不做 */
+  private pluginAiExtra = {
+    tools: () => this.pluginAi.tools(),
+    prepare: () => this.pluginAi.prepare(),
+  };
+
+  pluginAiList(): Promise<import("../shared/pluginhost").PluginAiInfo[]> {
+    return this.pluginAi.list();
+  }
+
+  pluginAiSet(id: string, on: boolean): void {
+    this.pluginAi.setEnabled(String(id), !!on);
+  }
+
   /** 连接类插件可选的连接 */
   pluginConnections(id: string): import("../shared/pluginhost").PluginConn[] {
     return this.pluginHost.connectionsFor(id);
@@ -531,6 +955,7 @@ export class Backend {
   }
 
   pluginTrust(id: string, grants?: string[]): boolean {
+    if (isForeignId(id)) return this.dsh.trust(id);
     return this.pluginHost.trust(id, Array.isArray(grants) ? grants.map(String) : undefined);
   }
 
@@ -557,17 +982,32 @@ export class Backend {
   }
 
   /** 直接把目录里的插件装到本软件的插件目录（下载 + 校验 + 解压），不需要 DBX */
-  async pluginInstall(id: string): Promise<{ ok: boolean; version?: string; error?: string }> {
+  async pluginInstall(id: string): Promise<{ ok: boolean; version?: string; note?: string; error?: string }> {
     try {
+      if (isForeignId(id)) {
+        if (id.startsWith("dsh:")) {
+          const e = await this.dbx.findEntry(id);
+          if (!e) throw new Error("插件目录里没有这个插件");
+          this.pluginAi.forget(id);
+          const version = await this.dsh.install(e);
+          return { ok: true, version, note: this.dsh.noteOf(id) };
+        }
+        return { ok: true, ...(await this.installBundle(id)) };
+      }
       await this._pluginHost?.stop(id); // 更新时先停掉后台程序，不然文件被占用
       return { ok: true, version: await this.dbx.install(id) };
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      return { ok: false, error: netError(e) };
     }
   }
 
   async pluginUninstall(id: string): Promise<{ ok: boolean; error?: string }> {
     try {
+      if (isForeignId(id)) {
+        const done = id.startsWith("dsh:") ? await this.dsh.uninstall(id) : this.uninstallBundle(id);
+        if (done) this.pluginAi.forget(id, true);
+        return done ? { ok: true } : { ok: false, error: "本软件里没有装这个插件" };
+      }
       await this._pluginHost?.stop(id);
       return this.dbx.uninstall(id) ? { ok: true } : { ok: false, error: "本软件里没有装这个插件" };
     } catch (e) {
@@ -756,6 +1196,7 @@ export class Backend {
         mode: "local",
         signal: ac.signal,
         approve: ({ tool, args, reason }) => this.askApproval(req.runKey, tool, args, reason),
+        ask: (questions, signal) => this.askUser(req.runKey, questions, signal),
         emit: (e: HarnessEvent) => this.host.send("run:event", { runKey: req.runKey, event: e }),
       });
       return {
@@ -894,7 +1335,40 @@ export class Backend {
     if (approved && remember) this.alwaysAllow.add(p.tool);
   }
 
+  /** AI 向操作人提问：发给界面等回答；操作人跳过、运行被停止都返回 null */
+  private askUser(runKey: string, questions: AskQuestion[], signal: AbortSignal): Promise<AskAnswer[] | null> {
+    if (signal.aborted) return Promise.resolve(null);
+    const id = `ask-${++this.askSeq}`;
+    return new Promise(resolve => {
+      const done = (a: AskAnswer[] | null) => {
+        signal.removeEventListener("abort", onAbort);
+        this.asks.delete(id);
+        resolve(a);
+      };
+      const onAbort = () => done(null);
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.asks.set(id, { runKey, questions, resolve: done });
+      this.host.send("ask:request", { id, runKey, questions });
+    });
+  }
+
+  /** 界面交回操作人的回答（null = 跳过）；只认问过的问题和选项里的内容，长度做限制 */
+  respondAsk(id: string, answers: Array<{ id?: unknown; picked?: unknown; text?: unknown }> | null): void {
+    const p = this.asks.get(id);
+    if (!p) return;
+    if (!Array.isArray(answers)) return p.resolve(null);
+    p.resolve(
+      p.questions.map(q => {
+        const a = answers.find(x => x?.id === q.id);
+        const picked = Array.isArray(a?.picked) ? a.picked.filter((x): x is string => typeof x === "string" && !!q.options?.includes(x)) : [];
+        const text = typeof a?.text === "string" && q.allowText !== false ? a.text.trim().slice(0, 2000) : "";
+        return { id: q.id, question: q.question, picked: q.multiple ? picked : picked.slice(0, 1), ...(text ? { text } : {}) };
+      }),
+    );
+  }
+
   private denyPending(runKey: string) {
+    for (const p of [...this.asks.values()]) if (p.runKey === runKey) p.resolve(null);
     for (const [id, p] of this.pending) {
       if (p.runKey === runKey) {
         this.pending.delete(id);
@@ -978,6 +1452,7 @@ export class Backend {
     this._auto?.stop();
     this._defects?.stop();
     void this._pluginHost?.stopAll();
+    void this._dsh?.stopAll();
     void this._db?.closeAll();
     for (const a of this._auto?.list() ?? []) this._auto?.abort(a.id);
     this.channelStop();

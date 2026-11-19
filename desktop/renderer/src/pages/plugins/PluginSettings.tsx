@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { AppState } from "../../../../shared/api";
-import { DBX_MCP_NAME, type MarketResult, type PluginRepo } from "../../../../shared/plugins";
+import { PRESET_REPOS, type MarketResult, type PluginRepo } from "../../../../shared/plugins";
 import { api } from "../../api";
 import { Icon, type IconName } from "../../components/Icon";
-import { useDbxBridge } from "../../lib/dbxBridge";
+import { Req, useRequired } from "../../components/Required";
 import type { PackageInstall } from "../../lib/pkgInstall";
-import { Switch } from "../settings/Projects";
+import { AiPlugins } from "./AiPlugins";
+import { Msg } from "./common";
 
 function Card({ icon, title, desc, right, children, testid }: { icon: IconName; title: string; desc: ReactNode; right?: ReactNode; children?: ReactNode; testid?: string }) {
   return (
@@ -32,12 +33,15 @@ const Fact = ({ k, children }: { k: string; children: ReactNode }) => (
   </>
 );
 
-/** 插件中心的「设置」：本软件已装插件、本机 DBX 的连接情况、让 AI 使用 DBX 插件的桥接、插件目录来源 */
+/** 插件中心的「设置」：本软件已装插件、让 AI 使用插件的开关、插件仓库 */
 export function PluginSettings({ state, onChanged, market, loading, reload, pkg }: { state: AppState; onChanged: () => void; market: MarketResult | null; loading: boolean; reload: (refresh?: boolean, silent?: boolean) => void; pkg: PackageInstall }) {
-  const bridge = useDbxBridge(state, onChanged, market);
-  const [err, setErr] = useState("");
   const [repos, setRepos] = useState<PluginRepo[]>([]);
   const [repoErr, setRepoErr] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const req = useRequired();
   const [form, setForm] = useState({ id: "", name: "", url: "" });
   const [pkgUrl, setPkgUrl] = useState("");
   const [devOpen, setDevOpen] = useState(false);
@@ -52,15 +56,41 @@ export function PluginSettings({ state, onChanged, market, loading, reload, pkg 
     if (r.ok) reload(true);
     return r.ok;
   };
+  const testRepo = async () => {
+    const miss = req.check([{ key: "url", label: "仓库地址", ok: !!form.url.trim() }]);
+    if (miss) return setRepoErr(miss);
+    setRepoErr("");
+    setTestMsg(null);
+    setTesting(true);
+    try {
+      const r = await api.pluginRepoTest({ name: form.name, url: form.url });
+      if (!r.ok) return setTestMsg({ ok: false, text: `测试失败：${r.error ?? "未知原因"}` });
+      const n = r.count ?? 0;
+      setTestMsg({ ok: true, text: n ? `测试成功：能读到插件目录，共 ${n} 个插件${r.names?.length ? `（${r.names.join("、")}${n > r.names.length ? " 等" : ""}）` : ""}。` : "测试成功：仓库连得上，但里面还没有插件。" });
+    } catch (e) {
+      setTestMsg({ ok: false, text: `测试失败：${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setTesting(false);
+    }
+  };
+  const saveRepo = async () => {
+    const miss = req.check([{ key: "url", label: "仓库地址", ok: !!form.url.trim() }]);
+    if (miss) return setRepoErr(miss);
+    setSaving(true);
+    try {
+      if (await repoAct(api.pluginRepoAdd(form))) {
+        setForm({ id: "", name: "", url: "" });
+        setAdding(false);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
   const dbx = market?.dbx;
-  const n = Object.keys(dbx?.plugins ?? {}).length;
-  const nl = Object.keys(dbx?.local ?? {}).length;
-  const server = (JSON.parse(state.configText.replace(/^\uFEFF/, "") || "{}")?.mcpServers?.[DBX_MCP_NAME] ?? null) as { command?: string; args?: string[] } | null;
-  const cmd = server?.command ?? dbx?.mcp?.command;
 
   return (
     <div className="px-settings" data-testid="plugin-settings">
-      <Card icon="upload" title="安装插件包" desc="从本地文件或链接安装插件商店之外的 .dbxp 插件包。本软件会校验包内文件的完整性，暂不验证作者签名，所以只装你信任的来源。" testid="pkg-install">
+      <Card icon="upload" title="安装插件包" desc="从本地文件或链接安装插件商店之外的 .dbxp 插件包。.dbxp 是插件的打包格式（遵循 DBX 公开的插件规范），任何人都能按这个规范做插件，不需要安装 DBX 软件。DSH、Codex 的插件不用在这里装：把它们的插件仓库加到下面的「插件仓库」，就能在插件商店里装。本软件会校验包内文件的完整性，暂不验证作者签名，所以只装你信任的来源。" testid="pkg-install">
         <div className="px-set-row" style={{ marginTop: 12, flexWrap: "wrap" }}>
           <button className="btn" data-testid="pkg-pick" disabled={pkg.busy} onClick={() => fileRef.current?.click()}>
             {pkg.busy ? <span className="spinner" /> : <Icon name="upload" size={14} />} 安装 .dbxp
@@ -94,62 +124,118 @@ export function PluginSettings({ state, onChanged, market, loading, reload, pkg 
           </button>
         </div>
         {pkg.msg && (
-          <div className={`px-msg ${pkg.msg.ok ? "ok" : "bad"}`} style={{ marginTop: 10 }} data-testid="pkg-msg">
+          <Msg className={`px-msg ${pkg.msg.ok ? "ok" : "bad"}`} style={{ marginTop: 10 }} data-testid="pkg-msg">
             {pkg.msg.text}
-          </div>
+          </Msg>
         )}
       </Card>
 
-      <Card icon="store" title="插件仓库" desc="官方仓库和 DBX 里看到的是同一份；也可以添加自托管或第三方仓库（一份 DBX 格式的 catalog/index.json）。" testid="dbx-catalog">
+      <Card
+        icon="store"
+        title="插件仓库"
+        desc="商店里的插件都来自已启用的仓库。支持 DBX、Codex / Claude、DSH 三种插件仓库，填 GitHub 链接（或 owner/repo）或目录文件直链即可，预置的也能停用、删除。"
+        testid="dbx-catalog"
+        right={
+          <button
+            className="btn sm"
+            data-testid="repo-add"
+            onClick={() => {
+              setRepoErr("");
+              setTestMsg(null);
+              req.reset();
+              setAdding(a => !a);
+            }}
+          >
+            <Icon name={adding ? "x" : "plus"} size={13} /> {adding ? "取消添加" : "添加仓库"}
+          </button>
+        }
+      >
+        {adding && (
+          <div className="prepo-form" data-testid="repo-form">
+            <label className="prepo-field">
+              <span>
+                仓库名称 <i>（可不填）</i>
+              </span>
+              <input className="input" data-testid="repo-f-name" placeholder="例如：我的插件仓库" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
+            </label>
+            <label className="prepo-field">
+              <span>
+                代号 <i>（可不填，自动生成）</i>
+              </span>
+              <input className="input" data-testid="repo-f-id" title="内部用的简短代号（小写字母、数字、-、_）。不填会自动生成，一般不用管。" placeholder="例如：my-repo" value={form.id} onChange={e => setForm({ ...form, id: e.target.value })} />
+            </label>
+            {PRESET_REPOS.some(p => !repos.some(r => r.url === p.url)) && (
+              <div className="prepo-presets wide" data-testid="repo-presets">
+                <span className="px-hint">常用仓库：</span>
+                {PRESET_REPOS.filter(p => !repos.some(r => r.url === p.url)).map(p => (
+                  <button key={p.url} type="button" className="btn sm" data-testid="repo-preset" title={p.desc} onClick={() => setForm({ ...form, name: form.name || p.name, url: p.url })}>
+                    <Icon name="plus" size={12} /> {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <label className="prepo-field wide">
+              <span>
+                仓库地址 <Req />
+              </span>
+              <input className={req.cls("url")} data-req="url" data-testid="repo-f-url" placeholder="GitHub 仓库链接（或 owner/repo），或插件目录文件的直链" value={form.url} onChange={e => (setForm({ ...form, url: e.target.value }), req.clear("url"), setTestMsg(null))} onKeyDown={e => e.key === "Enter" && void saveRepo()} />
+            </label>
+            {repoErr && (
+              <Msg className="px-msg bad wide" data-testid="repo-err">
+                {repoErr}
+              </Msg>
+            )}
+            {testMsg && (
+              <Msg className={`px-msg ${testMsg.ok ? "ok" : "bad"} wide`} data-testid="repo-test-msg">
+                {testMsg.text}
+              </Msg>
+            )}
+            <div className="prepo-actions wide">
+              <button className="btn" data-testid="repo-save" disabled={saving || testing} onClick={() => void saveRepo()}>
+                {saving ? <span className="spinner" /> : <Icon name="check" size={14} />} 保存
+              </button>
+              <button className="btn" data-testid="repo-test" disabled={saving || testing} onClick={() => void testRepo()}>
+                {testing ? <span className="spinner" /> : <Icon name="refresh" size={14} />} 测试
+              </button>
+              <button className="btn" data-testid="repo-cancel" onClick={() => (setAdding(false), setRepoErr(""), setTestMsg(null), req.reset())}>
+                取消
+              </button>
+            </div>
+          </div>
+        )}
         <div className="prepo-list" style={{ marginTop: 12 }}>
+          {repos.length === 0 && (
+            <div className="px-hint" data-testid="repo-empty">
+              还没有仓库。点右上角「添加仓库」，粘贴一个 GitHub 仓库链接就行。
+            </div>
+          )}
           {repos.map(r => (
             <div key={r.id} className={`prepo-row ${r.enabled ? "" : "off"}`} data-testid="repo-row" data-id={r.id}>
               <div className="prepo-main">
-                <b>
-                  {r.name} {r.official && <span className="px-pill on">官方</span>}
-                </b>
+                <b>{r.name}</b>
                 <span className="mono">{r.url}</span>
-                <span className="px-hint" data-testid="repo-count">
-                  {r.enabled ? `${countOf(r.name)} 个插件` : "已停用"}
+                <span className="px-hint">
+                  <span data-testid="repo-count">{r.enabled ? `${countOf(r.name)} 个插件` : "已停用"}</span>
                 </span>
               </div>
-              {r.official ? (
-                <span className="px-pill on">已启用</span>
-              ) : (
-                <>
-                  <Switch on={r.enabled} testid="repo-switch" onChange={v => void repoAct(api.pluginRepoToggle(r.id, v))} />
-                  <button className="btn sm icon" title="删除仓库" data-testid="repo-del" onClick={() => void repoAct(api.pluginRepoRemove(r.id))}>
-                    <Icon name="trash" size={13} />
-                  </button>
-                </>
-              )}
+              <button className={`btn sm${r.enabled ? "" : " primary"}`} data-testid="repo-toggle" title={r.enabled ? "停用后，商店里不再显示这个仓库的插件" : "启用后，商店里会显示这个仓库的插件"} onClick={() => void repoAct(api.pluginRepoToggle(r.id, !r.enabled))}>
+                {r.enabled ? "停用" : "启用"}
+              </button>
+              <button className="btn sm icon" title="删除仓库" data-testid="repo-del" onClick={() => void repoAct(api.pluginRepoRemove(r.id))}>
+                <Icon name="trash" size={13} />
+              </button>
             </div>
           ))}
         </div>
-        <div className="prepo-add" style={{ marginTop: 10 }}>
-          <input className="input" data-testid="repo-f-id" placeholder="仓库 ID" value={form.id} onChange={e => setForm({ ...form, id: e.target.value })} />
-          <input className="input" data-testid="repo-f-name" placeholder="仓库名称" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
-          <input className="input" data-testid="repo-f-url" placeholder="https://plugins.example.com/catalog/index.json" value={form.url} onChange={e => setForm({ ...form, url: e.target.value })} />
-          <button
-            className="btn"
-            data-testid="repo-add"
-            disabled={!form.id.trim() || !form.url.trim()}
-            onClick={async () => {
-              if (await repoAct(api.pluginRepoAdd(form))) setForm({ id: "", name: "", url: "" });
-            }}
-          >
-            <Icon name="plus" size={14} /> 添加仓库
-          </button>
-        </div>
-        {repoErr && (
-          <div className="px-msg bad" style={{ marginTop: 10 }} data-testid="repo-err">
+        {!adding && repoErr && (
+          <Msg className="px-msg bad" style={{ marginTop: 10 }} data-testid="repo-err">
             {repoErr}
-          </div>
+          </Msg>
         )}
-        {(market?.errors ?? []).filter(e => repos.some(r => r.name === e.source && !r.official)).map(e => (
-          <div className="px-msg warn" style={{ marginTop: 10 }} key={e.source} data-testid="repo-load-err">
+        {(market?.errors ?? []).filter(e => repos.some(r => r.name === e.source)).map(e => (
+          <Msg className="px-msg warn" style={{ marginTop: 10 }} key={e.source} stamp={market} data-testid="repo-load-err">
             {e.error}
-          </div>
+          </Msg>
         ))}
         <div className="px-set-row" style={{ marginTop: 10 }}>
           <button className="btn sm" data-testid="dbx-recheck" disabled={loading} onClick={() => reload(true)}>
@@ -177,7 +263,7 @@ export function PluginSettings({ state, onChanged, market, loading, reload, pkg 
                   {dbx?.dir ?? "—"}
                 </span>
               </Fact>
-              <Fact k="第三方仓库">来自第三方仓库的插件，下载地址由该仓库指定，安装前仍会核对目录里的 sha256；同一个插件 ID 官方仓库优先。</Fact>
+              <Fact k="第三方仓库">DBX 插件的下载地址由所在仓库指定（你添加仓库就是信任它），安装前仍会核对目录里的 sha256；同一个 DBX 插件 ID 出现在多个仓库时，排在前面的仓库优先。</Fact>
               <Fact k="本地开发">把插件按 plugins/&lt;id&gt;/versions/&lt;版本&gt;/ 放进上面的目录，刷新后就会出现在「已安装」和右侧插件栏。</Fact>
             </div>
             <div className="px-set-row" style={{ marginTop: 10 }}>
@@ -189,47 +275,8 @@ export function PluginSettings({ state, onChanged, market, loading, reload, pkg 
         )}
       </section>
 
-      <Card
-        icon="plug"
-        title="本机 DBX（可选）"
-        desc="插件直接装在本软件里，不需要 DBX；「已安装」里只列装在本软件里的插件。本机装了 DBX 时，还可以通过 DBX 的 MCP 让 AI 调用 DBX 里的插件工具；不会改动 DBX 的文件。"
-        testid="dbx-status"
-        right={
-          <span className={`px-pill ${dbx?.appFound ? "on" : ""}`} data-testid="dbx-found">
-            {dbx?.appFound ? "已检测到" : "未检测到"}
-          </span>
-        }
-      >
-        <div className="px-facts" style={{ marginTop: 10 }}>
-          <Fact k="装在本软件">
-            <span data-testid="local-count">{nl} 个</span>
-          </Fact>
-          <Fact k="装在 DBX 里">{n} 个</Fact>
-          <Fact k="MCP 组件">{dbx?.mcp ? <span className="mono">{dbx.mcp.command}</span> : "没找到（npm i -g @dbx-app/mcp-server）"}</Fact>
-        </div>
-      </Card>
-
-      <Card
-        icon="bot"
-        title="让 AI 使用 DBX 插件"
-        desc="打开后，AI 能调用 DBX 里已装插件提供的工具（比如 XXL-JOB 查询、SSH / SFTP）；写入类工具仍然每次需要你确认。使用时 DBX 需要保持运行。"
-        testid="dbx-bridge"
-        right={bridge.available ? <Switch on={bridge.on} testid="dbx-bridge-switch" onChange={v => void bridge.toggle(v).then(r => setErr(r.ok ? "" : (r.error ?? "保存失败")))} /> : undefined}
-      >
-        {!bridge.available && (
-          <div className="px-msg warn" style={{ marginTop: 10 }} data-testid="dbx-bridge-missing">
-            没找到 DBX 的 MCP 组件。先在命令行装一下：<code>npm i -g @dbx-app/mcp-server</code>，装好后回到这里点「重新检测」。
-          </div>
-        )}
-        {cmd && (
-          <div className="px-facts" style={{ marginTop: 10 }}>
-            <Fact k="MCP 服务名">{DBX_MCP_NAME}</Fact>
-            <Fact k="启动命令">
-              <span className="mono">{[cmd, ...(server?.args ?? [])].join(" ")}</span>
-            </Fact>
-          </div>
-        )}
-        {err && <div className="px-msg bad" style={{ marginTop: 10 }}>{err}</div>}
+      <Card icon="bot" title="让 AI 使用插件" desc="已装的插件如果自带 AI 工具（DBX 插件清单里有 mcp 一项，或是 DSH 插件注册的工具），可以在这里逐个允许 AI 使用。工具由本软件直接调用插件的后台程序，不需要 DBX；DSH 插件是第三方 JavaScript，要先在这里确认信任才会运行；只读工具 AI 直接用，会改东西的每次都要你批准。连接类插件用「设置 → 连接」里的连接。" testid="ai-plugins-card">
+        <AiPlugins />
       </Card>
 
     </div>

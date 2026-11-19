@@ -108,7 +108,17 @@ export const ConfigSchema = z.object({
     .object({
       marketplaces: z.array(z.object({ name: z.string().optional(), url: z.string(), enabled: z.boolean().default(true) })).default([]),
       installed: z
-        .record(z.string(), z.object({ kind: z.enum(["mcp", "skill", "action", "rule"]), name: z.string(), version: z.string().optional(), ref: z.string(), at: z.number() }))
+        .record(z.string(), z.object({
+            kind: z.enum(["mcp", "skill", "action", "rule", "bundle"]),
+            name: z.string(),
+            version: z.string().optional(),
+            ref: z.string(),
+            at: z.number(),
+            /** 插件包（Codex / Claude）：它装进配置的各项的 key，卸载时一起删 */
+            members: z.array(z.string()).optional(),
+            ecosystem: z.enum(["dbx", "dsh", "codex", "claude"]).optional(),
+          }),
+        )
         .default({}),
     })
     .default({ marketplaces: [], installed: {} }),
@@ -119,10 +129,12 @@ export const ConfigSchema = z.object({
       autoCheck: z.boolean().default(true),
     })
     .default({ repo: "", autoCheck: true }),
-  /** 动作：预设提示词模板，在对话输入框里一键套用；模板里的 {{input}} 会被替换成你输入的内容 */
+  /** 动作：预设提示词模板（或绑定一个技能 + 产出要求），在对话输入框 / 推进任务里一键套用；模板里的 {{input}} 会被替换成你输入的内容 */
   actions: z
-    .array(z.object({ id: z.string(), name: z.string(), prompt: z.string(), description: z.string().optional() }))
+    .array(z.object({ id: z.string(), name: z.string(), prompt: z.string().default(""), description: z.string().optional(), hidden: z.boolean().optional(), skill: z.string().optional(), output: z.string().optional(), placeholder: z.string().optional() }))
     .default([]),
+  /** 自带的推进步骤（出方案 / 改代码 / 复核 / 联调 / 提测）的顺序和隐藏 */
+  actionPrefs: z.object({ order: z.array(z.string()).default([]), hidden: z.array(z.string()).default([]) }).default({ order: [], hidden: [] }),
   limits: z
     .object({
       maxSteps: z.number().default(20),
@@ -161,11 +173,21 @@ export const ConfigSchema = z.object({
             integration: z.string().optional(),
           })
           .optional(),
+        /** 只读仓库：git_write 不会去改它（只能读、看历史） */
+        readOnly: z.boolean().optional(),
+        /** 脚本仓：只放脚本 / 工具，不是业务代码仓库 */
+        scriptRepo: z.boolean().optional(),
+        /** feature 分支名模板（留空用默认约定），如 feature/{date}-{slug} */
+        branchTemplate: z.string().optional(),
+        /** 预览启动命令，如 npm run dev */
+        previewCmd: z.string().optional(),
+        /** 依赖初始化命令，如 yarn install --frozen-lockfile */
+        installCmd: z.string().optional(),
       }),
     )
     .default({}),
-  /** 代码托管平台的实例地址（自建 GitLab / GitHub Enterprise）；令牌放在 .env 的 GITHUB_TOKEN / GITLAB_TOKEN 等变量里 */
-  gitHosts: z.record(z.string(), z.object({ baseURL: z.string().optional() })).default({}),
+  /** 代码托管平台的实例地址（自建 GitLab / GitHub Enterprise）；令牌放在 .env 的 GITHUB_TOKEN / GITLAB_TOKEN 等变量里；enabled 为 false 表示停用（不再给 git 注入这个平台的令牌） */
+  gitHosts: z.record(z.string(), z.object({ baseURL: z.string().optional(), enabled: z.boolean().optional() })).default({}),
   /** 项目管理等外部系统：以工具的形式提供给模型 */
   integrations: z
     .object({

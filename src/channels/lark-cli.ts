@@ -1,6 +1,7 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import type { HarnessConfig } from "../config";
+import { spawnCli } from "../tools/cli-spawn";
 import { chunkText, type IncomingMessage } from "./types";
 
 export type LarkCliCfg = NonNullable<HarnessConfig["channels"]["larkCli"]>;
@@ -54,7 +55,7 @@ export class LarkCliChannel {
 
   private spawnConsumer(onMessage: (m: IncomingMessage) => void) {
     const args = [...this.cfg.binArgs, "event", "consume", EVENT_KEY, "--as", "bot"];
-    const child = spawn(this.cfg.bin, args, { windowsHide: true });
+    const child = spawnCli(this.cfg.bin, args);
     this.child = child;
     let ready = false;
     let lastErr = "";
@@ -180,7 +181,7 @@ export class LarkCliChannel {
 
 function runOnce(cfg: LarkCliCfg, args: string[], stdin?: string): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => {
-    const child = spawn(cfg.bin, args, { windowsHide: true });
+    const child = spawnCli(cfg.bin, args);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", d => (stdout += d));

@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, HarnessEvent, Msg } from "../../../shared/api";
+import type { AppState, AskRequest, HarnessEvent, Msg } from "../../../shared/api";
 import { api } from "../api";
+
+/** 运行中按回车排队的消息 */
+export interface QueuedMsg {
+  text: string;
+  onFinished?: () => void;
+  runInput?: string;
+}
 
 export interface Turn {
   id: string;
@@ -8,6 +15,10 @@ export interface Turn {
   text: string;
   provider?: string;
   events: HarnessEvent[];
+  /** 每个事件到达的时间（和 events 一一对应），用来显示已运行多久、多久没有新输出 */
+  times?: number[];
+  /** 这一轮开始运行的时间 */
+  startedAt?: number;
   status?: "running" | "done" | "error" | "aborted";
   traceFile?: string;
 }
@@ -88,7 +99,7 @@ export function useChatStore(state: AppState, storageKey = KEY) {
     () =>
       api.onRunEvent((key, event) => {
         setSessions(ss =>
-          ss.map(s => (s.turns.some(t => t.id === key) ? { ...s, turns: s.turns.map(t => (t.id === key ? { ...t, events: [...t.events, event] } : t)) } : s)),
+          ss.map(s => (s.turns.some(t => t.id === key) ? { ...s, turns: s.turns.map(t => (t.id === key ? { ...t, events: [...t.events, event], times: [...(t.times ?? []), Date.now()] } : t)) } : s)),
         );
       }),
     [],
@@ -145,7 +156,7 @@ export function useChatStore(state: AppState, storageKey = KEY) {
   );
 
   const send = useCallback(
-    async (text: string, onFinished?: () => void, runInput?: string) => {
+    async (text: string, onFinished?: () => void, runInput?: string, opts?: { fresh?: boolean }) => {
       const cur = ref.current.find(s => s.id === activeId);
       if (isRunning(cur)) return;
       const key = uid();
@@ -154,10 +165,11 @@ export function useChatStore(state: AppState, storageKey = KEY) {
       const ws = cur ? cur.workspace : draftWorkspace;
       const mdl = cur ? cur.model : draftModel;
       const off = cur ? (cur.disabledTools ?? []) : draftDisabled;
-      const history = cur?.history ?? [];
+      // fresh：这一轮不带之前的对话（开全新上下文），跑完后后续轮次接着这一轮继续
+      const history = opts?.fresh ? [] : (cur?.history ?? []);
       const newTurns: Turn[] = [
         { id: uid(), role: "user", text, events: [] },
-        { id: key, role: "assistant", text: "", provider: prov, events: [], status: "running" },
+        { id: key, role: "assistant", text: "", provider: prov, events: [], times: [], startedAt: Date.now(), status: "running" },
       ];
       if (cur) {
         // 点「新建对话」时已经建好了空对话：第一次发送时用这句话当标题
@@ -169,7 +181,13 @@ export function useChatStore(state: AppState, storageKey = KEY) {
         setActiveId(sid);
       }
 
-      const r = await api.run({ runKey: key, input: runInput ?? text, provider: prov, history, workspace: ws, model: mdl, disabledTools: off.length ? off : undefined });
+      let r: Awaited<ReturnType<typeof api.run>>;
+      try {
+        r = await api.run({ runKey: key, input: runInput ?? text, provider: prov, history, workspace: ws, model: mdl, disabledTools: off.length ? off : undefined });
+      } catch (e: any) {
+        // 主进程那边崩了 / 通道断了：不能让这一轮永远停在「运行中」，按失败处理并给出原因
+        r = { reason: "error", text: "", error: `和后台的连接出问题了：${e?.message ?? e}`, steps: 0, tokens: 0, messages: history, traceFile: "", runId: "" } as Awaited<ReturnType<typeof api.run>>;
+      }
       const status = r.reason === "final" ? "done" : r.reason === "aborted" ? "aborted" : "error";
       setSessions(ss =>
         ss.map(s =>
@@ -228,7 +246,33 @@ export function useChatStore(state: AppState, storageKey = KEY) {
   );
   const newChatWith = useCallback((ws: string) => newChat(ws), [newChat]);
 
-  return { sessions, active, activeId, setActiveId, provider, workspace, model, disabledTools, setProvider, setModel, setDisabledTools, setWorkspace, newChat, newChatWith, send, abort, remove };
+  // AI 还在运行时按回车：消息先排队，这一轮结束后自动发出（每个对话各自排队，按顺序一条条发）
+  const [queues, setQueues] = useState<Record<string, QueuedMsg[]>>({});
+  const queued = activeId ? (queues[activeId] ?? []) : [];
+  const enqueue = useCallback(
+    (text: string, onFinished?: () => void, runInput?: string) => {
+      if (activeId) setQueues(q => ({ ...q, [activeId]: [...(q[activeId] ?? []), { text, onFinished, runInput }] }));
+    },
+    [activeId],
+  );
+  const dequeue = useCallback((i: number) => activeId && setQueues(q => ({ ...q, [activeId]: (q[activeId] ?? []).filter((_, k) => k !== i) })), [activeId]);
+  useEffect(() => {
+    if (!activeId || isRunning(active)) return;
+    const [first, ...rest] = queues[activeId] ?? [];
+    if (!first) return;
+    setQueues(q => ({ ...q, [activeId]: rest }));
+    void send(first.text, first.onFinished, first.runInput);
+  }, [queues, active, activeId, send]);
+
+  // AI 运行中向操作人提的问题：等回答，回答 / 跳过 / 运行结束后移走
+  const [asks, setAsks] = useState<AskRequest[]>([]);
+  useEffect(() => api.onAsk(r => setAsks(a => [...a, r])), []);
+  const answerAsk = useCallback((id: string, answers: Array<{ id: string; picked: string[]; text?: string }> | null) => {
+    setAsks(a => a.filter(x => x.id !== id));
+    return api.respondAsk(id, answers);
+  }, []);
+
+  return { sessions, active, activeId, setActiveId, provider, workspace, model, disabledTools, setProvider, setModel, setDisabledTools, setWorkspace, newChat, newChatWith, send, abort, remove, asks, answerAsk, queued, enqueue, dequeue };
 }
 
 export type ChatStore = ReturnType<typeof useChatStore>;

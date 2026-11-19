@@ -46,6 +46,26 @@ interface Resolved {
   entry: string;
 }
 
+/** 能给 AI 用的插件（不含工具列表，工具要启动后台程序才拿得到） */
+export interface AiPluginRef {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  trusted: boolean;
+  connKind?: ConnKind;
+  conns: PluginConn[];
+  /** 不是 DBX 的插件：来自哪一家（目前只有 DSH 插件会给 AI 提供工具） */
+  ecosystem?: import("../shared/plugins").Ecosystem;
+}
+
+export interface AiRawTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  readOnly: boolean;
+}
+
 export interface PluginHostOpts {
   /** 已装插件目录：<dir>/<id>/versions/<版本>/ */
   localDir: string;
@@ -321,7 +341,9 @@ export class PluginHost {
         /* 只读目录，尽量跑 */
       }
     }
-    const l = this.o.launch?.(exe) ?? { command: exe };
+    // 后台程序是 .js / .mjs / .cjs 脚本（跨平台的 Node 插件）：用本软件自带的 Node 运行，一个包三个系统通用；其余按原生程序直接启动
+    const asScript = /\.(?:c|m)?js$/i.test(exe) ? { command: process.execPath, args: [exe], env: { ELECTRON_RUN_AS_NODE: "1" } } : undefined;
+    const l = this.o.launch?.(exe) ?? asScript ?? { command: exe };
     const sc = new Sidecar({
       command: l.command,
       args: l.args,
@@ -513,6 +535,76 @@ export class PluginHost {
       aiCompletion: false,
       aiRecommendations: false,
     };
+  }
+
+  // ───────── 给 AI 用的工具（清单里的 mcp 贡献，走后台程序的 mcp/tools、mcp/call） ─────────
+
+  /** 能给 AI 用的插件：清单里声明了 mcp 贡献，并且带后台程序 */
+  aiPlugins(): AiPluginRef[] {
+    const out: AiPluginRef[] = [];
+    const ids = scanDbxPlugins(path.dirname(this.o.localDir), path.basename(this.o.localDir));
+    for (const id of Object.keys(ids)) {
+      const r = this.resolve(id);
+      if (!r || !r.manifest.entrypoints?.backend?.executable) continue;
+      if (!r.manifest.contributions?.some(c => c.type === "mcp")) continue;
+      const pv = this.provider(r);
+      out.push({
+        id: r.id,
+        name: this.nameOf(r.manifest, r.id).name,
+        version: r.version,
+        description: this.nameOf(r.manifest, r.id).description,
+        trusted: this.trustedVersion(r.id) === r.version,
+        connKind: pv?.adapter.kind,
+        conns: pv ? this.connectionsFor(r.id) : [],
+      });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+  }
+
+  /** 向插件的后台程序要它的 AI 工具列表（会启动后台程序，所以要先确认信任） */
+  async aiTools(id: string): Promise<AiRawTool[]> {
+    const r = this.resolve(id);
+    if (!r) throw new Error("这个插件已经不在了");
+    const res = (await (await this.sidecar(r.id)).call("mcp/tools", {}, 20_000)) as { tools?: unknown } | null;
+    const out: AiRawTool[] = [];
+    for (const t of Array.isArray(res?.tools) ? res.tools : []) {
+      const x = t as { name?: unknown; description?: unknown; inputSchema?: unknown; annotations?: { readOnlyHint?: unknown } };
+      if (typeof x?.name !== "string" || !x.name) continue;
+      const schema = x.inputSchema && typeof x.inputSchema === "object" ? { ...(x.inputSchema as Record<string, unknown>) } : {};
+      delete schema.$schema;
+      schema.type = "object";
+      if (!schema.properties || typeof schema.properties !== "object") schema.properties = {};
+      out.push({ name: x.name, description: typeof x.description === "string" ? x.description : "", inputSchema: schema, readOnly: x.annotations?.readOnlyHint === true });
+    }
+    return out;
+  }
+
+  /**
+   * 让 AI 调用插件的一个工具。连接类插件要带上一个连接（设置 → 连接里的）：
+   * 没指定时只有一个就用它，多个就让 AI 说清楚。连接配置只在主进程里交给插件，不进对话。
+   */
+  async aiCall(id: string, tool: string, args: Record<string, unknown>, connRef?: string, timeoutMs = 120_000): Promise<unknown> {
+    const r = this.resolve(id);
+    if (!r) throw new Error("这个插件已经不在了");
+    const pv = this.provider(r);
+    const params: Record<string, unknown> = { tool, arguments: args };
+    if (pv) {
+      const list = this.connectionsFor(r.id);
+      if (!list.length) throw new Error("还没有可用的连接，请先到「设置 → 连接」里添加并启用");
+      const ref = (connRef ?? "").trim();
+      const hit = ref ? (list.find(c => c.id === ref) ?? list.find(c => c.name === ref) ?? list.find(c => c.name.toLowerCase() === ref.toLowerCase())) : list.length === 1 ? list[0] : undefined;
+      if (!hit) throw new Error(ref ? `没有叫「${ref}」的连接，可用的有：${list.map(c => c.name).join("、")}` : `有多个连接，请用 connection 参数指定其中一个：${list.map(c => c.name).join("、")}`);
+      const got = this.o.connections?.get(hit.id);
+      if (!got || got.conn.kind !== pv.adapter.kind || !got.conn.enabled) throw new Error("这个连接不存在或已停用，请到「设置 → 连接」里检查");
+      let connection: Record<string, unknown>;
+      try {
+        connection = pv.adapter.toConnection(got.conn, got.secrets);
+      } catch {
+        throw new Error("连接配置不完整或地址不合法，请到「设置 → 连接」里检查");
+      }
+      params.lifecycle = { connection };
+    }
+    return (await this.sidecar(r.id)).call("mcp/call", params, timeoutMs);
   }
 
   // ───────── 数据库访问（只读） ─────────

@@ -14,7 +14,7 @@ import { Automations } from "./pages/Automations";
 import { Defects } from "./pages/Defects";
 import { useDefects } from "./lib/defects";
 import { ENTRY_NAME } from "../../shared/defects";
-import type { DbFocus } from "../../shared/db";
+import type { DbFocus, DbRunReq } from "../../shared/db";
 import { SOURCE_TEXT, TaskPage } from "./pages/Task";
 import { updateSkip, useUpdate } from "./lib/update";
 import { Assistant } from "./pages/Assistant";
@@ -83,6 +83,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantWide, setAssistantWide] = useState(false);
   const [dbFocus, setDbFocus] = useState<DbFocus | null>(null);
+  const [dbRun, setDbRun] = useState<DbRunReq | null>(null);
   const [navW, setNavW] = useState(() => {
     const v = Number(localStorage.getItem(NAV_W_KEY));
     return Number.isFinite(v) && v >= NAV_MIN && v <= NAV_MAX ? v : NAV_DEFAULT;
@@ -221,7 +222,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
       const sid = taskChat.newChat(undefined, { title: item.title });
       t = tasks.add(item, sid);
     } else {
-      tasks.quiet(t.id, { title: item.title, node: item.node, sub: item.sub, url: item.url, start: item.start, end: item.end, done: false });
+      tasks.quiet(t.id, { title: item.title, node: item.node, sub: item.sub, url: item.url, projectKey: item.projectKey ?? t.projectKey, start: item.start, end: item.end, done: false });
     }
     setFlash({ id: t.id, n: Date.now() });
     if (open) openTask(t.id, t);
@@ -277,7 +278,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
               setTab("chat");
             }}
           >
-            <Icon name="plus" size={15} />
+            <Icon name="chat" size={15} />
             <span>新建对话</span>
           </button>
           <button className={`tn-btn ${tab === "workbench" ? "on" : ""}`} data-testid="nav-workbench" title="工作台" onClick={() => setTab("workbench")}>
@@ -539,7 +540,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
           {/* 数据库页：第一次打开后常驻，切走再回来不丢打开的表和写了一半的 SQL */}
           {dbMounted && (
             <div className="page-host" hidden={tab !== "database"}>
-              <Database active={tab === "database"} onManage={() => (setSettingsSec("connections"), setTab("settings"))} onFocus={setDbFocus} />
+              <Database active={tab === "database"} onManage={() => (setSettingsSec("connections"), setTab("settings"))} onFocus={setDbFocus} run={dbRun} />
             </div>
           )}
           {tab === "plugins" && <Plugins state={state} onChanged={refresh} onOpenSettings={() => (setSettingsSec("skills"), setTab("settings"))} />}
@@ -569,7 +570,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
               }}
             />}
         </main>
-        {assistantOpen && <Assistant state={state} store={assistant} wide={assistantWide} onToggleWide={() => setAssistantWide(w => !w)} onClose={() => setAssistantOpen(false)} db={tab === "database" ? { focus: dbFocus } : undefined} />}
+        {assistantOpen && <Assistant state={state} store={assistant} wide={assistantWide} onToggleWide={() => setAssistantWide(w => !w)} onClose={() => setAssistantOpen(false)} db={tab === "database" ? { focus: dbFocus, onRunSql: r => setDbRun({ ...r, n: Date.now() + Math.random() }) } : undefined} />}
       </div>
       {uiPlugins.length > 0 && <PluginRail plugins={uiPlugins} activeId={tab === "plugin" ? activePlugin : null} onOpen={openPlugin} onManage={() => setTab("plugins")} />}
       </div>

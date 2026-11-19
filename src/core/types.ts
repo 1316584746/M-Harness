@@ -41,10 +41,35 @@ export interface ToolSpec {
 /** 风险等级：护栏按它决定放行 / 审批 / 拒绝 */
 export type Risk = "read" | "write" | "exec" | "network";
 
+/** AI 运行中向操作人提的一个问题：给几个选项，也允许自己写 */
+export interface AskQuestion {
+  id: string;
+  question: string;
+  options?: string[];
+  /** 可以多选（默认单选） */
+  multiple?: boolean;
+  /** 除了选项，是否允许自己写回答（默认允许） */
+  allowText?: boolean;
+}
+
+export interface AskAnswer {
+  id: string;
+  question: string;
+  /** 选中的选项 */
+  picked: string[];
+  /** 自己写的回答 */
+  text?: string;
+}
+
+/** 向操作人提问并等回答；返回 null = 操作人跳过 / 没法回答 */
+export type Asker = (questions: AskQuestion[], signal: AbortSignal) => Promise<AskAnswer[] | null>;
+
 export interface ToolCtx {
   signal: AbortSignal;
   /** 沙箱根目录：文件类工具只能访问它之内 */
   root: string;
+  /** 向操作人提问（只有桌面端的对话提供；没有就不能问） */
+  ask?: Asker;
 }
 
 export interface Tool extends ToolSpec {
@@ -62,9 +87,12 @@ export interface DelegateInput {
   prompt: string;
   cwd: string;
   signal: AbortSignal;
-  /** 外部 agent 的过程输出（工具调用、思考等），用于写 trace / 展示 */
-  onProgress?: (line: string) => void;
+  /** 外部 agent 的过程输出（工具调用、思考等），用于写 trace / 展示；kind 不传按 text 处理 */
+  onProgress?: (line: string, kind?: ProgressKind) => void;
 }
+
+/** 外部 Agent 过程输出的类别：思考 / 回复文字 / 工具调用 / 状态（创建、排队、启动…）/ 错误 */
+export type ProgressKind = "thinking" | "text" | "tool" | "status" | "error";
 
 /** 自带 agent loop 的外部 Agent（Cursor SDK / Codex CLI / Claude Code CLI …）：harness 只做委托 + 观测 */
 export interface AgentBackend {
@@ -84,7 +112,7 @@ export type HarnessEvent =
   | { type: "tool_blocked"; step: number; name: string; reason: string }
   | { type: "approval"; step: number; name: string; args: unknown; approved: boolean }
   | { type: "tool_result"; step: number; name: string; output: string; ms: number }
-  | { type: "agent_progress"; line: string }
+  | { type: "agent_progress"; line: string; kind?: ProgressKind }
   | { type: "context_trim"; before: number; after: number; dropped: number }
   | { type: "done"; reason: DoneReason; text?: string; error?: string };
 

@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import type { AppState, RuleFileDTO } from "../../../../shared/api";
 import { api } from "../../api";
 import { Icon } from "../../components/Icon";
+import { ResourceDiscover } from "../../components/ResourceDiscover";
+import { useResourceTools } from "../../components/ResourceTools";
 import { useConfigEditor } from "../../lib/configEdit";
 import { Switch } from "./Projects";
 
@@ -46,6 +48,7 @@ export function Rules({ state, onChanged }: { state: AppState; onChanged: () => 
   const useFiles: boolean = ed.cfg?.rules?.useProjectFiles ?? true;
   const [files, setFiles] = useState<RuleFileDTO[]>([]);
   const [err, setErr] = useState("");
+  const tools = useResourceTools("rule", onChanged);
 
   useEffect(() => void api.rulesPreview().then(setFiles), [state.configText, state.workspace]);
 
@@ -65,10 +68,12 @@ export function Rules({ state, onChanged }: { state: AppState; onChanged: () => 
         <div className="shead">
           <h2>RULES</h2>
           <span className="spacer" />
+          {tools.buttons}
           <button className="btn" data-testid="rule-add" onClick={() => void run(r => r.items.push({ id: `r${Date.now().toString(36)}`, title: "", content: "", enabled: true }))}>
             <Icon name="plus" size={14} /> 新增
           </button>
         </div>
+        {tools.panel}
         {err && <div className="inline-warn">{err}</div>}
         {!items.length && <div className="muted">暂无</div>}
         {items.map(it => (
@@ -114,6 +119,8 @@ export function Rules({ state, onChanged }: { state: AppState; onChanged: () => 
             ))}
         </div>
       </div>
+
+      <ResourceDiscover kind="rule" onAdded={onChanged} />
     </>
   );
 }

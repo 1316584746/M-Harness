@@ -15,14 +15,15 @@ const SIZES = [50, 100, 200, 500, 1000];
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** 一张表：数据（可筛选 / 排序 / 分页 / 改行）和结构两个视图 */
-export function TableView({ conn, database, schema, table, active, onDirty }: { conn: Connection; database?: string; schema?: string; table: string; active: boolean; onDirty: (dirty: boolean) => void }) {
+export function TableView({ conn, database, schema, table, active, onDirty, initMode }: { conn: Connection; database?: string; schema?: string; table: string; active: boolean; onDirty: (dirty: boolean) => void; initMode?: "data" | "structure" }) {
   const dialect = conn.fields.dbType as DbDialect;
   const writable = isWritableEnv(conn.env);
   const ref = useMemo(() => ({ connectionId: conn.id, database, schema, table }), [conn.id, database, schema, table]);
 
   const dbName = database ?? conn.fields.database ?? "";
   const [copied, setCopied] = useState(false);
-  const [mode, setMode] = useState<"data" | "structure">("data");
+  const [sqlCopied, setSqlCopied] = useState(false);
+  const [mode, setMode] = useState<"data" | "structure">(initMode ?? "data");
   const [st, setSt] = useState<DbStructure | null>(null);
   const [stErr, setStErr] = useState("");
   const [data, setData] = useState<DbQueryResult | null>(null);
@@ -46,7 +47,11 @@ export function TableView({ conn, database, schema, table, active, onDirty }: { 
   const [picked, setPicked] = useState<Set<number>>(new Set());
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [menu, setMenu] = useState(false);
+  const [tool, setTool] = useState<null | "cols" | "jump" | "info" | "data">(null);
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [colQ, setColQ] = useState("");
+  const [jumpIn, setJumpIn] = useState("");
+  const [auto, setAuto] = useState(false);
   const seq = useRef(0);
 
   const cols = data?.columns ?? [];
@@ -86,7 +91,19 @@ export function TableView({ conn, database, schema, table, active, onDirty }: { 
     } else setErr(r.error);
   };
 
+  // 自动刷新：每 10 秒重新取当前页；有没提交的修改、正在加载、页面不在前台时不刷
+  const tick = useRef(() => {});
+  tick.current = () => {
+    if (active && pending === 0 && !loading && !tool) void load(page, applied);
+  };
   useEffect(() => {
+    if (!auto) return;
+    const t = window.setInterval(() => tick.current(), 10_000);
+    return () => window.clearInterval(t);
+  }, [auto]);
+
+  useEffect(() => {
+    setHidden(new Set());
     void load(0, { where: "", orderBy: "" });
     void api.dbStructure(ref).then(r => (r.ok ? (setSt(r.data), setStErr("")) : setStErr(r.error)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -143,24 +160,29 @@ export function TableView({ conn, database, schema, table, active, onDirty }: { 
   };
 
   // ───── 表格里的内容：原数据 + 待提交的修改 + 新增的行 ─────
-  const gridCols: GridCol[] = cols.map(c => ({ name: c.name, type: stCol(c.name)?.dataType ?? c.dataType, pk: stCol(c.name)?.pk }));
+  // 「字段筛选」藏起来的列只是不显示，数据和修改都还在；表格里的列号要换算回真实列号
+  const vis = useMemo(() => cols.map((_, i) => i).filter(i => !hidden.has(cols[i].name)), [cols, hidden]);
+  const gridCols: GridCol[] = vis.map(i => ({ name: cols[i].name, type: stCol(cols[i].name)?.dataType ?? cols[i].dataType, pk: stCol(cols[i].name)?.pk, comment: stCol(cols[i].name)?.comment || undefined }));
   const gridRows: GridRow[] = useMemo(() => {
     const rows: GridRow[] = (data?.rows ?? []).map((cells, i) => {
       const ch = changes.get(i);
-      return { cells: ch ? cells.map((v, ci) => (cols[ci].name in ch ? ch[cols[ci].name] : v)) : cells, state: deleted.has(i) ? "deleted" : undefined, changed: ch ? cols.map(c => c.name in ch) : undefined };
+      const full = ch ? cells.map((v, ci) => (cols[ci].name in ch ? ch[cols[ci].name] : v)) : cells;
+      return { cells: vis.map(ci => full[ci]), state: deleted.has(i) ? "deleted" : undefined, changed: ch ? vis.map(ci => cols[ci].name in ch) : undefined };
     });
-    for (const vals of inserted) rows.push({ cells: cols.map(c => (c.name in vals ? vals[c.name] : null)), state: "inserted", unset: cols.map(c => !(c.name in vals)) });
+    for (const vals of inserted) rows.push({ cells: vis.map(ci => (cols[ci].name in vals ? vals[cols[ci].name] : null)), state: "inserted", unset: vis.map(ci => !(cols[ci].name in vals)) });
     return rows;
-  }, [data, changes, deleted, inserted, cols]);
+  }, [data, changes, deleted, inserted, cols, vis]);
 
-  const canEdit = (r: number, c: number) => {
+  const canEdit = (r: number, gc: number) => {
+    const c = vis[gc];
     if (!canWrite) return false;
     if (r >= n) return true;
     if (!hasPk || deleted.has(r)) return false;
     return !isLossy(data?.rows[r][c]);
   };
 
-  const onEdit = (r: number, c: number, value: string | null) => {
+  const onEdit = (r: number, gc: number, value: string | null) => {
+    const c = vis[gc];
     const name = cols[c].name;
     if (r >= n) {
       setInserted(list => list.map((v, i) => (i === r - n ? { ...v, [name]: value } : v)));
@@ -222,7 +244,7 @@ export function TableView({ conn, database, schema, table, active, onDirty }: { 
 
   // ───── 导出 ─────
   const doExport = async (fmt: "csv" | "json" | "sql", all: boolean) => {
-    setMenu(false);
+    setTool(null);
     let res: DbQueryResult | null = data;
     if (all) {
       setMsg({ ok: true, text: "正在取全部匹配的行…" });
@@ -236,6 +258,15 @@ export function TableView({ conn, database, schema, table, active, onDirty }: { 
     if (fmt === "csv") download(`${base}.csv`, toCsv(res.columns, res.rows), "text/csv");
     else if (fmt === "json") download(`${base}.json`, toJson(res.columns, res.rows), "application/json");
     else download(`${base}.sql`, toInsertSql(dialect, table, res.columns, res.rows));
+  };
+
+  /** 把现在看到的这页数据对应的 SQL 复制出来：用输入框里的条件和排序（没点应用也算），带分页 */
+  const copySql = () => {
+    const name = `${dialect === "postgresql" && schema ? quoteIdent(dialect, schema) + "." : ""}${quoteIdent(dialect, table)}`;
+    const w = whereIn.trim();
+    const o = orderIn.trim();
+    const text = `SELECT *\nFROM ${name}${w ? `\nWHERE ${w}` : ""}${o ? `\nORDER BY ${o}` : ""}\nLIMIT ${size}${page ? ` OFFSET ${page * size}` : ""};`;
+    void navigator.clipboard.writeText(text).then(() => (setSqlCopied(true), window.setTimeout(() => setSqlCopied(false), 1200)));
   };
 
   const from = page * size + 1;
@@ -260,51 +291,166 @@ export function TableView({ conn, database, schema, table, active, onDirty }: { 
         >
           <Icon name={copied ? "check" : "copy"} size={12} />
         </button>
-      </div>
-      <div className="tv-bar">
-        <div className="seg" role="tablist">
-          <button className={mode === "data" ? "on" : ""} data-testid="tv-mode-data" onClick={() => (setMsg(null), setMode("data"))}>
-            数据
-          </button>
-          <button className={mode === "structure" ? "on" : ""} data-testid="tv-mode-structure" onClick={() => (setMsg(null), setMode("structure"))}>
-            结构
-          </button>
-        </div>
         <span className="spacer" />
         {!writable && (
           <span className="db-rw ro" title={`环境是「${conn.env}」，只读；只有开发 / 测试环境的库可以改数据`}>
             只读
           </span>
         )}
-        <button className="btn sm" data-testid="tv-refresh" disabled={loading} onClick={refresh}>
-          <Icon name="refresh" size={13} /> 刷新
-        </button>
-        {canWrite && (
-          <>
-            <button className="btn sm" data-testid="tv-add" onClick={addRow}>
-              <Icon name="plus" size={13} /> 新增行
+        <div className="tv-tools">
+          {mode === "data" ? (
+            <button className="tv-tool" data-testid="tv-mode-structure" title="查看字段、类型、索引" onClick={() => (setMsg(null), setTool(null), setMode("structure"))}>
+              <Icon name="edit" size={13} /> 表结构
             </button>
-            <button className="btn sm" data-testid="tv-del" disabled={!picked.size} onClick={delRows} title={picked.size ? "把选中的行标记为删除，提交后才真正删除" : "先点行号选中要删的行"}>
-              <Icon name="trash" size={13} /> 删除行
+          ) : (
+            <button className="tv-tool on" data-testid="tv-mode-data" title="回到表数据" onClick={() => (setMsg(null), setMode("data"))}>
+              <Icon name="back" size={13} /> 返回数据
             </button>
-          </>
-        )}
-        <div className="tv-menu">
-          <button className="btn sm" data-testid="tv-export" disabled={!data} onClick={() => setMenu(m => !m)}>
-            <Icon name="download" size={13} /> 导出
-          </button>
-          {menu && (
-            <div className="tv-pop" onMouseLeave={() => setMenu(false)}>
-              <div className="tv-pop-h">当前页（{n} 行）</div>
-              <button onClick={() => void doExport("csv", false)}>CSV</button>
-              <button onClick={() => void doExport("json", false)}>JSON</button>
-              <button onClick={() => void doExport("sql", false)}>INSERT 语句</button>
-              <div className="tv-pop-h">全部匹配的行（最多 5000）</div>
-              <button data-testid="tv-export-all-csv" onClick={() => void doExport("csv", true)}>CSV</button>
-              <button onClick={() => void doExport("json", true)}>JSON</button>
-              <button onClick={() => void doExport("sql", true)}>INSERT 语句</button>
+          )}
+          {mode === "data" && (
+            <div className="tv-menu">
+              <button className={`tv-tool ${tool === "cols" ? "on" : ""}`} data-testid="tv-cols-btn" title="选择要显示的字段" onClick={() => setTool(t => (t === "cols" ? null : "cols"))}>
+                <Icon name="filter" size={13} /> 字段筛选{hidden.size ? `（隐藏 ${hidden.size}）` : ""}
+              </button>
+              {tool === "cols" && (
+                <>
+                  <div className="tv-away" onClick={() => setTool(null)} />
+                  <div className="tv-pop tv-pop-cols" data-testid="tv-cols-pop">
+                    <input className="tv-pop-q" autoFocus placeholder="搜索字段" value={colQ} onChange={e => setColQ(e.target.value)} />
+                    <div className="tv-pop-row">
+                      <button onClick={() => setHidden(new Set())}>全部显示</button>
+                      <button onClick={() => setHidden(new Set(cols.map(c => c.name).slice(1)))}>只留第一列</button>
+                    </div>
+                    <div className="tv-pop-list">
+                      {cols
+                        .filter(c => c.name.toLowerCase().includes(colQ.trim().toLowerCase()))
+                        .map(c => (
+                          <label key={c.name}>
+                            <input
+                              type="checkbox"
+                              checked={!hidden.has(c.name)}
+                              onChange={e =>
+                                setHidden(h => {
+                                  const next = new Set(h);
+                                  if (e.target.checked) next.delete(c.name);
+                                  else if (next.size < cols.length - 1) next.add(c.name); // 至少留一列
+                                  return next;
+                                })
+                              }
+                            />
+                            <span>{c.name}</span>
+                            {stCol(c.name)?.pk && <span className="dg-key">PK</span>}
+                          </label>
+                        ))}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
+          {mode === "data" && (
+            <div className="tv-menu">
+              <button className={`tv-tool ${tool === "jump" ? "on" : ""}`} data-testid="tv-jump-btn" title="跳到指定页" onClick={() => (setJumpIn(String(page + 1)), setTool(t => (t === "jump" ? null : "jump")))}>
+                <Icon name="right" size={13} /> 跳转到
+              </button>
+              {tool === "jump" && (
+                <>
+                  <div className="tv-away" onClick={() => setTool(null)} />
+                  <div className="tv-pop tv-pop-jump">
+                    <div className="tv-pop-h">跳到第几页（每页 {size} 行）</div>
+                    <div className="tv-pop-row">
+                      <input
+                        autoFocus
+                        inputMode="numeric"
+                        value={jumpIn}
+                        onChange={e => setJumpIn(e.target.value.replace(/\D/g, ""))}
+                        onKeyDown={e => e.key === "Enter" && (document.querySelector<HTMLButtonElement>("[data-testid=tv-jump-go]")?.click())}
+                      />
+                      <button
+                        data-testid="tv-jump-go"
+                        disabled={!jumpIn || Number(jumpIn) < 1}
+                        onClick={() => {
+                          setTool(null);
+                          go(Number(jumpIn) - 1);
+                        }}
+                      >
+                        跳转
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+          <div className="tv-menu">
+            <button className={`tv-tool ${tool === "info" ? "on" : ""}`} data-testid="tv-info-btn" title="这张表的基本信息" onClick={() => setTool(t => (t === "info" ? null : "info"))}>
+              <Icon name="info" size={13} /> 表属性
+            </button>
+            {tool === "info" && (
+              <>
+                <div className="tv-away" onClick={() => setTool(null)} />
+                <div className="tv-pop tv-pop-info" data-testid="tv-info-pop">
+                  <dl>
+                    <dt>连接</dt>
+                    <dd>{conn.name}（{conn.env}）</dd>
+                    <dt>库</dt>
+                    <dd>{dbName || "—"}</dd>
+                    {schema && (
+                      <>
+                        <dt>Schema</dt>
+                        <dd>{schema}</dd>
+                      </>
+                    )}
+                    <dt>表</dt>
+                    <dd>
+                      {table}
+                      {st?.view ? "（视图）" : ""}
+                    </dd>
+                    <dt>字段</dt>
+                    <dd>{st ? `${st.columns.length} 个` : "加载中…"}</dd>
+                    <dt>主键</dt>
+                    <dd>{st ? (pkCols.length ? pkCols.join("、") : "没有主键") : "…"}</dd>
+                    <dt>索引</dt>
+                    <dd>{st ? `${st.indexes.length} 个` : "…"}</dd>
+                    <dt>行数</dt>
+                    <dd>{total !== null ? `${total} 行` : "还没统计（数据工具里可统计）"}</dd>
+                    <dt>读写</dt>
+                    <dd>{writable ? "可读写" : "只读"}</dd>
+                  </dl>
+                </div>
+              </>
+            )}
+          </div>
+          <div className="tv-menu">
+            <button className={`tv-tool ${tool === "data" ? "on" : ""}`} data-testid="tv-export" disabled={!data} title="导出、统计总数" onClick={() => setTool(t => (t === "data" ? null : "data"))}>
+              <Icon name="sliders" size={13} /> 数据工具
+            </button>
+            {tool === "data" && (
+              <>
+                <div className="tv-away" onClick={() => setTool(null)} />
+                <div className="tv-pop">
+                  <div className="tv-pop-h">当前页（{n} 行）</div>
+                  <button onClick={() => void doExport("csv", false)}>导出 CSV</button>
+                  <button onClick={() => void doExport("json", false)}>导出 JSON</button>
+                  <button onClick={() => void doExport("sql", false)}>导出 INSERT 语句</button>
+                  <div className="tv-pop-h">全部匹配的行（最多 5000）</div>
+                  <button data-testid="tv-export-all-csv" onClick={() => void doExport("csv", true)}>导出 CSV</button>
+                  <button onClick={() => void doExport("json", true)}>导出 JSON</button>
+                  <button onClick={() => void doExport("sql", true)}>导出 INSERT 语句</button>
+                  <div className="tv-pop-h">统计</div>
+                  <button
+                    disabled={counting}
+                    onClick={() => {
+                      setTool(null);
+                      void countAll();
+                    }}
+                  >
+                    {total !== null ? `重新统计总数（现为 ${total} 行）` : "统计总数"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -319,9 +465,6 @@ export function TableView({ conn, database, schema, table, active, onDirty }: { 
           <span className="spacer" />
           <button className="btn sm" disabled={saving} onClick={clearPending}>
             <Icon name="undo" size={13} /> 撤销
-          </button>
-          <button className="btn sm primary" data-testid="tv-commit" disabled={saving} onClick={() => void commit()}>
-            <Icon name="check" size={13} /> {saving ? "提交中…" : "提交"}
           </button>
         </div>
       )}
@@ -388,9 +531,36 @@ export function TableView({ conn, database, schema, table, active, onDirty }: { 
                 />
               )}
             </div>
-            <button className="btn sm primary" data-testid="tv-apply" disabled={loading} onClick={apply}>
-              <Icon name="play" size={11} /> 应用
-            </button>
+            <div className="tv-acts">
+              <button className="tv-act" data-testid="tv-copy-sql" title="复制当前查询的 SQL（带筛选、排序和分页）" onClick={copySql}>
+                <Icon name={sqlCopied ? "check" : "copy"} size={13} />
+                {sqlCopied && <span>已复制</span>}
+              </button>
+              <button className="tv-act" data-testid="tv-apply" disabled={loading} title="应用筛选和排序（在输入框里按回车也行）" onClick={apply}>
+                <Icon name="play" size={12} />
+              </button>
+              <span className="tv-act-sep" />
+              <button className="tv-act" data-testid="tv-refresh" disabled={loading} title="刷新当前页" onClick={refresh}>
+                <Icon name="refresh" size={13} /> 刷新
+              </button>
+              <button className={`tv-act ${auto ? "on" : ""}`} data-testid="tv-auto" title={auto ? "每 10 秒自动刷新，点一下关闭" : "每 10 秒自动刷新当前页（有未提交修改时不刷）"} onClick={() => setAuto(a => !a)}>
+                <Icon name="timer" size={13} /> 自动
+              </button>
+              {canWrite && (
+                <>
+                  <span className="tv-act-sep" />
+                  <button className="tv-act" data-testid="tv-add" onClick={addRow}>
+                    <Icon name="plus" size={13} /> 新增行
+                  </button>
+                  <button className="tv-act danger" data-testid="tv-del" disabled={!picked.size} onClick={delRows} title={picked.size ? "把选中的行标记为删除，提交后才真正删除" : "先点行号选中要删的行"}>
+                    <Icon name="trash" size={13} /> 删除行
+                  </button>
+                  <button className="tv-act submit" data-testid="tv-commit" disabled={saving || pending === 0} title={pending ? `提交 ${pending} 处修改` : "没有要提交的修改"} onClick={() => void commit()}>
+                    <Icon name="check" size={13} /> {saving ? "提交中…" : "提交"}
+                  </button>
+                </>
+              )}
+            </div>
           </div>
           {err ? (
             <div className="tv-err" data-testid="tv-err">

@@ -1,6 +1,6 @@
-import type { HarnessEvent, Msg } from "../../src/core/types";
+import type { AskAnswer, AskQuestion, HarnessEvent, Msg } from "../../src/core/types";
 
-export type { HarnessEvent, Msg };
+export type { AskAnswer, AskQuestion, HarnessEvent, Msg };
 
 export interface ProviderInfo {
   name: string;
@@ -66,6 +66,21 @@ export interface DailyDTO {
 }
 
 /** 应用更新状态 */
+/** 数据位置：当前目录 / 默认目录 / 界面存储（对话记录）目录 */
+export interface DataDirDTO {
+  current: string;
+  defaultDir: string;
+  isDefault: boolean;
+  stateDir: string;
+}
+
+/** 开机自启动：supported=false 时 reason 说明为什么不能设置 */
+export interface AutostartDTO {
+  supported: boolean;
+  enabled: boolean;
+  reason?: string;
+}
+
 export interface UpdateStateDTO {
   state: "idle" | "checking" | "none" | "available" | "downloading" | "downloaded" | "error" | "unconfigured";
   /** 当前版本 */
@@ -151,6 +166,8 @@ export interface TodoItemDTO {
   active?: boolean;
   /** 我在这个需求下负责的节点和子任务 */
   children?: TodoChildDTO[];
+  /** 需求所在飞书项目空间的 key */
+  projectKey?: string;
 }
 export interface TodoChildDTO {
   id: string;
@@ -166,8 +183,33 @@ export interface TodoChildDTO {
   days?: number;
   /** 负责人 */
   owner?: string;
-  /** 排期是在本软件里填的（界面用，不来自飞书） */
-  local?: boolean;
+  /** 子任务所在节点的 key（改飞书子任务要用） */
+  nodeKey?: string;
+}
+export interface WorkChatDTO {
+  ok: boolean;
+  /** 需求没有拉群 */
+  none?: boolean;
+  groupId?: string;
+  name?: string;
+  status?: string;
+  /** 飞书项目里的「拉群方式」，如「自动拉群」「不拉群」 */
+  how?: string;
+  link?: string;
+  error?: string;
+}
+export interface SubtaskUpdateReq {
+  projectKey: string;
+  /** 需求（工作项）id */
+  wid: string;
+  nodeKey: string;
+  subId: string;
+  /** true = 完成，false = 回滚成未完成 */
+  done?: boolean;
+  /** 排期起止（毫秒）和人天 */
+  start?: number;
+  end?: number;
+  days?: number;
 }
 export interface TodoSourceDTO {
   enabled: boolean;
@@ -279,6 +321,13 @@ export interface RunOutcome {
   runId: string;
 }
 
+/** AI 向操作人提的问题（等界面回答） */
+export interface AskRequest {
+  id: string;
+  runKey: string;
+  questions: AskQuestion[];
+}
+
 export interface ApprovalRequest {
   id: string;
   runKey: string;
@@ -307,6 +356,8 @@ export interface TraceLineDTO {
 /** preload 暴露给渲染进程的 API（window.harness） */
 export interface HarnessApi {
   getState(): Promise<AppState>;
+  /** 配置文件当前的原文 */
+  configText(): Promise<string>;
   saveConfig(text: string): Promise<{ ok: boolean; error?: string }>;
   pickWorkspace(): Promise<string | null>;
   pickFolder(title?: string): Promise<string | null>;
@@ -346,8 +397,19 @@ export interface HarnessApi {
   pluginFetchUrl(url: string): Promise<{ ok: boolean; entries?: import("./plugins").PluginEntry[]; skipped?: string[]; error?: string }>;
   /** 让 DBX 弹出某个插件的安装确认 */
   /** 把目录里的插件直接装到本软件（下载 + 校验 + 解压），不需要 DBX */
-  pluginInstall(id: string): Promise<{ ok: boolean; version?: string; error?: string }>;
+  pluginInstall(id: string): Promise<{ ok: boolean; version?: string; /** 装好了，但有要说明的（比如某个技能因为重名没覆盖） */ note?: string; error?: string }>;
   pluginUninstall(id: string): Promise<{ ok: boolean; error?: string }>;
+  /** 仓库里的 MCP / 技能 / 动作 / 规则：装进本软件的配置（参数是商店条目的 key） */
+  /** 技能 / MCP / 动作 / 规则：软件自带的推荐、从 GitHub 导入、添加（这些不是插件，在各自的设置页里用） */
+  resourceRecommended(kind: string): Promise<import("./plugins").ResourceItem[]>;
+  resourceScan(url: string): Promise<import("./plugins").ResourceScan>;
+  resourceAdd(key: string): Promise<{ ok: boolean; error?: string }>;
+  /** 「加载」：在用户选的本机文件夹里找技能 / MCP / 动作 / 规则 */
+  resourceScanLocal(dir: string): Promise<import("./plugins").ResourceScan>;
+  /** 「同步」能选的平台（Cursor / Claude Code / Codex）：哪些添加过账号、本机有没有它的目录 */
+  resourceSyncPlatforms(): Promise<import("./plugins").PlatformInfo[]>;
+  /** 「同步」：列出这个平台在本机已经有的内容 */
+  resourceSyncScan(id: string): Promise<import("./plugins").ResourceScan>;
   connectionList(): Promise<import("./connections").Connection[]>;
   connectionSave(input: import("./connections").ConnectionInput): Promise<{ ok: boolean; conn?: import("./connections").Connection; error?: string }>;
   connectionRemove(id: string): Promise<{ ok: boolean; error?: string }>;
@@ -362,7 +424,9 @@ export interface HarnessApi {
   /** 从链接安装 .dbxp */
   pluginInstallUrl(url: string): Promise<PluginInstallResult>;
   pluginRepos(): Promise<import("./plugins").PluginRepo[]>;
-  pluginRepoAdd(r: { id: string; name?: string; url: string }): Promise<{ ok: boolean; error?: string }>;
+  /** 测试仓库地址：读一次它的插件目录，不保存 */
+  pluginRepoTest(r: { name?: string; url: string }): Promise<{ ok: boolean; count?: number; names?: string[]; error?: string }>;
+  pluginRepoAdd(r: { id?: string; name?: string; url: string }): Promise<{ ok: boolean; error?: string }>;
   pluginRepoRemove(id: string): Promise<{ ok: boolean; error?: string }>;
   pluginRepoToggle(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>;
   pluginOpenDir(): Promise<{ ok: boolean; error?: string }>;
@@ -381,6 +445,9 @@ export interface HarnessApi {
   pluginUiList(): Promise<import("./pluginhost").UiPlugin[]>;
   /** 连接类插件（如 XXL-JOB）可选的连接，来自「设置 → 连接」 */
   pluginConnections(id: string): Promise<import("./pluginhost").PluginConn[]>;
+  /** 能给 AI 用的插件（清单里有 mcp 贡献）及其工具；已确认信任的才有工具列表 */
+  pluginAiList(): Promise<import("./pluginhost").PluginAiInfo[]>;
+  pluginAiSet(id: string, on: boolean): Promise<void>;
   /** 用户确认信任并允许运行带本机程序的插件 */
   pluginTrust(id: string, grants?: string[]): Promise<boolean>;
   pluginDbAccess(id: string): Promise<import("./pluginhost").PluginDbAccess>;
@@ -390,6 +457,14 @@ export interface HarnessApi {
   onPluginEvent(cb: (e: { id: string; method: string; params: unknown }) => void): () => void;
   /** 工作台：我的待办（飞书项目 + 钉钉），没启用的来源 enabled=false */
   workbenchTodos(): Promise<WorkbenchTodosDTO>;
+  /** 上一次读成功的待办（立即返回、不联网），用来先显示；at 是读取时间 */
+  workbenchTodosCached(): Promise<(WorkbenchTodosDTO & { at: number }) | null>;
+  /** 在飞书项目里完成 / 回滚子任务，或改子任务的排期和人天；成功后返回从飞书重新读到的这个子任务 */
+  workbenchSubtaskUpdate(req: SubtaskUpdateReq): Promise<{ ok: boolean; error?: string; child?: { done?: boolean; start?: number; end?: number; days?: number } }>;
+  /** 读需求（飞书项目工作项）对应的飞书群：群 id、群名、状态、打开链接；没拉群就 none */
+  workItemChat(req: { projectKey?: string; wid: string; url?: string; chatId?: string }): Promise<WorkChatDTO>;
+  /** 新建一个飞书群（以 lark-cli 登录的用户身份）；返回新群的 id / 名称 / 打开链接 */
+  workItemChatCreate(req: { name: string; description?: string }): Promise<WorkChatDTO>;
   inspectRepo(dir: string): Promise<RepoInspectDTO>;
   cloneRepo(url: string, parentDir: string, name: string): Promise<{ ok: boolean; path?: string; error?: string }>;
   openPath(p: string): Promise<void>;
@@ -416,6 +491,12 @@ export interface HarnessApi {
   integrationStatus(kind: IntegrationKind): Promise<IntegrationStatusDTO>;
   /** 检查更新（lark-cli、dws 支持；meegle 没有更新检查接口） */
   integrationCheckUpdate(kind: IntegrationKind): Promise<IntegrationUpdateDTO>;
+  /** 一键安装 / 升级 CLI（npm install -g <包>@latest），耗时可能几十秒 */
+  integrationInstall(kind: IntegrationKind): Promise<{ ok: boolean; output: string; error?: string }>;
+  /** 一键登录：自动在浏览器打开授权页，等用户授权完成后返回（最长约 10 分钟） */
+  integrationLogin(kind: IntegrationKind): Promise<{ ok: boolean; message: string }>;
+  /** 登录过程中的进度：授权链接（可复制）、验证码、阶段提示 */
+  onIntegrationLoginProgress(cb: (p: { kind: IntegrationKind; url?: string; userCode?: string; text?: string }) => void): () => void;
   /** 飞书项目里当前账号的空间列表（给「默认空间」下拉用） */
   feishuSpaces(): Promise<{ ok: boolean; spaces?: Array<{ name: string; key: string; simpleName?: string }>; error?: string }>;
   /** MCP 服务的连接状态与工具（会触发尚未连接的服务开始连接，界面轮询即可） */
@@ -435,6 +516,12 @@ export interface HarnessApi {
   updateState(): Promise<UpdateStateDTO>;
   /** 立即检查更新（设置改了仓库后也调这个） */
   updateCheck(): Promise<UpdateStateDTO>;
+  /** 开机自启动（系统登录项）：读 / 设 */
+  /** 数据目录：读 / 改（改完软件会自己重启，下次启动先迁移旧数据） */
+  dataDirGet(): Promise<DataDirDTO>;
+  dataDirSet(dir: string): Promise<{ ok: boolean; error?: string }>;
+  autostartGet(): Promise<AutostartDTO>;
+  autostartSet(on: boolean): Promise<AutostartDTO>;
   /** 下载更新；不能应用内安装时打开 Release 页面 */
   updateDownload(): Promise<UpdateStateDTO>;
   /** 退出并安装已下载的更新 */
@@ -448,6 +535,8 @@ export interface HarnessApi {
   run(req: RunRequest): Promise<RunOutcome>;
   abort(runKey: string): Promise<void>;
   respondApproval(id: string, approved: boolean, remember: boolean): Promise<void>;
+  /** 回答 AI 的提问；answers 传 null = 跳过 */
+  respondAsk(id: string, answers: Array<{ id: string; picked: string[]; text?: string }> | null): Promise<void>;
 
   listTraces(): Promise<TraceInfo[]>;
   readTrace(file: string): Promise<TraceLineDTO[]>;
@@ -458,6 +547,7 @@ export interface HarnessApi {
 
   onRunEvent(cb: (runKey: string, event: HarnessEvent) => void): () => void;
   onApproval(cb: (req: ApprovalRequest) => void): () => void;
+  onAsk(cb: (req: AskRequest) => void): () => void;
   onChannelLog(cb: (line: string) => void): () => void;
 }
 

@@ -18,6 +18,11 @@ export interface RepoConfig {
   branch?: string;
   platform?: string;
   branches?: { base?: string; test?: string; integration?: string };
+  readOnly?: boolean;
+  scriptRepo?: boolean;
+  branchTemplate?: string;
+  previewCmd?: string;
+  installCmd?: string;
 }
 
 export const GIT_READ = ["status", "log", "diff", "show", "branch", "blame", "ls-files", "rev-parse", "grep", "remote", "tag", "shortlog", "describe", "rev-list", "diff-tree", "show-ref", "cat-file", "merge-base", "name-rev"];
@@ -126,6 +131,13 @@ export function resolveRepoDir(root: string, repos: Record<string, RepoConfig>, 
   return path.resolve(r.path);
 }
 
+/** 这个目录属于哪个登记过的仓库（按路径，忽略大小写和末尾分隔符） */
+export function repoByDir(repos: Record<string, RepoConfig>, dir: string): [string, RepoConfig] | undefined {
+  const norm = (p: string) => path.resolve(p).replace(/[\\/]+$/, "").toLowerCase();
+  const d = norm(dir);
+  return Object.entries(repos).find(([, r]) => norm(r.path) === d);
+}
+
 const ArgsField = z.array(z.string()).default([]).describe('git 参数数组，如 ["--oneline","-n","20"]');
 const RepoField = z.string().optional().describe("已登记的仓库名；不填则使用当前工作区所在仓库");
 
@@ -141,7 +153,7 @@ export function gitTools(repos: Record<string, RepoConfig> = {}, authEnv?: (remo
   return [
     {
       name: "git_repos",
-      description: "列出已登记的代码仓库（名称、本地路径、远端地址、平台，以及约定的基线 / 提测 / 联调分支 branches.base / test / integration）。创建 feature 分支、提测、联调时按这些分支操作。",
+      description: "列出已登记的代码仓库（名称、本地路径、远端地址、平台，以及约定的基线 / 提测 / 联调分支 branches.base / test / integration）。创建 feature 分支、提测、联调时按这些分支操作。另有：readOnly=只读仓库（不能改）、scriptRepo=脚本仓（不是业务代码仓）、branchTemplate=feature 分支名模板（有就按它起名）、installCmd=依赖初始化命令、previewCmd=预览启动命令。",
       risk: "read",
       schema: z.object({}),
       async run() {
@@ -167,6 +179,8 @@ export function gitTools(repos: Record<string, RepoConfig> = {}, authEnv?: (remo
       async run({ command, args, repo }, ctx) {
         const argv = buildGitArgs("write", command, args);
         const cwd = resolveRepoDir(ctx.root, repos, repo);
+        const ro = repoByDir(repos, cwd);
+        if (ro?.[1].readOnly) throw new Error(`仓库「${ro[0]}」被设为只读，不能用 git_write 改动它（要改请先在 设置 → 代码仓库 里关掉它的「只读」）`);
         let env: Record<string, string> | undefined;
         if (authEnv && ["fetch", "pull", "push"].includes(argv[0])) {
           const origin = (await runGit(["remote", "get-url", "origin"], cwd, ctx.signal, 15)).out.trim();

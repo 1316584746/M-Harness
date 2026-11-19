@@ -1,6 +1,6 @@
 import { ContextManager, truncate } from "./context";
 import { Guardrails, denyAll, type Approver } from "./guardrails";
-import type { Emit, ModelAdapter, Msg, Provider, RunResult, Tool } from "./types";
+import type { Asker, Emit, ModelAdapter, Msg, Provider, RunResult, Tool } from "./types";
 import { newRunId } from "./trace";
 
 export interface RunOptions {
@@ -15,6 +15,8 @@ export interface RunOptions {
   timeoutMs?: number;
   guard?: Guardrails;
   approve?: Approver;
+  /** 让 AI 能向操作人提问（ask_user 工具用） */
+  ask?: Asker;
   context?: ContextManager;
   emit?: Emit;
   signal?: AbortSignal;
@@ -115,7 +117,7 @@ export async function runAgent(
           } else {
             emit({ type: "tool_call", step, name: tool.name, args: parsed.data });
             const t1 = Date.now();
-            output = await tool.run(parsed.data, { signal, root }).catch(e => `工具异常：${e?.message ?? e}`);
+            output = await tool.run(parsed.data, { signal, root, ask: opts.ask }).catch(e => `工具异常：${e?.message ?? e}`);
             output = truncate(output, context.maxToolOutput);
             emit({ type: "tool_result", step, name: tool.name, output, ms: Date.now() - t1 });
           }
@@ -149,13 +151,25 @@ export async function runDelegate(
     .filter(Boolean)
     .join("\n\n");
   const base: Msg[] = [...(opts.history ?? []), { role: "user", content: opts.input }];
+  // 中断要立刻生效：外部 Agent 在「准备中」（创建会话、提交任务）阶段往往不响应 signal，
+  // 所以这里不能干等 backend.run 自己返回，而是让「中断」和「运行结束」赛跑。
+  // backend 自己仍会收到 signal 去清理（杀进程 / 取消 run），只是用户界面不必等它。
+  let onAbort: (() => void) | undefined;
+  const aborted$ = new Promise<never>((_, reject) => {
+    const fail = () => reject(new Error(abortReason(signal)));
+    if (signal.aborted) return fail();
+    onAbort = fail;
+    signal.addEventListener("abort", fail, { once: true });
+  });
   try {
-    const r = await backend.run({
+    const running = backend.run({
       prompt,
       cwd: opts.root,
       signal,
-      onProgress: line => emit({ type: "agent_progress", line }),
+      onProgress: (line, kind) => !signal.aborted && emit({ type: "agent_progress", line, ...(kind ? { kind } : {}) }),
     });
+    running.catch(() => {}); // 赛跑输了之后它再失败也不算未处理异常
+    const r = await Promise.race([running, aborted$]);
     emit({ type: "done", reason: "final", text: r.text });
     return {
       reason: "final",
@@ -169,6 +183,8 @@ export async function runDelegate(
     const error = aborted ? abortReason(signal) : `外部 Agent 失败：${e?.message ?? e}`;
     emit({ type: "done", reason: aborted ? "aborted" : "error", error });
     return { reason: aborted ? "aborted" : "error", text: "", steps: 1, tokens: 0, messages: base, error };
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
   }
 }
 

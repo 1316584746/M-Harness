@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Connection } from "../../../shared/connections";
-import { quoteIdent, type DbDialect, type DbFocus } from "../../../shared/db";
+import { quoteIdent, type DbDialect, type DbFocus, type DbRunReq } from "../../../shared/db";
 import { api } from "../api";
 import { Icon } from "../components/Icon";
 import { pruneQueries, type SavedQuery } from "../lib/savedQueries";
@@ -17,6 +17,10 @@ interface Tab {
   table?: string;
   title: string;
   sql?: string;
+  /** 打开后马上运行一次（AI 助手回复里点「运行」带过来的） */
+  autoRun?: boolean;
+  /** 表标签：一打开是看数据还是看结构 */
+  initMode?: "data" | "structure";
   /** 从「查询」里保存的某条打开的 / 保存过的 */
   savedId?: string;
   /** 「默认查询」的位置标记 */
@@ -31,7 +35,7 @@ const tableKey = (connId: string, database: string | undefined, schema: string |
  * 直接连「设置 → 连接」里的数据库连接（MySQL / PostgreSQL），不需要装插件。
  * 开发 / 测试环境的库可以改数据，其他环境只读。
  */
-export function Database({ active, onManage, onFocus }: { active: boolean; onManage: () => void; onFocus?: (f: DbFocus | null) => void }) {
+export function Database({ active, onManage, onFocus, run }: { active: boolean; onManage: () => void; onFocus?: (f: DbFocus | null) => void; run?: DbRunReq | null }) {
   const [conns, setConns] = useState<Connection[] | null>(null);
   const [version, setVersion] = useState(0);
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -62,18 +66,32 @@ export function Database({ active, onManage, onFocus }: { active: boolean; onMan
 
   const connOf = (id: string) => conns?.find(c => c.id === id);
 
-  const openTable = (c: Connection, database: string | undefined, schema: string | undefined, table: string) => {
-    const id = "t:" + tableKey(c.id, database, schema, table);
-    setTabs(t => (t.some(x => x.id === id) ? t : [...t, { id, kind: "table", connId: c.id, database, schema, table, title: table }]));
+  /** 打开一张表。newTab：再开一个同样的标签（右键「新标签页查看」）；structure：直接看表结构 */
+  const openTable = (c: Connection, database: string | undefined, schema: string | undefined, table: string, o?: { newTab?: boolean; structure?: boolean }) => {
+    const base = "t:" + tableKey(c.id, database, schema, table);
+    const id = o?.newTab ? `${base}:n${++seq.current}` : o?.structure ? `${base}:s` : base;
+    setTabs(t => (t.some(x => x.id === id) ? t : [...t, { id, kind: "table", connId: c.id, database, schema, table, title: o?.structure ? `${table}（结构）` : table, initMode: o?.structure ? "structure" : undefined }]));
     setActiveId(id);
   };
 
-  const openQuery = (c: Connection, database?: string, schema?: string, sql?: string) => {
+  const openQuery = (c: Connection, database?: string, schema?: string, sql?: string, autoRun = false) => {
     const id = `q:${++seq.current}:${Date.now()}`;
     const n = tabs.filter(t => t.kind === "query").length + 1;
-    setTabs(t => [...t, { id, kind: "query", connId: c.id, database, schema, title: `查询 ${n}`, sql: sql ?? "" }]);
+    setTabs(t => [...t, { id, kind: "query", connId: c.id, database, schema, title: `查询 ${n}`, sql: sql ?? "", autoRun }]);
     setActiveId(id);
   };
+
+  // AI 助手回复里的 SQL 点了「运行」：新开一个查询页带过去，马上运行
+  const lastRun = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (!run || run.n === lastRun.current || !conns) return;
+    lastRun.current = run.n;
+    const c = connOf(run.connId ?? "") ?? (cur && connOf(cur.connId)) ?? conns[0];
+    if (!c) return;
+    const pg = c.fields.dbType === "postgresql";
+    openQuery(c, run.database || c.fields.database || undefined, pg ? run.schema || "public" : undefined, run.sql.trim() + "\n", true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run?.n, conns]);
 
   /** 「打开默认查询」：每个 连接 / 库 / schema 一个，已经开着就切过去，没有就新开 */
   const openDefault = (c: Connection, database?: string, schema?: string) => {
@@ -185,12 +203,12 @@ export function Database({ active, onManage, onFocus }: { active: boolean; onMan
             const c = connOf(t.connId);
             if (!c) return null;
             return t.kind === "table" ? (
-              <TableView key={t.id} conn={c} database={t.database} schema={t.schema} table={t.table!} active={active && t.id === activeId} onDirty={d => setTabs(l => l.map(x => (x.id === t.id && !!x.dirty !== d ? { ...x, dirty: d } : x)))} />
+              <TableView key={t.id} conn={c} database={t.database} schema={t.schema} table={t.table!} initMode={t.initMode} active={active && t.id === activeId} onDirty={d => setTabs(l => l.map(x => (x.id === t.id && !!x.dirty !== d ? { ...x, dirty: d } : x)))} />
             ) : (
               <QueryView
                 key={t.id}
                 conns={conns ?? []}
-                init={{ connId: t.connId, database: t.database, schema: t.schema, sql: t.sql ?? "", savedId: t.savedId, name: t.savedId ? t.title : undefined }}
+                init={{ connId: t.connId, database: t.database, schema: t.schema, sql: t.sql ?? "", autoRun: t.autoRun, savedId: t.savedId, name: t.savedId ? t.title : undefined }}
                 active={active && t.id === activeId}
                 onSaved={q => setTabs(l => l.map(x => (x.id === t.id ? { ...x, savedId: q.id, title: q.name } : x)))}
               />

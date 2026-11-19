@@ -20,6 +20,12 @@ describe("用户数据不上传仓库", () => {
     "models-cache.json",
     "plugin-data/",
     ".host-storage.json",
+    "/dsh/",
+    "dsh-consent.json",
+    "plugin-ai.json",
+    "workbench-cache.json",
+    "/tasks/",
+    ".traces/",
   ];
   it.each(must)("%s 被 .gitignore 忽略", name => {
     expect(ignore).toContain(name);

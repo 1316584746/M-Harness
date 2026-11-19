@@ -3,6 +3,7 @@ import { CONN_FIELDS, CONN_KINDS, DB_TYPES, DEFAULTS, ENV_PRESETS, connKindOf, c
 import { api } from "../../api";
 import { GitlabFromHosts } from "../../components/GitlabFromHosts";
 import { Icon, type IconName } from "../../components/Icon";
+import { Req, useRequired, type ReqField } from "../../components/Required";
 import { Switch } from "./Projects";
 
 const envClass = (env: string) => (env === "生产" ? "prod" : env === "预发" ? "pre" : env === "测试" ? "test" : env === "开发" ? "dev" : "other");
@@ -245,7 +246,9 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
 
   const env = envSel === "__custom" ? envText : envSel;
   const draft = (): ConnectionInput => ({ id: init.id, kind: init.kind, name, env, machine, note, enabled: init.enabled, fields: vals, secrets });
+  const req = useRequired();
   const set = (k: string, v: string) => {
+    req.clear(k);
     setVals(o => {
       const next = { ...o, [k]: v };
       // 换数据库类型时，端口还是上一个类型的默认值就跟着换
@@ -260,7 +263,24 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
     setRes(null);
   };
 
+  /** 必填项逐个检查（名称、环境，以及当前可见的必填字段）；秘密字段已保存过的算已填 */
+  const requiredFields = (withName: boolean): ReqField[] => [
+    ...(withName
+      ? [
+          { key: "name", label: "名称", ok: !!name.trim() },
+          { key: "env", label: "环境", ok: !!env.trim() },
+        ]
+      : []),
+    ...defs
+      .filter(d => d.required && fieldVisible(d, vals))
+      .map(d => {
+        const v = isSecretField(d) ? (secrets[d.key] ?? "") : (vals[d.key] ?? "");
+        return { key: d.key, label: d.label, ok: isSecretField(d) ? v !== "" || !!secretSet[d.key] : v.trim() !== "" };
+      }),
+  ];
   const save = async () => {
+    const miss = req.check(requiredFields(true));
+    if (miss) return setErr(miss);
     setBusy(true);
     const r = await api.connectionSave(draft());
     setBusy(false);
@@ -268,6 +288,8 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
     else setErr(r.error ?? "保存失败");
   };
   const test = async () => {
+    const miss = req.check(requiredFields(false));
+    if (miss) return setErr(miss);
     setRes("testing");
     setErr("");
     setRes(await api.connectionTest(draft()));
@@ -278,7 +300,7 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
     const tid = `conn-f-${d.key}`;
     if (d.kind === "select")
       return (
-        <select className="input" data-testid={tid} value={v} onChange={e => set(d.key, e.target.value)}>
+        <select className={req.cls(d.key)} data-req={d.key} data-testid={tid} value={v} onChange={e => set(d.key, e.target.value)}>
           {d.options?.map(o => (
             <option key={o.value} value={o.value}>
               {o.label}
@@ -288,7 +310,7 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
       );
     if (d.kind === "connection")
       return (
-        <select className="input" data-testid={tid} value={v} onChange={e => set(d.key, e.target.value)}>
+        <select className={req.cls(d.key)} data-req={d.key} data-testid={tid} value={v} onChange={e => set(d.key, e.target.value)}>
           <option value="">{servers.length ? "请选择服务器连接" : "还没有服务器连接，请先添加"}</option>
           {servers.map(s => (
             <option key={s.id} value={s.id}>
@@ -308,9 +330,12 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
       return (
         <SecretInput
           testid={tid}
+          reqKey={d.key}
+          invalid={req.bad.includes(d.key)}
           placeholder={secretSet[d.key] ? "已设置，留空表示不修改" : (d.placeholder ?? "")}
           value={secrets[d.key] ?? ""}
           onChange={v => {
+            req.clear(d.key);
             // 留空 = 不修改（输入后又删光也一样，避免误清掉已保存的密码）
             setSecrets(o => {
               const n = { ...o, [d.key]: v };
@@ -322,7 +347,7 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
           }}
         />
       );
-    return <input className={`input ${d.kind === "number" ? "num" : ""}`} data-testid={tid} inputMode={d.kind === "number" ? "numeric" : undefined} placeholder={d.placeholder} value={v} onChange={e => set(d.key, e.target.value)} />;
+    return <input className={req.cls(d.key, `input ${d.kind === "number" ? "num" : ""}`)} data-req={d.key} data-testid={tid} inputMode={d.kind === "number" ? "numeric" : undefined} placeholder={d.placeholder} value={v} onChange={e => set(d.key, e.target.value)} />;
   };
 
   const rows = defs.filter(d => fieldVisible(d, vals));
@@ -335,12 +360,18 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
           {info.label}连接
         </h3>
         <label className="auto-field">
-          <span>名称</span>
-          <input className="input" data-testid="conn-f-name" placeholder="比如：订单库-主库" value={name} onChange={e => (setName(e.target.value), setErr(""))} autoFocus />
+          <span>
+            名称
+            <Req />
+          </span>
+          <input className={req.cls("name")} data-req="name" data-testid="conn-f-name" placeholder="比如：订单库-主库" value={name} onChange={e => (setName(e.target.value), req.clear("name"), setErr(""))} autoFocus />
         </label>
         <div className="auto-two">
           <div className="auto-field">
-            <span>环境</span>
+            <span>
+              环境
+              <Req />
+            </span>
             <select className="input" data-testid="conn-f-env" value={envSel} onChange={e => (setEnvSel(e.target.value), setErr(""))}>
               {ENV_PRESETS.map(e => (
                 <option key={e} value={e}>
@@ -349,7 +380,7 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
               ))}
               <option value="__custom">自定义…</option>
             </select>
-            {envSel === "__custom" && <input className="input" data-testid="conn-f-env-custom" placeholder="环境名，比如：灰度" value={envText} onChange={e => (setEnvText(e.target.value), setErr(""))} />}
+            {envSel === "__custom" && <input className={req.cls("env")} data-req="env" data-testid="conn-f-env-custom" placeholder="环境名，比如：灰度" value={envText} onChange={e => (setEnvText(e.target.value), req.clear("env"), setErr(""))} />}
           </div>
           <label className="auto-field">
             <span>机器</span>
@@ -361,7 +392,7 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
           <label key={d.key} className="auto-field" data-testid={`conn-field-${d.key}`}>
             <span>
               {d.label}
-              {d.required && <em className="conn-req">*</em>}
+              {d.required && <Req />}
             </span>
             {input(d)}
             {d.hint && <small className="conn-hint">{d.hint}</small>}
@@ -411,11 +442,11 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
 }
 
 /** 密码 / 令牌输入框：右侧的眼睛切换显示或隐藏（只影响正在输入的内容；已保存的秘密不会回传到界面） */
-function SecretInput({ value, onChange, placeholder, testid }: { value: string; onChange: (v: string) => void; placeholder?: string; testid: string }) {
+function SecretInput({ value, onChange, placeholder, testid, reqKey, invalid }: { value: string; onChange: (v: string) => void; placeholder?: string; testid: string; reqKey?: string; invalid?: boolean }) {
   const [show, setShow] = useState(false);
   return (
     <span className="conn-secret">
-      <input className="input" type={show ? "text" : "password"} autoComplete="new-password" spellCheck={false} data-testid={testid} placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)} />
+      <input className={invalid ? "input invalid" : "input"} data-req={reqKey} type={show ? "text" : "password"} autoComplete="new-password" spellCheck={false} data-testid={testid} placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)} />
       <button type="button" className="conn-eye" data-testid={`${testid}-eye`} title={show ? "隐藏" : "显示"} aria-label={show ? "隐藏" : "显示"} onClick={e => (e.preventDefault(), setShow(s => !s))}>
         <Icon name={show ? "eyeOff" : "eye"} size={15} />
       </button>

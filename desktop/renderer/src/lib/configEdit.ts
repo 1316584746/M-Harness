@@ -13,13 +13,14 @@ export function parseCfg(text: string): Cfg | null {
   }
 }
 
-/** 在界面里改配置：读当前配置文件 → 修改 → 校验并写回（等同于手动编辑 JSON） */
+/** 在界面里改配置：读当前配置文件 → 修改 → 校验并写回（等同于手动编辑 JSON）。每次都向主进程重新读最新的文件内容再改，不用界面里可能已过期的副本——否则两次连着保存，后一次会把前一次（比如刚登记的仓库）盖掉 */
 export function useConfigEditor(state: AppState, onChanged: () => void) {
   const cfg = useMemo(() => parseCfg(state.configText), [state.configText]);
 
   const update = useCallback(
     async (fn: (c: Cfg) => void): Promise<{ ok: boolean; error?: string }> => {
-      const cur = parseCfg(state.configText);
+      const fresh = await api.configText().catch(() => state.configText);
+      const cur = parseCfg(fresh);
       if (!cur) return { ok: false, error: "配置文件不是有效的 JSON，请直接编辑数据目录里的 harness.config.json" };
       fn(cur);
       const r = await api.saveConfig(JSON.stringify(cur, null, 2) + "\n");

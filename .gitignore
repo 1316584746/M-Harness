@@ -66,3 +66,12 @@ connections.*.json
 connection-*.json
 
 .vitest/
+
+# 运行时生成在数据目录里的东西（开发模式下数据目录就是项目根）：对话 / 任务 / 插件 / 本地缓存，一律不上传
+/dsh/
+dsh-consent.json
+plugin-ai.json
+workbench-cache.json
+/tasks/
+M-Harness-data/
+harness.config.repos-backup.json

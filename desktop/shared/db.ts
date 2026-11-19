@@ -344,3 +344,12 @@ export interface DbFocus {
   schema?: string;
   table?: string;
 }
+
+/** AI 助手回复里的 SQL 点「运行」：数据库页新开一个查询页，带上这段 SQL 直接运行（n 每次不同，用来触发） */
+export interface DbRunReq {
+  sql: string;
+  connId?: string;
+  database?: string;
+  schema?: string;
+  n?: number;
+}

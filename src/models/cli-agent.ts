@@ -60,13 +60,14 @@ export function cliAgent(o: CliAgentOptions): AgentBackend {
           pending += s;
           const lines = pending.split("\n");
           pending = lines.pop() ?? "";
-          for (const l of lines) if (l.trim()) onProgress?.(l);
+          for (const l of lines) if (l.trim()) onProgress?.(l, "text");
         });
         child.stderr.on("data", (b: Buffer) => {
           const s = b.toString("utf8");
           errBuf += s;
-          for (const l of s.split("\n")) if (l.trim()) onProgress?.(`[stderr] ${l}`);
+          for (const l of s.split("\n")) if (l.trim()) onProgress?.(l.trim(), "status");
         });
+        onProgress?.(`已启动 ${o.command}，等待输出…`, "status");
 
         const kill = () => {
           if (isWin && child.pid) spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });

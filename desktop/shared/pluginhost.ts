@@ -46,3 +46,31 @@ export interface PluginDbAccess {
   options: import("./db").DbConnOption[];
   granted: string[];
 }
+
+/** 插件给 AI 用的一个工具（清单里有 mcp 贡献、带后台程序的插件提供） */
+export interface PluginAiTool {
+  name: string;
+  description: string;
+  /** 只读工具 AI 直接用；会改东西的每次要用户批准 */
+  readOnly: boolean;
+}
+
+export interface PluginAiInfo {
+  id: string;
+  name: string;
+  version: string;
+  /** 用户是否已确认信任（没确认前不会启动后台程序，也就拿不到工具列表） */
+  trusted: boolean;
+  /** 用户是否让 AI 使用它 */
+  enabled: boolean;
+  /** 连接类插件：要用「设置 → 连接」里的哪一类连接 */
+  connKind?: import("./connections").ConnKind;
+  /** 现在有几个可用的连接（连接类插件才有意义） */
+  connCount: number;
+  description?: string;
+  tools: PluginAiTool[];
+  /** 读取工具列表失败的原因 */
+  error?: string;
+  /** 来自哪一家：DSH 插件要用户确认信任后才会运行，界面上据此给出「确认信任」按钮 */
+  ecosystem?: import("./plugins").Ecosystem;
+}

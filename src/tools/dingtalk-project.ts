@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
 import { z } from "zod";
 import type { Tool } from "../core/types";
+import { spawnCli } from "./cli-spawn";
 import { toFlags } from "./feishu-project";
 
 /**
@@ -75,11 +75,7 @@ function decode(buf: Buffer): string {
 /** 执行一次 dws 命令（不经过 shell，参数逐个传递，避免注入） */
 export function runDws(cfg: DingtalkProjectConfig, argv: string[], signal: AbortSignal): Promise<string> {
   return new Promise(resolve => {
-    const viaShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(cfg.bin);
-    const all = [...(cfg.binArgs ?? []), ...argv];
-    // .cmd 垫片必须经 shell；此时给每个参数加引号并去掉 shell 元字符（用户内容里的这些字符会被丢弃）
-    const q = (s: string) => `"${s.replace(/["%^&|<>\r\n]/g, "")}"`;
-    const child = viaShell ? spawn([cfg.bin, ...all].map(q).join(" "), { shell: true, windowsHide: true }) : spawn(cfg.bin, all, { shell: false, windowsHide: true });
+    const child = spawnCli(cfg.bin, [...(cfg.binArgs ?? []), ...argv]);
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let size = 0;

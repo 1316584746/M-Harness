@@ -2,6 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import type { AppState, SkillDTO } from "../../../../shared/api";
 import { api } from "../../api";
 import { Icon } from "../../components/Icon";
+import { Req, useRequired } from "../../components/Required";
+import { ResourceDiscover } from "../../components/ResourceDiscover";
+import { useResourceTools } from "../../components/ResourceTools";
 import { useConfigEditor } from "../../lib/configEdit";
 import { Switch } from "./Projects";
 
@@ -20,7 +23,13 @@ function SkillForm({ initial, onDone }: { initial?: SkillDTO; onDone: () => void
     if (initial) void api.readSkill(initial.name).then(r => r.ok && setContent(bodyOf(r.content ?? "")));
   }, [initial]);
 
+  const req = useRequired();
   const save = async () => {
+    const miss = req.check([
+      ...(initial ? [] : [{ key: "name", label: "名称", ok: !!name.trim() }]),
+      { key: "content", label: "说明", ok: !!content.trim() },
+    ]);
+    if (miss) return setErr(miss);
     const r = await api.saveSkill({ name, description: desc, content });
     if (!r.ok) return setErr(r.error ?? "保存失败");
     onDone();
@@ -29,20 +38,26 @@ function SkillForm({ initial, onDone }: { initial?: SkillDTO; onDone: () => void
   return (
     <div className="pcard add" data-testid="skill-form">
       <div className="field">
-        <div className="field-label">名称</div>
-        <input className="input mono" data-testid="skill-name" value={name} disabled={!!initial} placeholder="code-review" onChange={e => setName(e.target.value)} />
+        <div className="field-label">
+          名称
+          <Req />
+        </div>
+        <input className={req.cls("name", "input mono")} data-req="name" data-testid="skill-name" value={name} disabled={!!initial} placeholder="code-review" onChange={e => (setName(e.target.value), req.clear("name"), setErr(""))} />
       </div>
       <div className="field">
         <div className="field-label">描述（模型据此判断什么时候用它）</div>
         <input className="input" data-testid="skill-desc" value={desc} placeholder="审查代码改动并给出问题清单" onChange={e => setDesc(e.target.value)} />
       </div>
       <div className="field">
-        <div className="field-label">说明（SKILL.md 正文）</div>
-        <textarea className="input" data-testid="skill-content" rows={8} value={content} placeholder="一步步写清楚该怎么做" onChange={e => setContent(e.target.value)} />
+        <div className="field-label">
+          说明（SKILL.md 正文）
+          <Req />
+        </div>
+        <textarea className={req.cls("content")} data-req="content" data-testid="skill-content" rows={8} value={content} placeholder="一步步写清楚该怎么做" onChange={e => (setContent(e.target.value), req.clear("content"), setErr(""))} />
       </div>
       {err && <div className="inline-warn">{err}</div>}
       <div className="pcard-actions">
-        <button className="btn primary" data-testid="skill-save" disabled={!name.trim() || !content.trim()} onClick={() => void save()}>
+        <button className="btn primary" data-testid="skill-save" onClick={() => void save()}>
           保存
         </button>
         <button className="btn" onClick={onDone}>
@@ -58,6 +73,7 @@ export function Skills({ state, onChanged }: { state: AppState; onChanged: () =>
   const [skills, setSkills] = useState<SkillDTO[]>([]);
   const [form, setForm] = useState<{ initial?: SkillDTO } | null>(null);
   const [err, setErr] = useState("");
+  const tools = useResourceTools("skill", () => (load(), onChanged()));
   const dirs: string[] = ed.cfg?.skills?.dirs ?? [];
   const scanUser: boolean = ed.cfg?.skills?.scanUserDirs ?? true;
 
@@ -86,10 +102,12 @@ export function Skills({ state, onChanged }: { state: AppState; onChanged: () =>
         <div className="shead">
           <h2>SKILLS</h2>
           <span className="spacer" />
+          {tools.buttons}
           <button className="btn" data-testid="skill-add" onClick={() => setForm({})}>
             <Icon name="plus" size={14} /> 新建
           </button>
         </div>
+        {tools.panel}
         {err && <div className="inline-warn">{err}</div>}
         {form && (
           <SkillForm
@@ -174,6 +192,8 @@ export function Skills({ state, onChanged }: { state: AppState; onChanged: () =>
           </div>
         </div>
       </div>
+
+      <ResourceDiscover kind="skill" onAdded={() => (load(), onChanged())} />
     </>
   );
 }

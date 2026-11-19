@@ -13,5 +13,5 @@
     "sourceMap": true,
     "noEmit": true
   },
-  "include": ["src", "test", "bin"]
+  "include": ["src", "test", "bin", "desktop/main/raw.d.ts"]
 }

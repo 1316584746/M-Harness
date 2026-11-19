@@ -11,6 +11,8 @@ import { Office } from "./settings/Office";
 import { Connections } from "./settings/Connections";
 import { Rules } from "./settings/Rules";
 import { Skills } from "./settings/Skills";
+import { AutostartRow } from "./settings/AutostartSettings";
+import { DataDirRow } from "./settings/DataDirSettings";
 import { FontSettings } from "./settings/FontSettings";
 import { Repos } from "./settings/Repos";
 import { UpdateSettings } from "./settings/UpdateSettings";
@@ -27,7 +29,7 @@ interface SectionDef {
 }
 const SECTIONS: Array<SectionDef | "divider"> = [
   { id: "models", label: "模型", icon: "brain", color: "#7c5cff", keywords: "api key 密钥 provider agent cursor deepseek openai claude" },
-  { id: "general", label: "偏好", icon: "settings", color: "#8a8f98", keywords: "外观 主题 字体 缩放 工作区 更新 版本 数据目录" },
+  { id: "general", label: "偏好", icon: "settings", color: "#8a8f98", keywords: "外观 主题 字体 缩放 工作区 开机 自启动 启动 更新 版本 数据目录" },
   { id: "safety", label: "安全与限制", icon: "shield", color: "#1fb36b", keywords: "权限 审批 读取 写入 执行 命令 网络" },
   { id: "repos", label: "代码仓库", icon: "folder", color: "#f59a23", keywords: "git github gitlab gitee token 分支 clone" },
   { id: "office", label: "办公集成", icon: "chat", color: "#2f7bff", keywords: "飞书 钉钉 lark meegle 消息通道 项目管理" },
@@ -173,14 +175,13 @@ export function Settings({
                         更改
                       </button>
                     </Row>
+                    <AutostartRow />
                   </div>
                 </div>
                 <div className="card-section">
                   <h3>数据位置</h3>
                   <div className="sgroup">
-                    <Row title="数据目录">
-                      <code className="path">{state.home}</code>
-                    </Row>
+                    <DataDirRow />
                     <Row title="Trace 目录">
                       <code className="path">{state.traceDir}</code>
                     </Row>
@@ -201,7 +202,10 @@ export function Settings({
                           className="input"
                           data-testid={`policy-${k}`}
                           value={policy[k] ?? (k === "read" ? "allow" : "ask")}
-                          onChange={e => void ed.update(c => void ((c.guard ??= {}).policy = { ...(c.guard.policy ?? {}), [k]: e.target.value }))}
+                          onChange={e => {
+                            const v = e.target.value; // 先取值：保存是异步的，等会儿再读 e.target 会拿到被界面还原的旧值
+                            void ed.update(c => void ((c.guard ??= {}).policy = { ...(c.guard.policy ?? {}), [k]: v }));
+                          }}
                         >
                           <option value="allow">直接允许</option>
                           <option value="ask">每次询问</option>

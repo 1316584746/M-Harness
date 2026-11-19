@@ -1,32 +1,29 @@
 import { useEffect, useState } from "react";
 import { api } from "../../api";
-import { Icon } from "../../components/Icon";
 import type { useConfigEditor } from "../../lib/configEdit";
 
-type Branches = { base: string; test: string; integration: string };
-const FIELDS: Array<{ key: keyof Branches; label: string; hint: string }> = [
-  { key: "base", label: "基线分支", hint: "feature 从这个分支拉；留空则 build 时自动探测默认分支" },
-  { key: "test", label: "提测分支", hint: "提测时合入 / 提 MR 的目标分支" },
-  { key: "integration", label: "联调分支", hint: "联调环境对应的分支" },
+type Draft = { base: string; test: string; integration: string; branchTemplate: string; previewCmd: string; installCmd: string };
+type Saved = { branches?: { base?: string; test?: string; integration?: string }; branchTemplate?: string; previewCmd?: string; installCmd?: string };
+
+const BRANCHES: Array<{ key: "base" | "test" | "integration"; label: string; hint: string; placeholder: string }> = [
+  { key: "base", label: "线上分支", hint: "feature 从这个分支拉；留空则自动探测默认分支", placeholder: "留空自动探测" },
+  { key: "test", label: "提测分支", hint: "提测时合入 / 提 MR 的目标分支", placeholder: "留空默认 test" },
+  { key: "integration", label: "联调分支", hint: "联调环境对应的分支；没填就不能推联调", placeholder: "选填" },
 ];
 
-function ClearInput({ value, onChange, listId, placeholder, testid }: { value: string; onChange: (v: string) => void; listId: string; placeholder: string; testid: string }) {
-  return (
-    <div className="clearable">
-      <input className="input mono" data-testid={testid} list={listId} value={value} placeholder={placeholder} spellCheck={false} onChange={e => onChange(e.target.value)} />
-      {value && (
-        <button type="button" className="clear-btn" title="清空" onClick={() => onChange("")}>
-          <Icon name="x" size={14} />
-        </button>
-      )}
-    </div>
-  );
-}
+const draftOf = (s?: Saved): Draft => ({
+  base: s?.branches?.base ?? "",
+  test: s?.branches?.test ?? "",
+  integration: s?.branches?.integration ?? "",
+  branchTemplate: s?.branchTemplate ?? "",
+  previewCmd: s?.previewCmd ?? "",
+  installCmd: s?.installCmd ?? "",
+});
 
-/** 仓库的分支约定：基线 / 提测 / 联调分支，存进配置的 repos.<name>.branches */
-export function RepoBranches({ name, dir, saved, update }: { name: string; dir: string; saved?: Partial<Branches>; update: ReturnType<typeof useConfigEditor>["update"] }) {
-  const init: Branches = { base: saved?.base ?? "", test: saved?.test ?? "", integration: saved?.integration ?? "" };
-  const [d, setD] = useState<Branches>(init);
+/** 仓库的分支约定和几条命令，存进配置的 repos.<name>（branches / branchTemplate / previewCmd / installCmd） */
+export function RepoBranches({ name, dir, saved, update }: { name: string; dir: string; saved?: Saved; update: ReturnType<typeof useConfigEditor>["update"] }) {
+  const init = draftOf(saved);
+  const [d, setD] = useState<Draft>(init);
   const [candidates, setCandidates] = useState<string[]>([]);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -41,7 +38,8 @@ export function RepoBranches({ name, dir, saved, update }: { name: string; dir: 
     };
   }, [dir]);
 
-  const dirty = FIELDS.some(f => d[f.key].trim() !== init[f.key]);
+  const dirty = (Object.keys(init) as Array<keyof Draft>).some(k => d[k].trim() !== init[k]);
+  const set = (k: keyof Draft, v: string) => (setD(o => ({ ...o, [k]: v })), setMsg(null));
 
   const save = async () => {
     setBusy(true);
@@ -49,36 +47,53 @@ export function RepoBranches({ name, dir, saved, update }: { name: string; dir: 
       const repo = c.repos?.[name];
       if (!repo) return;
       const b: Record<string, string> = {};
-      for (const f of FIELDS) if (d[f.key].trim()) b[f.key] = d[f.key].trim();
+      for (const f of BRANCHES) if (d[f.key].trim()) b[f.key] = d[f.key].trim();
       if (Object.keys(b).length) repo.branches = b;
       else delete repo.branches;
+      for (const k of ["branchTemplate", "previewCmd", "installCmd"] as const) {
+        if (d[k].trim()) repo[k] = d[k].trim();
+        else delete repo[k];
+      }
     });
     setBusy(false);
-    setMsg(r.ok ? { ok: true, text: "分支设置已保存" } : { ok: false, text: r.error ?? "保存失败" });
+    setMsg(r.ok ? { ok: true, text: "已保存" } : { ok: false, text: r.error ?? "保存失败" });
   };
 
   const listId = `branches-${name}`;
   return (
-    <div className="branches" data-testid={`repo-branches-${name}`}>
+    <div className="repo-fields" data-testid={`repo-branches-${name}`}>
       <datalist id={listId}>
         {candidates.map(b => (
           <option key={b} value={b} />
         ))}
       </datalist>
       <div className="grid3">
-        {FIELDS.map(f => (
-          <div className="field" key={f.key} title={f.hint}>
-            <div className="field-label">{f.label}</div>
-            <ClearInput value={d[f.key]} onChange={v => (setD({ ...d, [f.key]: v }), setMsg(null))} listId={listId} placeholder={f.key === "base" ? "自动探测" : "未设置"} testid={`branch-${f.key}-${name}`} />
-          </div>
+        {BRANCHES.map(f => (
+          <label className="rf" key={f.key} title={f.hint}>
+            <span className="rf-label">{f.label}</span>
+            <input className="input mono rf-dl" data-testid={`branch-${f.key}-${name}`} list={listId} value={d[f.key]} placeholder={f.placeholder} spellCheck={false} onChange={e => set(f.key, e.target.value)} />
+          </label>
         ))}
       </div>
-      <div className="field-hint" style={{ marginTop: 6 }}>留空则自动探测默认分支</div>
+      <div className="grid2 rf-row">
+        <label className="rf" title="feature 分支的命名规则；留空用全局默认">
+          <span className="rf-label">分支模板覆盖</span>
+          <input className="input" data-testid={`repo-template-${name}`} value={d.branchTemplate} placeholder="留空用全局默认" spellCheck={false} onChange={e => set("branchTemplate", e.target.value)} />
+        </label>
+        <label className="rf" title="本地预览这个仓库用的启动命令">
+          <span className="rf-label">预览启动命令</span>
+          <input className="input mono" data-testid={`repo-preview-${name}`} value={d.previewCmd} placeholder="如 npm run dev" spellCheck={false} onChange={e => set("previewCmd", e.target.value)} />
+        </label>
+      </div>
+      <label className="rf rf-row" title="新拉下来的仓库先跑这条命令装依赖">
+        <span className="rf-label">依赖初始化命令</span>
+        <input className="input mono" data-testid={`repo-install-${name}`} value={d.installCmd} placeholder="如 yarn install --frozen-lockfile --prefer-offline" spellCheck={false} onChange={e => set("installCmd", e.target.value)} />
+      </label>
       {msg && <div className={msg.ok ? "inline-ok" : "inline-warn"}>{msg.text}</div>}
       {dirty && (
         <div className="pcard-actions">
           <button className="btn primary sm" data-testid={`branch-save-${name}`} disabled={busy} onClick={save}>
-            保存分支设置
+            保存
           </button>
           <button className="btn sm" onClick={() => (setD(init), setMsg(null))}>
             还原

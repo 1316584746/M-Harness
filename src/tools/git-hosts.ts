@@ -2,7 +2,7 @@
  * 代码托管平台（GitHub / GitLab / Gitee / 云效 Codeup）的访问令牌：
  * - 令牌保存在 .env（变量见 tokenEnv），配置文件里只存实例地址；
  * - probeHost：用令牌向平台查"我是谁"，让用户确认填对了；
- * - authEnvFor：git 拉取 / 推送 / 克隆 https 仓库时，把令牌通过环境变量（不是命令行参数）交给 git。
+ * - authEnvFor：git 拉取 / 推送 / 克隆 https 仓库时，把令牌通过环境变量（不是命令行参数）交给 git；停用的平台不注入。
  */
 
 export interface HostDef {
@@ -69,7 +69,10 @@ export const HOSTS: HostDef[] = [
 
 export const hostDef = (id: string) => HOSTS.find(h => h.id === id);
 
-export type HostsConfig = Record<string, { baseURL?: string } | undefined>;
+export type HostsConfig = Record<string, { baseURL?: string; enabled?: boolean } | undefined>;
+
+/** 这个平台的令牌是否启用（没写过就是启用；停用后不会再用于 git 拉取 / 推送 / 克隆） */
+export const hostEnabled = (hosts: HostsConfig | undefined, id: string) => hosts?.[id]?.enabled !== false;
 
 export interface HostUser {
   name?: string;
@@ -117,7 +120,10 @@ export async function probeHost(req: { platform: string; baseURL?: string; token
   const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(url, { headers, signal: ac.signal });
-    if (res.status === 401 || res.status === 403) return { ok: false, error: "令牌无效、已过期或权限不足" };
+    if (res.status === 401 || res.status === 403) {
+      const usedDefault = !trimBase(req.baseURL);
+      return { ok: false, error: usedDefault && def.selfHosted ? `令牌无效、已过期或权限不足。没填实例地址，这里校验的是 ${def.defaultBase}；如果是公司自建的 ${def.label}，请先填下面的「实例地址」` : "令牌无效、已过期或权限不足" };
+    }
     if (!res.ok) return { ok: false, error: `平台返回 HTTP ${res.status}` };
     const j: any = await res.json();
     const scopes = res.headers.get("x-oauth-scopes");
@@ -152,6 +158,7 @@ export function authEnvFor(remoteUrl: string | undefined, hosts: HostsConfig = {
   }
   for (const def of HOSTS) {
     if (!def.gitUser) continue;
+    if (!hostEnabled(hosts, def.id)) continue;
     const token = env[def.tokenEnv];
     if (!token) continue;
     const bases = [def.defaultBase, trimBase(hosts[def.id]?.baseURL)].filter(Boolean);
@@ -171,4 +178,40 @@ export function authEnvFor(remoteUrl: string | undefined, hosts: HostsConfig = {
     };
   }
   return {};
+}
+
+/** 从已登记仓库的远端地址里找出该平台的自建实例地址（比如 git@gitlab.xx.net:g/p.git → https://gitlab.xx.net），不含默认站点 */
+export function hostOriginsFromUrls(urls: Array<string | undefined>, platform: string): string[] {
+  const def = hostDef(platform);
+  if (!def?.selfHosted) return [];
+  const defaultHost = new URL(def.defaultBase).host.toLowerCase();
+  const out = new Set<string>();
+  for (const raw of urls) {
+    const u = (raw ?? "").trim();
+    if (!u) continue;
+    let host = "";
+    let proto = "https:";
+    const scp = /^[\w.-]+@([\w.-]+):/.exec(u);
+    if (scp) host = scp[1];
+    else {
+      try {
+        const x = new URL(u);
+        host = x.hostname;
+        proto = x.protocol === "http:" ? "http:" : "https:";
+        if (x.port && x.protocol !== "ssh:") host = x.host;
+      } catch {
+        continue;
+      }
+    }
+    if (!host || host.toLowerCase() === defaultHost) continue;
+    if (detectPlatformFromHost(host) !== platform) continue;
+    out.add(`${proto}//${host}`);
+  }
+  return [...out];
+}
+
+function detectPlatformFromHost(host: string): string {
+  if (/github/i.test(host)) return "github";
+  if (/gitlab/i.test(host)) return "gitlab";
+  return "other";
 }

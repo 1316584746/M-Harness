@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import { z } from "zod";
 import type { Tool } from "../core/types";
 import { parseVersion } from "./cli-status";
+import { spawnCli } from "./cli-spawn";
 
 /**
  * 飞书项目（Meegle / Lark Project）工具：封装官方 meegle CLI。
@@ -82,7 +82,7 @@ function decode(buf: Buffer): string {
 /** 执行一次 meegle 命令（不经过 shell，参数逐个传递，避免注入） */
 export function runMeegle(cfg: FeishuProjectConfig, argv: string[], signal: AbortSignal): Promise<string> {
   return new Promise(resolve => {
-    const child = spawn(cfg.bin, [...(cfg.binArgs ?? []), ...argv], { shell: false, windowsHide: true });
+    const child = spawnCli(cfg.bin, [...(cfg.binArgs ?? []), ...argv]);
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let size = 0;

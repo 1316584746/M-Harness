@@ -8,19 +8,35 @@
  *   rule   写进配置里的 rules.items
  * 已安装的插件记在配置的 plugins.installed 里，卸载时按记录把对应内容删掉。
  */
+import { cmpVerStr, parseVer } from "./semver";
 
-export type PluginKind = "mcp" | "skill" | "action" | "rule" | "dbx";
-/** 插件源 JSON 里允许写的类型（dbx 只能来自 DBX 插件中心） */
+/**
+ * 前四种是写进配置的资源；dbx / dsh / bundle 是商店里的「插件」：
+ *   dbx     DBX 的 .dbxp 插件包
+ *   dsh     DSH（DeepSeek Harness）的 npm 插件，由兼容运行器加载，提供 AI 工具
+ *   bundle  Codex / Claude 这类「打包」的插件：装的时候拆成技能、MCP、动作、规则写进本软件
+ */
+export type PluginKind = "mcp" | "skill" | "action" | "rule" | "dbx" | "dsh" | "bundle";
+/** 插件源 JSON 里允许写的类型（dbx / dsh / bundle 只能来自各家的插件仓库） */
 export const PLUGIN_KINDS: PluginKind[] = ["mcp", "skill", "action", "rule"];
 /** 商店里能筛选的类型 */
-export const STORE_KINDS: PluginKind[] = [...PLUGIN_KINDS, "dbx"];
-export const KIND_LABEL: Record<PluginKind, string> = { mcp: "MCP", skill: "技能", action: "动作", rule: "规则", dbx: "DBX" };
+export const STORE_KINDS: PluginKind[] = [...PLUGIN_KINDS, "dbx", "dsh", "bundle"];
+export const KIND_LABEL: Record<PluginKind, string> = { mcp: "MCP", skill: "技能", action: "动作", rule: "规则", dbx: "DBX", dsh: "DSH", bundle: "插件包" };
+/** 资源类（写进配置里的）四种 */
+export type ResourceKind = "mcp" | "skill" | "action" | "rule";
+
+/** 插件来自哪一家的体系 */
+export type Ecosystem = "dbx" | "dsh" | "codex" | "claude";
+export const ECOSYSTEM_LABEL: Record<Ecosystem, string> = { dbx: "DBX 插件", dsh: "DSH 插件", codex: "Codex 插件", claude: "Claude 插件" };
+/** 非 DBX 插件的 id 前缀（DBX 的 id 里不会有冒号，所以一眼能分开） */
+export const foreignId = (eco: Exclude<Ecosystem, "dbx">, name: string): string => `${eco}:${name}`;
+export const isForeignId = (id: string): boolean => /^(dsh|codex|claude):/.test(id);
 
 /** DBX 插件中心在商店里的「仓库」名 */
 export const DBX_SOURCE = "DBX 插件中心";
-/** DBX 的 MCP 桥接在配置里的服务名（所有 DBX 插件的 AI 工具都从它出来） */
-export const DBX_MCP_NAME = "dbx";
-
+/** M-Harness 官方插件仓库：和别的仓库一样可以停用、删除 */
+export const OFFICIAL_REPO_NAME = "M-Harness 官方插件";
+export const OFFICIAL_REPO_URL = "https://github.com/1316584746/M-Market";
 /** 从本地文件 / 链接安装的插件，记在这个「来源」下 */
 export const LOCAL_SOURCE = "本地安装";
 
@@ -34,16 +50,40 @@ export interface McpSpec {
 
 export type PluginInstall =
   | { kind: "mcp"; server: McpSpec; note?: string }
-  | { kind: "skill"; name: string; description: string; content: string }
+  | { kind: "skill"; name: string; description: string; content: string; /** 技能文件夹里的其他文件（脚本、参考资料），安装时一起下载 */ files?: Array<{ path: string; url: string }> }
   | { kind: "action"; prompt: string; description?: string }
   | { kind: "rule"; content: string }
   /** DBX 插件（.dbxp 包）：由本软件下载、校验、安装到自己的插件目录 */
-  | { kind: "dbx"; dbxId: string; url?: string; sha256?: string; size?: number; permissions: string[] };
+  | { kind: "dbx"; dbxId: string; url?: string; sha256?: string; size?: number; permissions: string[] }
+  /** DSH 的 npm 插件：来源是 npm 包，或固定到某个提交的 git 仓库 */
+  | { kind: "dsh"; pkg: string; version: string; source: DshSource }
+  /** Codex / Claude 的插件包：里面的技能 / MCP / 命令 / 规则数量（具体内容在主进程里，装的时候才用） */
+  | { kind: "bundle"; ecosystem: "codex" | "claude"; parts: BundleParts; notes: string[] };
+
+export type DshSource = { type: "npm"; registry?: string } | { type: "git"; url: string; commit: string; /** 插件在仓库里的子目录 */ dir?: string };
+
+export interface BundleParts {
+  skills: number;
+  mcp: number;
+  actions: number;
+  rules: number;
+}
+
+/** 「3 个技能、1 个 MCP」这样的一句话 */
+export function partsText(p: BundleParts): string {
+  const t = [p.skills && `${p.skills} 个技能`, p.mcp && `${p.mcp} 个 MCP`, p.actions && `${p.actions} 个动作`, p.rules && `${p.rules} 条规则`].filter(Boolean);
+  return t.length ? t.join("、") : "没有本软件能用的内容";
+}
 
 /** 装在本软件里的插件的内容摘要（读自插件自带的 manifest） */
 export interface LocalPluginInfo {
   version: string;
+  /** 装的时候插件目录里登记的版本（判断「可更新」用它；和 version 不一样时，version 是插件自己 package.json 里写的） */
+  listed?: string;
   name?: string;
+  /** 不是 DBX 的插件：来自哪一家，和装进来的内容说明 */
+  ecosystem?: Ecosystem;
+  summary?: string;
   /** 有界面 / 有后台程序 */
   ui: boolean;
   backend: boolean;
@@ -87,6 +127,10 @@ export interface PluginEntry {
   downloads?: number;
   /** 来自哪个插件源 */
   source: string;
+  /** 来自哪一家的体系（DBX / DSH / Codex / Claude）；资源类条目没有 */
+  ecosystem?: Ecosystem;
+  /** 给用户的提醒，比如「DSH 插件只有 AI 工具能用」 */
+  note?: string;
   install: PluginInstall;
 }
 
@@ -94,17 +138,19 @@ export interface InstalledRecord {
   kind: PluginKind;
   name: string;
   version?: string;
-  /** 实际写进配置里的名字 / id（MCP 服务名、动作 id、规则 id、技能名） */
+  /** 实际写进配置里的名字 / id（MCP 服务名、动作 id、规则 id、技能名）；插件包是插件 id */
   ref: string;
   at: number;
+  /** 插件包：它装进配置的各项的 key，卸载时一起删 */
+  members?: string[];
+  ecosystem?: Ecosystem;
 }
 
-/** 插件仓库：一份 DBX 格式的目录（catalog/index.json）。官方仓库不能删，第三方仓库由用户添加 */
+/** 插件仓库：一个 GitHub 仓库，或一份目录文件（DBX 目录 / 本软件的插件源 / Claude 市场）。全部由用户配置，都能停用、删除 */
 export interface PluginRepo {
   id: string;
   name: string;
   url: string;
-  official?: boolean;
   enabled: boolean;
 }
 
@@ -122,6 +168,56 @@ export interface MarketResult {
   sources?: Array<{ url: string; label: string; count: number }>;
   /** 本机 DBX 的情况 */
   dbx?: DbxInfo;
+}
+
+/** 技能 / MCP / 动作 / 规则里的一项推荐或导入结果（不是插件，各在自己的设置页里用） */
+export interface ResourceItem {
+  key: string;
+  kind: ResourceKind;
+  name: string;
+  description: string;
+  author?: string;
+  tags: string[];
+  /** 来源：「owner/repo」或「软件自带的推荐」 */
+  source: string;
+  homepage?: string;
+  /** 提醒，比如 MCP 需要本机装 uv */
+  note?: string;
+  /** 已经在配置里了 */
+  added: boolean;
+}
+
+/** 「同步」里的一个平台（Cursor / Claude Code / Codex）：用户在「设置 → 模型」里添加过它的账号才算 configured */
+export interface PlatformInfo {
+  id: "cursor" | "claude" | "codex";
+  name: string;
+  /** 在「设置 → 模型」里添加过这个平台的账号 */
+  configured: boolean;
+  /** 本机上找得到它的用户目录 */
+  found: boolean;
+}
+
+export interface ResourceScan {
+  ok: boolean;
+  items?: ResourceItem[];
+  skipped?: string[];
+  error?: string;
+}
+
+/** 仓库目录的格式：DBX 的 catalog、本软件自己的插件源（MCP / 技能 / 动作 / 规则） */
+export type CatalogFormat = "dbx" | "native" | "dsh";
+
+/** 看内容认格式：条目带 versions 的是 DBX 目录，带 kind + install 的是本软件的插件源（根是数组也算）；认不出来返回 null */
+export function detectCatalogFormat(json: unknown): CatalogFormat | null {
+  const list = Array.isArray(json) ? json : isObj(json) && Array.isArray(json.plugins) ? json.plugins : null;
+  if (!list) return null;
+  const items = list.filter(isObj);
+  if (!items.length) return Array.isArray(json) ? "native" : "dbx"; // 空目录：按 DBX 的 {plugins:[]} 处理
+  if (!Array.isArray(json) && items.some(x => Array.isArray(x.versions) && str(x.id))) return "dbx";
+  if (items.some(x => typeof x.kind === "string" && isObj(x.install))) return "native";
+  // DSH 的市场索引：没有 id，条目是 name + versions[]，每个版本带 source（npm 或固定提交的 git）
+  if (!Array.isArray(json) && items.some(x => str(x.name) && !x.id && Array.isArray(x.versions) && x.versions.some((v: any) => isObj(v) && isObj(v.source) && (v.source.type === "npm" || v.source.type === "git")))) return "dsh";
+  return null;
 }
 
 type Cfg = Record<string, any>;
@@ -179,8 +275,8 @@ export function applyInstall(cfg: Cfg, e: PluginEntry, now = Date.now()): Instal
     const item = { id: ref, title: e.name, content: ins.content, enabled: i >= 0 ? (cfg.rules.items[i].enabled ?? true) : true };
     if (i >= 0) cfg.rules.items[i] = item;
     else cfg.rules.items.push(item);
-  } else if (ins.kind === "dbx") {
-    throw new Error("DBX 插件要装在 DBX 里，请用「在 DBX 中安装」");
+  } else if (ins.kind === "dbx" || ins.kind === "dsh" || ins.kind === "bundle") {
+    throw new Error("这是插件，请到插件中心安装");
   } else {
     ref = ins.name;
     if (cfg.skills?.disabled) cfg.skills.disabled = cfg.skills.disabled.filter((n: string) => n !== ref);
@@ -253,7 +349,14 @@ function parseInstall(kind: PluginKind, raw: any, name: string, description: str
     const content = str(r.content);
     if (!n || !/^[A-Za-z0-9_-]{1,64}$/.test(n)) return "技能需要 install.name（字母、数字、短横线、下划线）";
     if (!content) return "技能需要 install.content（SKILL.md 正文）";
-    return { kind, name: n, description: str(r.description) ?? description, content };
+    // 附带文件：路径必须是技能文件夹里的相对路径，地址只认 raw.githubusercontent.com，最多 40 个
+    const files = Array.isArray(r.files)
+      ? r.files
+          .filter((f: any) => isObj(f) && typeof f.path === "string" && typeof f.url === "string" && !/(^|[\\/])\.\.([\\/]|$)/.test(f.path) && !/^([\\/]|[A-Za-z]:)/.test(f.path) && /^https:\/\/raw\.githubusercontent\.com\//.test(f.url))
+          .slice(0, 40)
+          .map((f: any) => ({ path: f.path as string, url: f.url as string }))
+      : [];
+    return { kind, name: n, description: str(r.description) ?? description, content, ...(files.length ? { files } : {}) };
   }
   if (kind === "action") {
     const prompt = str(r.prompt);
@@ -347,6 +450,14 @@ export function marketplaceUrl(input: string): string | null {
 
 export const DBX_CATALOG_URL = "https://dl.dbxio.com/catalog/index.json";
 
+/** 「常用仓库」：界面上一键添加（只是方便，和手动填地址添加出来的仓库完全一样） */
+export const PRESET_REPOS: Array<{ name: string; url: string; desc: string }> = [
+  { name: OFFICIAL_REPO_NAME, url: OFFICIAL_REPO_URL, desc: "M-Harness 官方插件仓库" },
+  { name: DBX_SOURCE, url: DBX_CATALOG_URL, desc: "第三方：DBX 的 .dbxp 插件目录（不是 M-Harness 官方仓库）" },
+  { name: "OpenAI Codex 插件", url: "https://github.com/openai/plugins", desc: "Codex 官方插件仓库：装进来的是里面的技能、MCP、命令（hooks、子 agent 不支持）" },
+  { name: "DSH 插件市场", url: "https://dshbazaar.io/api/index.json", desc: "DeepSeek Harness 的插件索引（近千个）：只有 AI 工具和命令能用，运行前要你确认信任" },
+];
+
 /** 本机的 DBX 安装包目标：windows-x64、darwin-arm64 … */
 export const dbxTarget = (platform: string, arch: string): string => `${platform === "win32" ? "windows" : platform}-${arch}`;
 
@@ -364,7 +475,7 @@ export function dbxInstallLink(url: string): string | null {
 /** 解析 DBX 官方目录（catalog/index.json）成商店条目；没有当前系统安装包的也列出来，只是装不了 */
 export function parseDbxCatalog(json: unknown, target: string, lang = "zh-CN", sourceName = DBX_SOURCE): PluginEntry[] {
   const list = isObj(json) && Array.isArray(json.plugins) ? json.plugins : null;
-  if (!list) throw new Error("DBX 插件目录格式不对");
+  if (!list) throw new Error("这个目录不是 DBX 格式：里面没有 plugins 列表。请确认地址指向 catalog/index.json 这个文件本身，而不是网页或仓库主页");
   const out: PluginEntry[] = [];
   const seen = new Set<string>();
   for (const raw of list) {
@@ -407,23 +518,61 @@ export function parseDbxCatalog(json: unknown, target: string, lang = "zh-CN", s
       },
     });
   }
+  // 有一堆条目却一个都认不出来：不是 DBX 格式
+  if (list.length > 0 && out.length === 0) {
+    const first = list.find(isObj) as Record<string, unknown> | undefined;
+    if (first && !("id" in first) && "name" in first) throw new Error("这个目录不是 DBX 格式（条目没有 id），也不是能识别的 DSH 市场索引（条目的版本里需要有 source）。请确认地址指向插件目录文件本身");
+    throw new Error("这个目录里没有能识别的插件，请确认是 DBX 格式的 catalog/index.json，或 DSH 的市场索引");
+  }
   return out;
 }
 
-/** 打开桥接：把 DBX 的 MCP 组件加进配置（已有就只打开，不覆盖用户改过的命令） */
-export function applyDbxBridge(cfg: Cfg, spec: { command: string; args: string[] }): void {
-  cfg.mcpServers ??= {};
-  const old = cfg.mcpServers[DBX_MCP_NAME];
-  cfg.mcpServers[DBX_MCP_NAME] = old
-    ? { ...old, enabled: true }
-    : { command: spec.command, args: spec.args, enabled: true, disabledTools: [], permission: "confirm" };
-}
+export const DSH_NOTE = "DSH 插件：本软件只运行它的 AI 工具和命令（装好后到「让 AI 使用插件」里开启）；它的网页界面、设置页、系统提示词这些 DSH 专有功能没有。会运行第三方代码，只装信任的作者。";
 
-export const dbxBridgeOn = (cfg: Cfg | null | undefined): boolean => !!cfg?.mcpServers?.[DBX_MCP_NAME] && cfg.mcpServers[DBX_MCP_NAME].enabled !== false;
+const localized = (v: unknown, lang: string): string | undefined => (isObj(v) ? (str(v[lang]) ?? str(v.zh) ?? str(v.en) ?? Object.values(v).map(str).find(Boolean)) : str(v));
 
-export function setDbxBridge(cfg: Cfg, on: boolean, spec?: { command: string; args: string[] }): void {
-  if (on) {
-    if (!spec && !cfg.mcpServers?.[DBX_MCP_NAME]) throw new Error("没找到 DBX 的 MCP 组件");
-    applyDbxBridge(cfg, spec ?? { command: "", args: [] });
-  } else if (cfg.mcpServers?.[DBX_MCP_NAME]) cfg.mcpServers[DBX_MCP_NAME].enabled = false;
+/** 解析 DSH 的市场索引（format 1：name + versions[]，每个版本带 npm 或 git 来源）成商店条目；每个插件取最高的正式版 */
+export function parseDshIndex(json: unknown, sourceName: string, lang = "zh"): PluginEntry[] {
+  const list = isObj(json) && Array.isArray(json.plugins) ? json.plugins : null;
+  if (!list) throw new Error("这个目录不是 DSH 市场索引：里面没有 plugins 列表");
+  const out: PluginEntry[] = [];
+  const seen = new Set<string>();
+  for (const raw of list) {
+    if (!isObj(raw)) continue;
+    const name = str(raw.name);
+    if (!name || !/^(@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/.test(name) || seen.has(name)) continue;
+    const versions: any[] = Array.isArray(raw.versions) ? raw.versions.filter((v: any) => isObj(v) && str(v.version) && isObj(v.source) && (v.source.type === "npm" || (v.source.type === "git" && str(v.source.url) && /^[0-9a-f]{40}$/.test(String(v.source.commit))))) : [];
+    if (!versions.length) continue;
+    const stable = versions.filter(v => !parseVer(v.version)?.pre.length);
+    const best = (stable.length ? stable : versions).sort((a, b) => cmpVerStr(a.version, b.version)).pop();
+    const src = best.source;
+    const source: DshSource = src.type === "npm" ? { type: "npm", ...(str(src.registry) && /^https:\/\//.test(src.registry) ? { registry: src.registry } : {}) } : { type: "git", url: src.url, commit: src.commit };
+    seen.add(name);
+    const meta = isObj(raw.metadata) ? raw.metadata : {};
+    const ts = typeof best.publishTimestamp === "number" ? best.publishTimestamp : typeof meta.sortKeys?.updated === "number" ? meta.sortKeys.updated : undefined;
+    const repoUrl = isObj(raw.repository) ? str(raw.repository.url) : str(raw.repository);
+    const id = foreignId("dsh", name);
+    // 索引里标 unconfirmed 的，只是 GitHub 上带 dsh-plugin 标签的仓库，没人确认过它真是 DSH 插件（不少是技能 / 文档仓库）
+    const unconfirmed = Array.isArray(meta.labels) && meta.labels.includes("unconfirmed");
+    const kw: string[] = Array.isArray(meta.keywords) ? meta.keywords.filter((t: unknown): t is string => typeof t === "string" && !/^(dsh|dsh-plugin|deepseek-harness)$/.test(t)) : [];
+    out.push({
+      key: `${sourceName}:${id}`,
+      id,
+      name: localized(raw.title, lang) && localized(raw.title, lang) !== name ? `${localized(raw.title, lang)}` : name,
+      kind: "dsh",
+      ecosystem: "dsh",
+      author: str(raw.author) ?? (isObj(raw.author) ? str(raw.author.name) : undefined),
+      description: localized(raw.description, lang) ?? "",
+      tags: [...(unconfirmed ? ["未验证"] : []), ...(str(meta.category) ? [meta.category as string] : []), ...kw].slice(0, 8),
+      version: best.version,
+      license: str(raw.license),
+      updated: ts ? new Date(ts * 1000).toISOString().slice(0, 10) : undefined,
+      homepage: str(raw.homepage) && /^https?:\/\//.test(raw.homepage) ? raw.homepage : undefined,
+      repo: repoUrl && /^https?:\/\//.test(repoUrl) ? repoUrl.replace(/\.git$/, "") : undefined,
+      source: sourceName,
+      note: unconfirmed ? `市场里标为「未验证」：只是 GitHub 上带 dsh-plugin 标签的仓库，不保证真是 DSH 插件（不少是技能或文档仓库，装不上）。${DSH_NOTE}` : DSH_NOTE,
+      install: { kind: "dsh", pkg: name, version: best.version, source },
+    });
+  }
+  return out;
 }

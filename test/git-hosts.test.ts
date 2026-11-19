@@ -2,7 +2,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runGit } from "../src/tools/git";
-import { authEnvFor, probeHost } from "../src/tools/git-hosts";
+import { authEnvFor, hostEnabled, hostOriginsFromUrls, probeHost } from "../src/tools/git-hosts";
 
 let server: http.Server;
 let base: string;
@@ -87,10 +87,28 @@ describe("authEnvFor", () => {
     }
   });
 
+  it("停用的平台不注入令牌，没写 enabled 或写 true 都算启用", () => {
+    expect(authEnvFor("https://github.com/a/b.git", { github: { enabled: false } }, env)).toEqual({});
+    expect(authEnvFor("https://github.com/a/b.git", { github: { enabled: true } }, env).GIT_CONFIG_KEY_0).toBeTruthy();
+    // 只停用 github，gitlab 仍然可用
+    expect(authEnvFor("https://gitlab.com/a/b.git", { github: { enabled: false } }, env).GIT_CONFIG_KEY_0).toBeTruthy();
+    expect(hostEnabled({ gitlab: { enabled: false } }, "gitlab")).toBe(false);
+    expect(hostEnabled({}, "gitlab")).toBe(true);
+  });
+
   it("ssh 地址、未知站点、没有令牌都不注入", () => {
     expect(authEnvFor("git@github.com:a/b.git", {}, env)).toEqual({});
     expect(authEnvFor("https://example.org/a/b.git", {}, env)).toEqual({});
     expect(authEnvFor("https://gitee.com/a/b.git", {}, env)).toEqual({});
     expect(authEnvFor(undefined, {}, env)).toEqual({});
+  });
+});
+
+describe("hostOriginsFromUrls：从仓库地址猜自建实例", () => {
+  it("ssh / https 都能认，默认站点和别的平台不算，结果去重", () => {
+    const urls = ["git@gitlab.corp.net:g/a.git", "https://gitlab.corp.net/g/b.git", "https://gitlab.com/x/y.git", "https://github.com/x/y.git", undefined, "http://gitlab.lan:8080/g/c.git"];
+    expect(hostOriginsFromUrls(urls, "gitlab")).toEqual(["https://gitlab.corp.net", "http://gitlab.lan:8080"]);
+    expect(hostOriginsFromUrls(urls, "github")).toEqual([]);
+    expect(hostOriginsFromUrls(urls, "gitee")).toEqual([]);
   });
 });

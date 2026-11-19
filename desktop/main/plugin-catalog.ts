@@ -1,7 +1,7 @@
 import type { PluginEntry } from "../shared/plugins";
 
-/** 应用自带的插件源名称 */
-export const BUNDLED_SOURCE = "M-Harness 官方";
+/** 软件自带的推荐（技能 / MCP / 动作 / 规则）的来源名。它们不是插件，在各自的设置页里展示 */
+export const BUNDLED_SOURCE = "软件推荐";
 
 type Def = Omit<PluginEntry, "key" | "source" | "author" | "license" | "updated" | "version"> & Partial<Pick<PluginEntry, "version" | "updated" | "license" | "author">>;
 
@@ -31,7 +31,7 @@ export const BUNDLED: PluginEntry[] = [
     license: "MIT",
     version: "reference",
     updated: "2026-11-01",
-    description: "基于知识图谱的长期记忆：Agent 可以记住实体、关系和事实，跨对话使用。需要 Node.js。",
+    description: "基于知识图谱的长期记忆：Agent 可以记住实体、关系和事实，跨对话使用。",
     tags: ["memory", "knowledge-graph"],
     homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
     install: { kind: "mcp", server: { command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"] } },
@@ -44,7 +44,7 @@ export const BUNDLED: PluginEntry[] = [
     license: "MIT",
     version: "reference",
     updated: "2026-11-01",
-    description: "让模型把复杂问题拆成可修正的思考步骤，适合排查问题和做方案设计。需要 Node.js。",
+    description: "让模型把复杂问题拆成可修正的思考步骤，适合排查问题和做方案设计。",
     tags: ["reasoning", "planning"],
     homepage: "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
     install: { kind: "mcp", server: { command: "npx", args: ["-y", "@modelcontextprotocol/server-sequential-thinking"] } },
@@ -70,7 +70,7 @@ export const BUNDLED: PluginEntry[] = [
     license: "Apache-2.0",
     version: "latest",
     updated: "2026-11-10",
-    description: "用 Playwright 控制浏览器：打开页面、点击、填表、截图，适合做网页测试和数据采集。需要 Node.js。",
+    description: "用 Playwright 控制浏览器：打开页面、点击、填表、截图，适合做网页测试和数据采集。",
     tags: ["browser", "testing", "automation"],
     homepage: "https://github.com/microsoft/playwright-mcp",
     install: { kind: "mcp", server: { command: "npx", args: ["-y", "@playwright/mcp@latest"] } },
@@ -83,7 +83,7 @@ export const BUNDLED: PluginEntry[] = [
     license: "MIT",
     version: "latest",
     updated: "2026-11-05",
-    description: "按库名和版本查询最新的官方文档与代码示例，减少模型凭记忆写出过时的 API。需要 Node.js。",
+    description: "按库名和版本查询最新的官方文档与代码示例，减少模型凭记忆写出过时的 API。",
     tags: ["docs", "library", "coding"],
     homepage: "https://github.com/upstash/context7",
     install: { kind: "mcp", server: { command: "npx", args: ["-y", "@upstash/context7-mcp"] } },
@@ -96,7 +96,7 @@ export const BUNDLED: PluginEntry[] = [
     license: "Apache-2.0",
     version: "latest",
     updated: "2026-11-08",
-    description: "让 Agent 连接 Chrome 调试页面：看控制台、网络请求、性能，并操作页面。需要 Node.js 和 Chrome。",
+    description: "让 Agent 连接 Chrome 调试页面：看控制台、网络请求、性能，并操作页面。需要 Chrome。",
     tags: ["browser", "debug", "performance"],
     homepage: "https://github.com/ChromeDevTools/chrome-devtools-mcp",
     install: { kind: "mcp", server: { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] } },

@@ -4,8 +4,8 @@ import { api } from "../api";
 import { Icon } from "../components/Icon";
 import { parseCfg } from "../lib/configEdit";
 import { isRunning, type ChatStore } from "../lib/chatStore";
-import { useScheduleStore } from "../lib/scheduleStore";
-import { Schedule } from "./workbench/Schedule";
+import { patchChild } from "../../../shared/todoPatch";
+import { Schedule, type ChildEdit } from "./workbench/Schedule";
 
 /** 截止时间：逾期 / 今天 18:00 / 明天 / 11-20 */
 export function dueText(due: number, now = Date.now()): string {
@@ -41,17 +41,43 @@ export function Workbench({
 }) {
   const [todos, setTodos] = useState<WorkbenchTodosDTO | null>(null);
   const [repos, setRepos] = useState<RepoInfo[] | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadingTodos, setLoadingTodos] = useState(false);
+  const [loadingRepos, setLoadingRepos] = useState(false);
+  const loading = loadingTodos || loadingRepos;
   const [at, setAt] = useState(0);
-  const sched = useScheduleStore();
 
+  /** 在本软件里改子任务 = 直接改飞书项目：成功后用飞书读回来的值刷新界面，失败把原因交给界面显示 */
+  const editChild: ChildEdit = useCallback(async (t, c, change) => {
+    if (!t.projectKey || !c.nodeKey) return "缺少子任务的定位信息，请先点「刷新」再试";
+    const r = await api.workbenchSubtaskUpdate({ projectKey: t.projectKey, wid: t.id, nodeKey: c.nodeKey, subId: c.id, ...change });
+    // 飞书读回来的值（读不到就按我们写的）
+    const now = r.child ?? (r.ok ? { ...(change.done !== undefined ? { done: change.done } : {}), ...(change.start !== undefined ? { start: change.start, end: change.end } : {}), ...(change.days !== undefined ? { days: change.days } : {}) } : undefined);
+    if (now) {
+      setTodos(prev =>
+        prev && { ...prev, feishu: { ...prev.feishu, items: patchChild(prev.feishu.items, t.id, c.id, now) }, items: patchChild(prev.items, t.id, c.id, now) },
+      );
+    }
+    return r.ok ? undefined : r.error || "飞书项目没有接受这次修改";
+  }, []);
+
+  // 待办（读飞书 / 钉钉，要十几秒）和仓库状态（读 git）各读各的，谁先好谁先显示；
+  // 待办先用上次读成功的结果顶着，后台刷新完再换成最新的
   const load = useCallback(async () => {
-    setLoading(true);
-    const [t, r] = await Promise.all([api.workbenchTodos().catch(() => null), api.listRepos().catch(() => [] as RepoInfo[])]);
-    setTodos(t);
-    setRepos(r);
     setAt(Date.now());
-    setLoading(false);
+    setLoadingRepos(true);
+    setLoadingTodos(true);
+    void api
+      .listRepos()
+      .catch(() => [] as RepoInfo[])
+      .then(r => setRepos(r))
+      .finally(() => setLoadingRepos(false));
+    void api.workbenchTodosCached().then(c => c && setTodos(prev => prev ?? c)).catch(() => undefined);
+    void api
+      .workbenchTodos()
+      .catch(() => null)
+      // 这次读失败（null）时不要把已经显示的内容清掉
+      .then(t => setTodos(prev => t ?? prev))
+      .finally(() => setLoadingTodos(false));
   }, []);
 
   // 第一次进入、之后每次切回来且数据超过 1 分钟才重新拉
@@ -111,7 +137,7 @@ export function Workbench({
             title={src === "feishu" ? integrations?.feishuProject?.defaultSpace?.name : undefined}
             error={srcData && srcData.enabled && !srcData.ok ? srcData.error : undefined}
             user={srcData?.user}
-            sched={sched}
+            onEdit={editChild}
             tasked={tasked}
             onTask={onTask}
           />

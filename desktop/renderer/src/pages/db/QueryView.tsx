@@ -15,6 +15,8 @@ export interface QueryInit {
   database?: string;
   schema?: string;
   sql: string;
+  /** 打开后马上运行一次 */
+  autoRun?: boolean;
   /** 从「查询」里保存的某条打开的：再点保存就是更新它 */
   savedId?: string;
   name?: string;
@@ -120,6 +122,16 @@ export function QueryView({ conns, init, active, onSaved }: { conns: Connection[
     setRan(`共执行 ${list.length} 条语句，这是最后一条的结果`);
     setGen(g => g + 1);
   };
+
+  // 从 AI 助手带过来的：打开就运行一次（一条就运行它，多条依次运行；会改数据的语句照样先确认）
+  const autoRan = useRef(false);
+  useEffect(() => {
+    if (!init.autoRun || autoRan.current || !conn) return;
+    autoRan.current = true;
+    const n = splitStatements(init.sql).length;
+    void (n > 1 ? runAll() : runText(init.sql.trim()));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conn?.id]);
 
   /** 看执行计划：在语句前加 EXPLAIN（不会真的执行它） */
   const explain = () => {

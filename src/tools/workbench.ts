@@ -26,6 +26,8 @@ export interface TodoItem {
   active?: boolean;
   /** 我在这个需求下的节点和子任务 */
   children?: TodoChild[];
+  /** 需求所在飞书项目空间的 key（改飞书要用） */
+  projectKey?: string;
 }
 
 /** 需求下属于我的一个节点或子任务 */
@@ -44,6 +46,8 @@ export interface TodoChild {
   days?: number;
   /** 负责人 */
   owner?: string;
+  /** 子任务所在节点的 key（改飞书子任务要用） */
+  nodeKey?: string;
 }
 
 export interface TodoSource {
@@ -199,6 +203,8 @@ export interface SubInfo {
   name: string;
   wid?: string;
   parent?: string;
+  /** 所在节点的 key */
+  nodeKey?: string;
   start?: number;
   end?: number;
   done?: boolean;
@@ -237,7 +243,7 @@ export function groupFeishu(all: FsRow[], active: FsRow[], overdue: FsRow[], sub
       const act = activeKeys.has(rowKey(r)) || undefined;
       if (r.subId) {
         const s = subs.get(r.subId);
-        const c: TodoChild = { id: r.subId, title: s?.name || "子任务", kind: "subtask", parent: s?.parent, start: s?.start ?? r.start, end: s?.end ?? r.end, done: s?.done, active: act, days: s?.days, owner: me.name };
+        const c: TodoChild = { id: r.subId, title: s?.name || "子任务", kind: "subtask", parent: s?.parent, nodeKey: s?.nodeKey ?? r.nodeKey, start: s?.start ?? r.start, end: s?.end ?? r.end, done: s?.done, active: act, days: s?.days, owner: me.name };
         children.push(c);
         span(c.start, c.end);
       } else if (r.node) {
@@ -250,7 +256,7 @@ export function groupFeishu(all: FsRow[], active: FsRow[], overdue: FsRow[], sub
       const have = new Set(children.map(c => c.id));
       for (const [id, s] of subs) {
         if (s.wid !== wid || have.has(id) || !s.owners?.includes(me.key)) continue;
-        const c: TodoChild = { id, title: s.name, kind: "subtask", parent: s.parent, start: s.start, end: s.end, done: s.done, days: s.days, owner: me.name };
+        const c: TodoChild = { id, title: s.name, kind: "subtask", parent: s.parent, nodeKey: s.nodeKey, start: s.start, end: s.end, done: s.done, days: s.days, owner: me.name };
         children.push(c);
         span(c.start, c.end);
       }
@@ -270,6 +276,7 @@ export function groupFeishu(all: FsRow[], active: FsRow[], overdue: FsRow[], sub
       node: nodeChild?.title ?? subChild?.parent,
       overdue: overdueWids.has(wid) ? true : undefined,
       sub: first.project,
+      projectKey: first.projectKey,
       active: isActive || undefined,
       children: children.length ? children : undefined,
     });
@@ -281,9 +288,9 @@ const subCache = new Map<string, { at: number; subs: Map<string, SubInfo> }>();
 const SUB_TTL = 3 * 60_000;
 
 /** 读一个需求的全部节点，取出子任务的名字（失败就返回空，界面显示「子任务」） */
-async function fetchSubs(cfg: FeishuProjectConfig, wid: string, projectKey: string | undefined): Promise<Map<string, SubInfo>> {
+async function fetchSubs(cfg: FeishuProjectConfig, wid: string, projectKey: string | undefined, fresh = false): Promise<Map<string, SubInfo>> {
   const hit = subCache.get(wid);
-  if (hit && Date.now() - hit.at < SUB_TTL) return hit.subs;
+  if (!fresh && hit && Date.now() - hit.at < SUB_TTL) return hit.subs;
   const subs = new Map<string, SubInfo>();
   let ok = false;
   for (let page = 1; page <= 3; page++) {
@@ -294,6 +301,7 @@ async function fetchSubs(cfg: FeishuProjectConfig, wid: string, projectKey: stri
     for (const n of j.list) {
       if (!isObj(n) || !Array.isArray(n.sub_tasks)) continue;
       const parent = pick(n.basic, ["name"]);
+      const nodeKey = pick(n.basic, ["node_key"]);
       for (const s of n.sub_tasks) {
         const id = pick(s, ["sub_task_id"]);
         const name = pick(s, ["sub_task_name"]);
@@ -311,6 +319,7 @@ async function fetchSubs(cfg: FeishuProjectConfig, wid: string, projectKey: stri
           name,
           wid,
           parent: typeof parent === "string" ? parent : undefined,
+          nodeKey: typeof nodeKey === "string" ? nodeKey : undefined,
           start: toMs(pick(s, ["estimate_start_date"])),
           end: toMs(pick(s, ["estimate_end_date"])),
           done: pick(s, ["is_finished"]) === true,
@@ -359,7 +368,7 @@ export async function fetchFeishuTodos(cfg: FeishuProjectConfig): Promise<TodoSo
   const [all, active, overdue, user] = await Promise.all([rowsOf("todo", "all"), rowsOf("todo", "in_progress"), rowsOf("overdue"), whoAmI(c).catch(() => ({}) as { name?: string; key?: string })]);
   if (all.error) return { enabled: true, ok: false, items: [], error: all.error };
 
-  // 有子任务的需求去取子任务名（进行中的优先，最多 10 个，4 路并发）
+  // 有子任务的需求去取子任务名（进行中的优先，最多 10 个，5 路并发：每次调用约 2 秒，10 个分两轮）
   const activeWids = new Set(active.rows.map(r => r.wid));
   const need = new Map<string, string | undefined>();
   for (const r of [...all.rows, ...active.rows]) if ((r.subId || activeWids.has(r.wid)) && !need.has(r.wid)) need.set(r.wid, r.projectKey);
@@ -367,7 +376,7 @@ export async function fetchFeishuTodos(cfg: FeishuProjectConfig): Promise<TodoSo
   const subs = new Map<string, SubInfo>();
   let next = 0;
   await Promise.all(
-    Array.from({ length: Math.min(4, order.length) }, async () => {
+    Array.from({ length: Math.min(5, order.length) }, async () => {
       while (next < order.length) {
         const [wid, pk] = order[next++];
         for (const [k, v] of await fetchSubs(c, wid, pk).catch(() => new Map<string, SubInfo>())) subs.set(k, v);
@@ -375,6 +384,76 @@ export async function fetchFeishuTodos(cfg: FeishuProjectConfig): Promise<TodoSo
     }),
   );
   return { enabled: true, ok: true, items: groupFeishu(all.rows, active.rows, overdue.rows, subs, user), user: user.name };
+}
+
+/** 在本软件里改飞书项目的一个子任务 */
+export interface SubtaskUpdate {
+  projectKey: string;
+  /** 需求（工作项）id */
+  wid: string;
+  /** 子任务所在节点的 key */
+  nodeKey: string;
+  subId: string;
+  /** true = 完成，false = 回滚成未完成 */
+  done?: boolean;
+  /** 排期起止（毫秒，取当天），人天 */
+  start?: number;
+  end?: number;
+  days?: number;
+}
+
+export interface SubtaskResult {
+  ok: boolean;
+  error?: string;
+  /** 写完后从飞书重新读到的这个子任务（界面直接用它刷新，读不到就没有） */
+  child?: { done?: boolean; start?: number; end?: number; days?: number };
+}
+
+const SAFE_ID = /^[\w.-]+$/;
+const dayOf = (ms: number | undefined) => (ms === undefined ? undefined : new Date(new Date(ms).getFullYear(), new Date(ms).getMonth(), new Date(ms).getDate()).getTime());
+
+/** meegle 没跑成功时 runMeegle 返回的是这几种开头的文字 */
+function cliFailure(text: string): string | undefined {
+  if (/^meegle 退出码|^启动 .* 失败|^\[超时已终止\]/.test(text)) return text.replace(/^meegle 退出码 \d+\n?/, "").trim().slice(0, 300) || "命令没有执行成功";
+  const j = parseJson(text);
+  if (isObj(j) && (j.error || (typeof j.err_code === "number" && j.err_code !== 0) || (typeof j.code === "number" && j.code !== 0 && j.code !== 200))) return String(pick(j, ["error", "err_msg", "msg", "message"]) ?? "飞书项目返回了错误").slice(0, 300);
+  return undefined;
+}
+
+/**
+ * 完成 / 回滚子任务、改子任务的排期和人天，写到飞书项目里。
+ * 写完立刻把这个需求的子任务重新读一遍：和我们要写的对得上才算成功，对不上就报错（不会假装成功）。
+ */
+export async function updateFeishuSubtask(cfg: FeishuProjectConfig, req: SubtaskUpdate): Promise<SubtaskResult> {
+  for (const v of [req.projectKey, req.wid, req.nodeKey, req.subId]) if (!v || !SAFE_ID.test(v)) return { ok: false, error: "缺少子任务的定位信息（空间 / 需求 / 节点），请先刷新工作台再试" };
+  for (const n of [req.start, req.end, req.days]) if (n !== undefined && (typeof n !== "number" || !Number.isFinite(n))) return { ok: false, error: "日期或人天的格式不对" };
+  const c = { ...cfg, timeoutSec: 30 };
+  const base = [`--node-id=${req.nodeKey}`, `--project-key=${req.projectKey}`, `--work-item-id=${req.wid}`, `--task-id=${req.subId}`, "--format=json"];
+  let argv: string[];
+  if (req.done !== undefined) {
+    argv = ["subtask", "update", `--action=${req.done ? "confirm" : "rollback"}`, ...base];
+  } else {
+    const schedule: Record<string, number> = {};
+    if (req.start !== undefined && req.end !== undefined) {
+      schedule.estimate_start_date = dayOf(req.start)!;
+      schedule.estimate_end_date = dayOf(req.end)! + 86_400_000 - 1; // 结束日期按当天最后一刻
+    }
+    if (req.days !== undefined && Number.isFinite(req.days) && req.days >= 0) schedule.points = req.days;
+    if (!Object.keys(schedule).length) return { ok: false, error: "没有要改的内容" };
+    argv = ["subtask", "update", "--action=update", `--schedule=${JSON.stringify(schedule)}`, ...base];
+  }
+  const text = await runMeegle(c, argv, sig());
+  const bad = cliFailure(text);
+  if (bad) return { ok: false, error: bad };
+
+  const subs = await fetchSubs(c, req.wid, req.projectKey, true).catch(() => new Map<string, SubInfo>());
+  const now = subs.get(req.subId);
+  if (!now) return { ok: true };
+  const child = { done: now.done, start: now.start, end: now.end, days: now.days };
+  if (req.done !== undefined && (now.done === true) !== req.done) return { ok: false, error: `飞书没有接受这次操作（子任务仍是${now.done ? "已完成" : "未完成"}）。可能要先完成它前面的节点，或者你没有权限`, child };
+  if (req.start !== undefined && req.end !== undefined && (dayOf(now.start) !== dayOf(req.start) || dayOf(now.end) !== dayOf(req.end))) return { ok: false, error: "飞书没有接受这次排期修改，请到飞书项目里确认", child };
+  if (req.done === undefined && req.days !== undefined && now.days !== req.days) return { ok: false, error: "飞书没有接受这次人天修改，请到飞书项目里确认", child };
+  return { ok: true, child };
 }
 
 export async function fetchDingtalkTodos(cfg: DingtalkProjectConfig): Promise<TodoSource> {

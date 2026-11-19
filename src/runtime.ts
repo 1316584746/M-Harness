@@ -4,7 +4,8 @@ import { ContextManager } from "./core/context";
 import { Guardrails, approveAll, denyAll, type Approver } from "./core/guardrails";
 import { run } from "./core/loop";
 import { createJsonlTrace, fanout, newRunId } from "./core/trace";
-import type { Emit, Msg, RunResult, Tool } from "./core/types";
+import type { Asker, Emit, Msg, RunResult, Tool } from "./core/types";
+import { askUserTool } from "./tools/ask-user";
 import { builtinTools } from "./tools/builtin";
 import { dingtalkProjectTools } from "./tools/dingtalk-project";
 import { feishuProjectTools } from "./tools/feishu-project";
@@ -14,6 +15,12 @@ import { scanSkills, skillTool, skillsPrompt, type Skill } from "./prompt/skills
 import { gitTools } from "./tools/git";
 import { authEnvFor } from "./tools/git-hosts";
 
+/** 调用方额外提供的工具（桌面端的插件工具）：prepare 里异步准备好，tools 同步取 */
+export interface ExtraTools {
+  tools(): Tool[];
+  prepare(): Promise<void>;
+}
+
 export interface TaskRequest {
   input: string;
   /** 指定 provider，缺省用配置里的 defaultProvider */
@@ -22,6 +29,8 @@ export interface TaskRequest {
   /** local：本机 CLI/桌面，沿用 guard 配置；channel：办公通道，默认只读 */
   mode?: "local" | "channel";
   approve?: Approver;
+  /** 能向操作人提问（只有桌面端的对话提供）；有它才给模型 ask_user 工具 */
+  ask?: Asker;
   emit?: Emit;
   signal?: AbortSignal;
   /** 覆盖工作区（沙箱根） */
@@ -39,9 +48,11 @@ export class Runtime {
   readonly mcp: McpManager;
   private ownsMcp: boolean;
   private home?: string;
+  private extra?: ExtraTools;
 
   /** opts.mcp：由调用方持有的 MCP 连接（桌面端在配置重载之间复用连接）；不传则自己创建、dispose 时关闭 */
-  constructor(readonly config: HarnessConfig, opts: { mcp?: McpManager; home?: string } = {}) {
+  constructor(readonly config: HarnessConfig, opts: { mcp?: McpManager; home?: string; extra?: ExtraTools } = {}) {
+    this.extra = opts.extra;
     this.registry = new ProviderRegistry(config);
     this.ownsMcp = !opts.mcp;
     this.mcp = opts.mcp ?? new McpManager();
@@ -55,7 +66,7 @@ export class Runtime {
     // 项目管理只接一个：同时配了就用飞书项目
     const dp = fp ? undefined : this.config.integrations.dingtalkProject;
     const repos = Object.fromEntries(Object.entries(this.config.repos).map(([k, r]) => [k, { ...r, path: path.resolve(r.path) }]));
-    return [...builtinTools, ...gitTools(repos, u => authEnvFor(u, this.config.gitHosts)), ...(fp ? feishuProjectTools(fp) : []), ...(dp ? dingtalkProjectTools({ ...dp, bin: this.config.integrations.dingtalk?.bin ?? "dws" }) : []), ...this.mcp.tools()];
+    return [...builtinTools, ...gitTools(repos, u => authEnvFor(u, this.config.gitHosts)), ...(fp ? feishuProjectTools(fp) : []), ...(dp ? dingtalkProjectTools({ ...dp, bin: this.config.integrations.dingtalk?.bin ?? "dws" }) : []), ...this.mcp.tools(), ...(this.extra?.tools() ?? [])];
   }
 
   /** 工作区下所有技能（含已停用的，带 enabled 标记，供设置页展示） */
@@ -67,6 +78,7 @@ export class Runtime {
   /** 连接 MCP 服务（已连接的不会重复连） */
   async prepare(): Promise<void> {
     await this.mcp.ensure();
+    await this.extra?.prepare().catch(() => {});
   }
 
   async dispose(): Promise<void> {
@@ -100,7 +112,7 @@ export class Runtime {
     const root = req.workspace ? path.resolve(req.workspace) : this.workspace;
     await this.prepare();
     const skills = provider.kind === "model" ? this.allSkills(root).filter(s => s.enabled) : [];
-    const baseTools = [...this.tools, ...(skills.length ? [skillTool(skills)] : [])];
+    const baseTools = [...this.tools, ...(skills.length ? [skillTool(skills)] : []), ...(req.ask && provider.kind === "model" ? [askUserTool] : [])];
     const system = [req.system ?? this.config.system, buildRulesSection(this.config.rules, root), skillsPrompt(skills)].filter(Boolean).join("\n\n");
 
     const result = await run({
@@ -113,6 +125,7 @@ export class Runtime {
       timeoutMs: this.config.limits.timeoutSec * 1000,
       guard: this.guardFor(mode),
       approve,
+      ask: req.ask,
       context: new ContextManager({ maxTokens: this.config.limits.contextTokens }, emit),
       emit,
       signal: req.signal,

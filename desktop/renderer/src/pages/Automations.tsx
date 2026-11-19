@@ -4,6 +4,7 @@ import { MIN_INTERVAL, STATUS_TEXT, WEEK, describeSchedule, fmtWhen, nextRun, st
 import { api } from "../api";
 import { Icon } from "../components/Icon";
 import { Markdown } from "../components/Markdown";
+import { Req, useRequired } from "../components/Required";
 import { Switch } from "./settings/Projects";
 
 type Tab = AutoStatus | "all";
@@ -247,8 +248,18 @@ function Editor({ init, state, onClose, onSaved }: { init: Partial<Automation>; 
     return n ? `下次运行：${fmtWhen(n)}` : "";
   })();
 
+  const req = useRequired();
   const save = async () => {
     setErr("");
+    const miss = req.check([
+      { key: "name", label: "名称", ok: !!name.trim() },
+      { key: "prompt", label: "让 Agent 做什么", ok: !!prompt.trim() },
+      ...(kind === "daily" || kind === "weekly" ? [{ key: "time", label: "运行时间", ok: !!time }] : []),
+      ...(kind === "weekly" ? [{ key: "days", label: "每周哪几天", ok: days.length > 0 }] : []),
+      ...(kind === "interval" ? [{ key: "every", label: "间隔时长", ok: every > 0 }] : []),
+      ...(kind === "once" ? [{ key: "once", label: "运行时间", ok: !!once }] : []),
+    ]);
+    if (miss) return setErr(miss);
     setSaving(true);
     const r = await api.automationSave({ ...(init.id ? { id: init.id } : {}), name, prompt, schedule: schedule(), workspace: ws || undefined, provider: provider || undefined, model: model.trim() || undefined, access, endAt: fromLocalInput(end), enabled: init.id ? init.enabled : true });
     setSaving(false);
@@ -262,16 +273,25 @@ function Editor({ init, state, onClose, onSaved }: { init: Partial<Automation>; 
         <h3>{init.id ? "编辑自动化任务" : "新建自动化任务"}</h3>
 
         <label className="auto-field">
-          <span>名称</span>
-          <input className="input" data-testid="auto-f-name" placeholder="比如：每日代码巡检" value={name} onChange={e => { setName(e.target.value); setErr(""); }} autoFocus />
+          <span>
+            名称
+            <Req />
+          </span>
+          <input className={req.cls("name")} data-req="name" data-testid="auto-f-name" placeholder="比如：每日代码巡检" value={name} onChange={e => { setName(e.target.value); req.clear("name"); setErr(""); }} autoFocus />
         </label>
         <label className="auto-field">
-          <span>让 Agent 做什么</span>
-          <textarea className="input" data-testid="auto-f-prompt" rows={5} placeholder="每次运行时发给 Agent 的指令，比如：检查仓库最近一天的提交，列出有风险的改动" value={prompt} onChange={e => setPrompt(e.target.value)} />
+          <span>
+            让 Agent 做什么
+            <Req />
+          </span>
+          <textarea className={req.cls("prompt")} data-req="prompt" data-testid="auto-f-prompt" rows={5} placeholder="每次运行时发给 Agent 的指令，比如：检查仓库最近一天的提交，列出有风险的改动" value={prompt} onChange={e => (setPrompt(e.target.value), req.clear("prompt"), setErr(""))} />
         </label>
 
         <div className="auto-field">
-          <span>什么时候运行</span>
+          <span>
+            什么时候运行
+            <Req />
+          </span>
           <div className="auto-sched">
             <select className="input" data-testid="auto-f-kind" value={kind} onChange={e => setKind(e.target.value as Schedule["kind"])}>
               <option value="daily">每天</option>
@@ -279,22 +299,22 @@ function Editor({ init, state, onClose, onSaved }: { init: Partial<Automation>; 
               <option value="interval">每隔一段时间</option>
               <option value="once">只运行一次</option>
             </select>
-            {(kind === "daily" || kind === "weekly") && <input className="input" type="time" data-testid="auto-f-time" value={time} onChange={e => setTime(e.target.value)} />}
+            {(kind === "daily" || kind === "weekly") && <input className={req.cls("time")} data-req="time" type="time" data-testid="auto-f-time" value={time} onChange={e => (setTime(e.target.value), req.clear("time"))} />}
             {kind === "interval" && (
               <>
-                <input className="input num" type="number" min={1} data-testid="auto-f-every" value={every} onChange={e => setEvery(Number(e.target.value))} />
+                <input className={req.cls("every", "input num")} data-req="every" type="number" min={1} data-testid="auto-f-every" value={every} onChange={e => (setEvery(Number(e.target.value)), req.clear("every"))} />
                 <select className="input" data-testid="auto-f-unit" value={unit} onChange={e => setUnit(e.target.value as "min" | "hour")}>
                   <option value="min">分钟</option>
                   <option value="hour">小时</option>
                 </select>
               </>
             )}
-            {kind === "once" && <input className="input" type="datetime-local" data-testid="auto-f-once" value={once} onChange={e => setOnce(e.target.value)} />}
+            {kind === "once" && <input className={req.cls("once")} data-req="once" type="datetime-local" data-testid="auto-f-once" value={once} onChange={e => (setOnce(e.target.value), req.clear("once"))} />}
           </div>
           {kind === "weekly" && (
-            <div className="auto-days" data-testid="auto-f-days">
+            <div className={`auto-days${req.bad.includes("days") ? " invalid" : ""}`} data-req="days" tabIndex={-1} data-testid="auto-f-days">
               {[1, 2, 3, 4, 5, 6, 0].map(d => (
-                <button key={d} type="button" className={days.includes(d) ? "on" : ""} onClick={() => setDays(v => (v.includes(d) ? v.filter(x => x !== d) : [...v, d]))}>
+                <button key={d} type="button" className={days.includes(d) ? "on" : ""} onClick={() => (req.clear("days"), setDays(v => (v.includes(d) ? v.filter(x => x !== d) : [...v, d])))}>
                   周{WEEK[d]}
                 </button>
               ))}

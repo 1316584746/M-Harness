@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config";
 import { BUNDLED, BUNDLED_SOURCE } from "../desktop/main/plugin-catalog";
 import { PluginMarket } from "../desktop/main/plugins";
-import { applyInstall, applyUninstall, isEnabled, marketplaceUrl, parseMarketplace, parsePackage, LOCAL_SOURCE, setEnabled, type PluginEntry } from "../desktop/shared/plugins";
+import { applyInstall, applyUninstall, detectCatalogFormat, isEnabled, marketplaceUrl, parseMarketplace, parsePackage, LOCAL_SOURCE, setEnabled, type PluginEntry } from "../desktop/shared/plugins";
 
 const entry = (over: Partial<PluginEntry> & Pick<PluginEntry, "kind" | "install">): PluginEntry => ({
   key: "s:x/a",
@@ -184,6 +184,19 @@ describe("PluginMarket", () => {
     const r = await m.load([{ url: "http://h/ok.json" }], true);
     expect(r.errors).toEqual([]);
     expect(r.entries.length).toBe(BUNDLED.length + 1);
+  });
+});
+
+describe("仓库目录格式识别", () => {
+  it("DBX 目录 / 本软件的插件源 / 认不出来", () => {
+    expect(detectCatalogFormat({ plugins: [{ id: "a", name: "A", versions: [] }] })).toBe("dbx");
+    expect(detectCatalogFormat({ plugins: [] })).toBe("dbx");
+    expect(detectCatalogFormat({ plugins: [{ id: "a", name: "A", kind: "rule", description: "d", install: { content: "x" } }] })).toBe("native");
+    expect(detectCatalogFormat([{ id: "a", kind: "rule", install: { content: "x" } }])).toBe("native");
+    expect(detectCatalogFormat([])).toBe("native");
+    expect(detectCatalogFormat({ format: 1, plugins: [{ name: "dsh-x", versions: [{ version: "1" }] }] })).toBeNull(); // DSH 的 npm 索引：没有 id
+    expect(detectCatalogFormat({ foo: 1 })).toBeNull();
+    expect(detectCatalogFormat("x")).toBeNull();
   });
 });
 

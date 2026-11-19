@@ -130,7 +130,10 @@ export function FeishuChannel({ state, onChanged }: { state: AppState; onChanged
               <div className="srow-title">回复格式</div>
             </div>
             <div className="srow-ctl">
-              <select className="input" value={lark?.replyFormat ?? "markdown"} onChange={e => void save(c => void (c.channels.larkCli.replyFormat = e.target.value))}>
+              <select className="input" value={lark?.replyFormat ?? "markdown"} onChange={e => {
+                const v = e.target.value; // 先取值：保存是异步的，等会儿再读 e.target 会拿到被界面还原的旧值
+                void save(c => void (c.channels.larkCli.replyFormat = v));
+              }}>
                 <option value="markdown">Markdown</option>
                 <option value="text">纯文本</option>
               </select>

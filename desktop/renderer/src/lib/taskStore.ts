@@ -2,6 +2,29 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { TodoItemDTO } from "../../../shared/api";
 import { isRunning, type Session } from "./chatStore";
 
+export interface TaskDoc {
+  id: string;
+  title: string;
+  content: string;
+  added: number;
+}
+/** 需求的链接：待办里带了就用它；飞书项目的需求没带时，按空间 + 工作项 ID 拼出详情页地址（默认是需求 story） */
+export function taskUrl(t: Pick<Task, "url" | "source" | "projectKey" | "itemId">): string | undefined {
+  if (t.url) return t.url;
+  if (t.source === "feishu" && t.projectKey && /^[\w.-]+$/.test(t.projectKey) && /^\d+$/.test(t.itemId)) return `https://project.feishu.cn/${t.projectKey}/story/detail/${t.itemId}`;
+  return undefined;
+}
+
+export type DocKind = "url" | "path" | "text";
+
+/** 内容是链接、本机路径还是直接写的文字 */
+export function docKind(content: string): DocKind {
+  const s = content.trim();
+  if (/^https?:\/\/\S+$/i.test(s)) return "url";
+  if (/^([a-zA-Z]:[\\/]|\/|~\/)[^\n]*$/.test(s)) return "path";
+  return "text";
+}
+
 /** 由一个需求（飞书项目工作项 / 钉钉待办）创建的任务；对话内容放在任务自己的会话里 */
 export interface Task {
   id: string;
@@ -12,12 +35,22 @@ export interface Task {
   node?: string;
   sub?: string;
   url?: string;
+  /** 需求所在飞书项目空间的 key（查需求群要用） */
+  projectKey?: string;
+  /** 需求编号（REQ-ID），可后补 */
+  reqId?: string;
+  /** 手动关联 / 自动创建的需求群（oc_ 开头）；没有就用飞书项目里这个需求默认的群 */
+  groupId?: string;
+  /** 群里 AI 的回复方式：跟随全局 / 流式 / 整条发送 */
+  groupReply?: "global" | "stream" | "whole";
   start?: number;
   end?: number;
   /** 关联的代码仓库（配置里的名字） */
   repos: string[];
-  /** 任务上下文：每次发给 AI 前都会带上 */
+  /** 任务上下文（旧版的一段文字）：每次发给 AI 前都会带上 */
   context: string;
+  /** 任务上下文文档：一条一条加（链接 / 本机路径 / 文字），发给 AI 前一起带上 */
+  docs?: TaskDoc[];
   /** 已经发给 AI 的上下文（变了才再带一次） */
   ctxSent?: string;
   /** 用来放对话的会话 id */
@@ -108,6 +141,7 @@ export function useTaskStore() {
       node: item.node,
       sub: item.sub,
       url: item.url,
+      projectKey: item.projectKey,
       start: item.start,
       end: item.end,
       repos: [],

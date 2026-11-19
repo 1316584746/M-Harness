@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { DbxBridge, dbxDataDir, findDbxMcp, scanDbxPlugins } from "../desktop/main/dbx";
-import { DBX_SOURCE, applyInstall, dbxBridgeOn, dbxInstallLink, dbxTarget, parseDbxCatalog, parseMarketplace, setDbxBridge } from "../desktop/shared/plugins";
+import { DBX_SOURCE, applyInstall, dbxInstallLink, dbxTarget, parseDbxCatalog, parseMarketplace } from "../desktop/shared/plugins";
 
 const art = (target: string, v = "1.0.0") => ({ target, url: `https://dl.dbxio.com/plugins/a.b/${v}/a.b-${v}-${target}.dbxp`, sha256: "ab".repeat(32), size: 123, signingKeyId: "k" });
 const catalog = {
@@ -55,7 +55,13 @@ describe("DBX 插件目录", () => {
   });
 
   it("格式不对时报错", () => {
-    expect(() => parseDbxCatalog({}, "windows-x64")).toThrow();
+    expect(() => parseDbxCatalog({}, "windows-x64")).toThrow(/plugins 列表/);
+  });
+
+  it("别家的插件市场（条目没有 id，如 DSH 的 npm 索引）给出说明，空目录仍然正常", () => {
+    const dsh = { format: 1, plugins: [{ name: "dsh-plan-note", title: "x", versions: [{ version: "0.1.2", source: { type: "npm" } }] }] };
+    expect(() => parseDbxCatalog(dsh, "windows-x64")).toThrow(/不是 DBX 格式.*DSH/);
+    expect(parseDbxCatalog({ plugins: [] }, "windows-x64")).toEqual([]);
   });
 
   it("目标平台名", () => {
@@ -146,26 +152,6 @@ describe("本机 DBX", () => {
   });
 });
 
-describe("DBX 桥接开关", () => {
-  const spec = { command: "dbx-mcp", args: [] as string[] };
-  it("打开：加进 mcpServers；已有就只打开，不改用户的命令", () => {
-    const cfg: any = {};
-    expect(dbxBridgeOn(cfg)).toBe(false);
-    setDbxBridge(cfg, true, spec);
-    expect(cfg.mcpServers.dbx).toMatchObject({ command: "dbx-mcp", enabled: true, permission: "confirm" });
-    expect(dbxBridgeOn(cfg)).toBe(true);
-    setDbxBridge(cfg, false);
-    expect(dbxBridgeOn(cfg)).toBe(false);
-    cfg.mcpServers.dbx.command = "mine";
-    setDbxBridge(cfg, true, spec);
-    expect(cfg.mcpServers.dbx.command).toBe("mine");
-    expect(dbxBridgeOn(cfg)).toBe(true);
-  });
-  it("没有命令又没配置过时打不开", () => {
-    expect(() => setDbxBridge({}, true)).toThrow();
-  });
-});
-
 describe("DBX 插件不走 Harness 自己的安装", () => {
   it("插件源 JSON 里不能声明 dbx 类型", () => {
     const r = parseMarketplace({ plugins: [{ id: "x", name: "x", description: "x", kind: "dbx", install: {} }] }, "s");
@@ -174,6 +160,6 @@ describe("DBX 插件不走 Harness 自己的安装", () => {
   });
   it("applyInstall 拒绝 dbx 条目", () => {
     const e = parseDbxCatalog(catalog, "windows-x64")[0];
-    expect(() => applyInstall({}, e)).toThrow("DBX");
+    expect(() => applyInstall({}, e)).toThrow("这是插件");
   });
 });

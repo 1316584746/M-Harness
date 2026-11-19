@@ -304,7 +304,8 @@ export class HomeService {
     const saved = h.byDate[date] && QUOTES.find(q => q.text === h.byDate[date]);
     if (saved) return saved;
     let used = new Set(h.used);
-    if (used.size >= QUOTES.length) used = new Set();
+    // 整个句库都用过一轮：重新开始，但最近 30 天用过的先不重复
+    if (used.size >= QUOTES.length) used = new Set(Object.values(h.byDate));
     const q = pickQuote(date, hint, used);
     if (commit) {
       used.add(q.text);

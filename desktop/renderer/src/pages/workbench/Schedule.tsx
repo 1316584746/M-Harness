@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import type { TodoChildDTO, TodoItemDTO } from "../../../../shared/api";
-import { applySchedule, schedKey, type SchedOverride, type ScheduleStore } from "../../lib/scheduleStore";
 import { WEEK, WINDOW_DAYS, DAY, layoutBars, md, startOfDay, windowStart } from "../../../../shared/schedule";
 import { Icon } from "../../components/Icon";
 
@@ -37,20 +36,28 @@ const fromInput = (s: string): number | undefined => {
   return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime() : undefined;
 };
 
-/** 在本软件里填排期：起止日期 + 人天，只保存在本机 */
-function SchedEditor({ init, onSave, onClose }: { init?: SchedOverride; onSave: (v: SchedOverride | null) => void; onClose: () => void }) {
+/** 改子任务的排期：起止日期 + 人天，保存时直接写到飞书项目 */
+function SchedEditor({ init, onSave, onClose }: { init?: { start?: number; end?: number; days?: number }; onSave: (v: { start?: number; end?: number; days?: number }) => Promise<string | undefined>; onClose: () => void }) {
   const [s, setS] = useState(toInput(init?.start));
   const [e, setE] = useState(toInput(init?.end));
   const [d, setD] = useState(init?.days !== undefined ? String(init.days) : "");
-  const save = () => {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string>();
+  const save = async () => {
     let a = fromInput(s);
     let b = fromInput(e);
     if (a !== undefined && b === undefined) b = a;
     if (b !== undefined && a === undefined) a = b;
     if (a !== undefined && b !== undefined && b < a) [a, b] = [b, a];
     const days = d.trim() === "" ? undefined : Math.max(0, Number(d));
-    onSave({ start: a, end: b, days: Number.isFinite(days) ? days : undefined });
-    onClose();
+    const v = { start: a, end: b, days: days !== undefined && Number.isFinite(days) ? days : undefined };
+    if (v.start === undefined && v.days === undefined) return setErr("请填写日期或人天");
+    setBusy(true);
+    setErr(undefined);
+    const bad = await onSave(v);
+    setBusy(false);
+    if (bad) setErr(bad);
+    else onClose();
   };
   return (
     <div className="sched-edit" data-testid="sched-edit" onClick={ev => ev.stopPropagation()}>
@@ -63,25 +70,17 @@ function SchedEditor({ init, onSave, onClose }: { init?: SchedOverride; onSave: 
       <label>
         人天 <input type="number" data-testid="sched-days" min={0} step={0.5} value={d} onChange={ev => setD(ev.target.value)} />
       </label>
-      <button className="btn sm primary" data-testid="sched-save" onClick={save}>
-        保存
+      <button className="btn sm primary" data-testid="sched-save" onClick={() => void save()} disabled={busy} title="保存后直接写到飞书项目">
+        {busy ? <span className="spinner" /> : null} 保存到飞书项目
       </button>
-      {init && (
-        <button
-          className="btn sm"
-          data-testid="sched-clear"
-          title="清除本软件里填的排期，恢复飞书里的"
-          onClick={() => {
-            onSave(null);
-            onClose();
-          }}
-        >
-          清除
-        </button>
-      )}
-      <button className="btn sm ghost" onClick={onClose}>
+      <button className="btn sm ghost" onClick={onClose} disabled={busy}>
         取消
       </button>
+      {err && (
+        <span className="bad sched-err" data-testid="sched-err">
+          {err}
+        </span>
+      )}
     </div>
   );
 }
@@ -101,36 +100,58 @@ function Nodes({ t }: { t: TodoItemDTO }) {
   );
 }
 
-/** 需求自己的排期：显示日期，点一下填写 / 修改 */
-function SelfSched({ t, sched }: { t: TodoItemDTO; sched: ScheduleStore }) {
-  const [edit, setEdit] = useState(false);
-  const k = schedKey(t);
+/** 需求自己的排期：只显示飞书项目里的日期（需求和节点的排期要到飞书里改，这里只改子任务） */
+function SelfSched({ t }: { t: TodoItemDTO }) {
   return (
-    <>
-      <button className={`link self-when${sched.all[k] ? " local" : ""}`} data-testid="wb-self-sched" onClick={ev => (ev.stopPropagation(), setEdit(v => !v))}>
-        {range(t)}
-        {sched.all[k] ? "（本地）" : t.start === undefined && t.end === undefined ? " · 填写排期" : ""}
-      </button>
-      {edit && <SchedEditor init={sched.all[k]} onSave={v => sched.set(k, v)} onClose={() => setEdit(false)} />}
-    </>
+    <span className="self-when" data-testid="wb-self-sched" title="需求 / 节点的排期来自飞书项目；子任务的排期可以在下面直接改">
+      {range(t)}
+    </span>
   );
 }
 
+/** 改子任务（完成 / 回滚 / 排期）。返回错误文字，成功返回 undefined */
+export type ChildEdit = (t: TodoItemDTO, c: TodoChildDTO, change: { done?: boolean; start?: number; end?: number; days?: number }) => Promise<string | undefined>;
+
 /** 需求下我负责的子任务：名字、负责人、人天、排期（可以在这里填） */
-function Children({ t, sched }: { t: TodoItemDTO; sched: ScheduleStore }) {
+function Children({ t, onEdit }: { t: TodoItemDTO; onEdit: ChildEdit }) {
   const [editing, setEditing] = useState<string | null>(null);
+  /** 正在写飞书的子任务：点下去马上按新状态显示，失败了再改回来 */
+  const [pending, setPending] = useState<Record<string, boolean>>({});
+  const [errs, setErrs] = useState<Record<string, string>>({});
   const subs = (t.children ?? []).filter(c => c.kind === "subtask");
   if (!subs.length) return null;
+  const toggle = async (c: TodoChildDTO) => {
+    if (c.id in pending) return;
+    const want = !c.done;
+    setPending(p => ({ ...p, [c.id]: want }));
+    setErrs(e => {
+      const { [c.id]: _x, ...rest } = e;
+      return rest;
+    });
+    const bad = await onEdit(t, c, { done: want });
+    setPending(p => {
+      const { [c.id]: _x, ...rest } = p;
+      return rest;
+    });
+    if (bad) setErrs(e => ({ ...e, [c.id]: bad }));
+  };
   return (
     <div className="sub-list" data-testid="sub-list">
       {subs.map(c => {
-        const k = schedKey(t, c.id);
+        const done = c.id in pending ? pending[c.id] : c.done;
+        const canEdit = !!(t.projectKey && c.nodeKey);
         return (
           <div key={c.id} className="sub-item">
-            <div className={`sub-row${c.done ? " done" : ""}${c.active ? " active" : ""}`} data-testid="wb-child" data-kind={c.kind}>
-              <span className={`sub-check${c.done ? " on" : ""}`} title={c.done ? "已完成" : "未完成"}>
-                {c.done && <Icon name="check" size={11} strokeWidth={3} />}
-              </span>
+            <div className={`sub-row${done ? " done" : ""}${c.active ? " active" : ""}`} data-testid="wb-child" data-kind={c.kind}>
+              <button
+                className={`sub-check${done ? " on" : ""}${c.id in pending ? " busy" : ""}`}
+                data-testid="wb-child-check"
+                disabled={!canEdit || c.id in pending}
+                title={!canEdit ? "缺少定位信息，刷新一下再试" : done ? "已完成，点一下改回未完成（同步到飞书项目）" : "点一下标记完成（同步到飞书项目）"}
+                onClick={() => void toggle(c)}
+              >
+                {done && <Icon name="check" size={11} strokeWidth={3} />}
+              </button>
               <span className="sub-title">{c.title}</span>
               {c.parent && <span className="sub-parent">{c.parent}</span>}
               {c.active && <em className="sub-act">进行中</em>}
@@ -143,12 +164,17 @@ function Children({ t, sched }: { t: TodoItemDTO; sched: ScheduleStore }) {
               <span className="sub-days" data-testid="wb-child-days">
                 {c.days !== undefined ? `${c.days} 人天` : "–"}
               </span>
-              <button className={`sub-when${c.local ? " local" : ""}${c.start === undefined && c.end === undefined ? " none" : ""}`} data-testid="wb-child-when" title="点一下填写 / 修改排期（只保存在本软件）" onClick={() => setEditing(editing === c.id ? null : c.id)}>
+              <button className={`sub-when${c.start === undefined && c.end === undefined ? " none" : ""}`} data-testid="wb-child-when" disabled={!canEdit} title="点一下修改排期和人天（保存后同步到飞书项目）" onClick={() => setEditing(editing === c.id ? null : c.id)}>
                 {childRange(c)}
                 <Icon name="edit" size={11} />
               </button>
             </div>
-            {editing === c.id && <SchedEditor init={sched.all[k]} onSave={v => sched.set(k, v)} onClose={() => setEditing(null)} />}
+            {errs[c.id] && (
+              <div className="sub-err bad" data-testid="wb-child-err">
+                没有同步到飞书项目：{errs[c.id]}
+              </div>
+            )}
+            {editing === c.id && <SchedEditor init={{ start: c.start, end: c.end, days: c.days }} onSave={v => onEdit(t, c, v)} onClose={() => setEditing(null)} />}
           </div>
         );
       })}
@@ -159,13 +185,13 @@ function Children({ t, sched }: { t: TodoItemDTO; sched: ScheduleStore }) {
 /** 我的排期：只展示一个来源（飞书项目或钉钉）的待办，按天排成甘特条 */
 export function Schedule({
   source,
-  items: rawItems,
+  items,
   loaded,
   loading,
   title,
   user,
   error,
-  sched,
+  onEdit,
   tasked,
   onTask,
 }: {
@@ -179,14 +205,13 @@ export function Schedule({
   user?: string;
   /** 读取失败的原因 */
   error?: string;
-  /** 在本软件里填的排期 */
-  sched: ScheduleStore;
+  /** 改飞书项目里的子任务（完成 / 回滚 / 排期） */
+  onEdit: ChildEdit;
   /** 已经建过任务的需求（source + id） */
   tasked: Set<string>;
   /** 点击需求：在左侧创建任务；open=true 同时打开任务 */
   onTask: (t: TodoItemDTO, open: boolean) => void;
 }) {
-  const items = useMemo(() => applySchedule(rawItems, sched.all), [rawItems, sched.all]);
   const [weeks, setWeeks] = useState(0);
   const [open, setOpen] = useState<string | null>(null);
   const now = Date.now();
@@ -213,7 +238,7 @@ export function Schedule({
       <button className="btn sm" data-testid="wb-todo-ai" onClick={() => onTask(t, true)}>
         <Icon name="spark" size={13} /> 打开任务
       </button>
-      <Children t={t} sched={sched} />
+      <Children t={t} onEdit={onEdit} />
     </div>
   );
 
@@ -234,7 +259,7 @@ export function Schedule({
         </div>
         <div className="sch-tools">
           <span className="muted" data-testid="wb-schedule-count">
-            {loaded ? `${bars.length} 项排期中` : loading ? "正在读取…" : ""}
+            {loaded ? `${bars.length} 项排期中${loading ? " · 正在更新…" : ""}` : loading ? "正在读取…" : ""}
           </span>
         </div>
       </div>
@@ -327,7 +352,7 @@ export function Schedule({
                   <div className="wb-sub">
                     <Nodes t={t} />
                     {t.overdue && <span className="bad"> 已逾期 </span>}
-                    <SelfSched t={t} sched={sched} />
+                    <SelfSched t={t} />
                     {t.sub ? ` · ${t.sub}` : ""}
                   </div>
                 </div>
@@ -335,7 +360,7 @@ export function Schedule({
                   <Icon name="spark" size={13} /> {tasked.has(key(t)) ? "打开任务" : "创建任务"}
                 </button>
               </div>
-              <Children t={t} sched={sched} />
+              <Children t={t} onEdit={onEdit} />
             </div>
           ))}
         </div>
@@ -349,14 +374,14 @@ export function Schedule({
               <div className="wb-todo-main">
                 <div className={`wb-todo-title${tasked.has(key(t)) ? " jump" : ""}`} onClick={() => tasked.has(key(t)) && onTask(t, true)} title={tasked.has(key(t)) ? "打开对应任务" : undefined}>{t.title}</div>
                 <div className="wb-sub">
-                  {t.sub} <SelfSched t={t} sched={sched} />
+                  {t.sub} <SelfSched t={t} />
                   {t.children?.some(c => c.kind === "subtask") ? (
                     <button className="link sub-toggle" data-testid="wb-sub-toggle" onClick={() => setSubOpen(subOpen === key(t) ? null : key(t))}>
                       {" · "}我的子任务 {t.children.filter(c => c.kind === "subtask").length} {subOpen === key(t) ? "▴" : "▾"}
                     </button>
                   ) : null}
                 </div>
-                {subOpen === key(t) && <Children t={t} sched={sched} />}
+                {subOpen === key(t) && <Children t={t} onEdit={onEdit} />}
               </div>
               <button className="btn sm wb-ai" data-testid="wb-todo-ai" onClick={() => onTask(t, true)}>
                 <Icon name="spark" size={13} /> {tasked.has(key(t)) ? "打开任务" : "创建任务"}

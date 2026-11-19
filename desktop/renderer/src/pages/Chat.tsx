@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { templateOf } from "../lib/actionSteps";
 import type { AppState } from "../../../shared/api";
 import { api } from "../api";
+import { AskForm } from "../components/AskCard";
 import { Icon } from "../components/Icon";
 import { Markdown } from "../components/Markdown";
+import { QueuedList } from "../components/QueuedList";
 import { ModelPicker } from "../components/ModelPicker";
 import { ProviderPicker } from "../components/ProviderPicker";
-import { ToolsPicker } from "../components/ToolsPicker";
+import { McpPicker } from "../components/McpPicker";
 import { WorkspacePicker } from "../components/WorkspacePicker";
 import { parseCfg } from "../lib/configEdit";
 import { RunSteps, ToolCard } from "../components/Steps";
@@ -31,18 +34,21 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
   const info = state.providers.find(p => p.name === provider);
   const ws = workspace ?? state.workspace;
   const last = turns.at(-1);
+  // AI 正在向操作人提问：问题挂在当前这一轮上，显示在对话末尾
+  const ask = last?.status === "running" ? store.asks.find(a => a.runKey === last.id) : undefined;
   const repos = useMemo(() => (parseCfg(state.configText)?.repos ?? {}) as Record<string, { path: string; platform?: string }>, [state.configText]);
 
   // 输入 / 触发「动作」菜单：选中后把动作的提示词模板填进输入框
-  const actions = useMemo(() => (parseCfg(state.configText)?.actions ?? []) as Array<{ id: string; name: string; prompt: string }>, [state.configText]);
+  const actions = useMemo(() => ((parseCfg(state.configText)?.actions ?? []) as Array<{ id: string; name: string; prompt: string; hidden?: boolean; skill?: string; output?: string }>).filter(a => !a.hidden), [state.configText]);
   const [sel, setSel] = useState(0);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const slash = /^\/(\S*)$/.exec(input);
   const matches = slash && input !== dismissed ? actions.filter(a => a.name.toLowerCase().includes(slash[1].toLowerCase())) : [];
   useEffect(() => setSel(0), [slash?.[1]]);
-  const applyAction = (a: { prompt: string }) => {
-    const at = a.prompt.indexOf("{{input}}");
-    const text = a.prompt.split("{{input}}").join("");
+  const applyAction = (a: { prompt: string; skill?: string; output?: string }) => {
+    const tpl = templateOf(a);
+    const at = tpl.indexOf("{{input}}");
+    const text = tpl.split("{{input}}").join("");
     setInput(text);
     setDismissed(null);
     const caret = at >= 0 ? at : text.length;
@@ -54,7 +60,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [active?.id, turns.length, last?.text, last?.events.length]);
+  }, [active?.id, turns.length, last?.text, last?.events.length, ask?.id]);
 
   useEffect(() => {
     const el = area.current;
@@ -93,8 +99,10 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
 
   const send = (override?: string) => {
     const text = (override ?? input).trim();
-    if (!text || running) return;
+    if (!text) return;
     setInput("");
+    // AI 还在运行：先排队，这一轮结束后自动发
+    if (running) return store.enqueue(text, onChanged);
     void store.send(text, onChanged);
   };
 
@@ -164,6 +172,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
           ) : (
             turns.map(t => (t.role === "user" ? <UserMsg key={t.id} text={t.text} /> : <AssistantMsg key={t.id} t={t} />))
           )}
+          {ask && <AskForm key={ask.id} req={ask} onSubmit={a => void store.answerAsk(ask.id, a)} />}
           <div ref={bottom} />
         </div>
       </div>
@@ -171,9 +180,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
       <div className="composer-wrap">
         <div className="composer-inner">
           {info?.problem && <div className="inline-warn">{info.problem}</div>}
-          {info?.kind === "agent" && !info.problem && (
-            <div className="inline-note">外部 Agent 使用自己的工具，不受路径沙箱与审批约束；这里可以观察进度并随时停止。</div>
-          )}
+          <QueuedList items={store.queued} onCancel={store.dequeue} />
           <div className="composer" data-testid="composer" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
             {matches.length > 0 && (
               <div className="menu wide" style={{ left: 12 }} data-testid="action-menu">
@@ -182,7 +189,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
                   <button key={a.id} type="button" className={`menu-item ${i === sel ? "active" : ""}`} data-testid={`action-item-${a.id}`} onMouseEnter={() => setSel(i)} onMouseDown={e => (e.preventDefault(), applyAction(a))}>
                     <span className="menu-main">
                       <span className="menu-name">/{a.name}</span>
-                      <span className="menu-desc">{a.prompt.replace(/\s+/g, " ")}</span>
+                      <span className="menu-desc">{(a.skill ? `技能：${a.skill}` : a.prompt).replace(/\s+/g, " ")}</span>
                     </span>
                   </button>
                 ))}
@@ -191,14 +198,14 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
             <div className="composer-grip" title="拖动调整输入框高度" onMouseDown={startResize} />
             <div className="composer-top">
               <WorkspacePicker current={ws} repos={repos} onPick={store.setWorkspace} onBrowse={pickWs} disabled={running} />
-              <ToolsPicker disabled={store.disabledTools} onChange={store.setDisabledTools} busy={running} />
+              <McpPicker disabled={store.disabledTools} onChange={store.setDisabledTools} busy={running} />
             </div>
             <textarea
               ref={area}
               data-testid="composer-input"
               value={input}
               style={{ minHeight: minH }}
-              placeholder={running ? "运行中…可点右下角停止" : "给 Agent 一个任务、拖入文件引用路径（Enter 发送，Shift+Enter 换行）"}
+              placeholder={running ? "运行中…回车排队，这一轮结束后自动发送；也可点右下角停止" : "给 Agent 一个任务、拖入文件引用路径（Enter 发送，Shift+Enter 换行）"}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => {
                 if (matches.length && !e.nativeEvent.isComposing) {
@@ -257,9 +264,9 @@ export function UserMsg({ text }: { text: string }) {
 }
 
 /** 助手消息：工具调用像 Cursor 一样内联在回复里，完整步骤按需展开 */
-export function AssistantMsg({ t }: { t: Turn }) {
+export function AssistantMsg({ t, onRunSql }: { t: Turn; onRunSql?: (sql: string) => void }) {
   const [detail, setDetail] = useState(false);
-  const view = useMemo(() => buildRunView(t.events), [t.events]);
+  const view = useMemo(() => buildRunView(t.events, t.times?.length === t.events.length && t.startedAt ? [t.startedAt, ...t.times] : undefined), [t.events, t.times, t.startedAt]);
   const running = t.status === "running";
   const failed = t.status === "error" || t.status === "aborted";
 
@@ -298,15 +305,15 @@ export function AssistantMsg({ t }: { t: Turn }) {
           {view.activity ?? "准备中…"}
         </div>
       )}
-      {t.text && (failed ? <div className="errtext">{t.text}</div> : <Markdown text={t.text} />)}
+      {t.text && (failed ? <div className="errtext">{t.text}</div> : <Markdown text={t.text} onRunSql={onRunSql} />)}
 
       {t.events.length > 0 && (
         <div className="msg-a-foot">
           <button className={`process-chip ${detail ? "on" : ""}`} data-testid="open-process" onClick={() => setDetail(!detail)}>
             <Icon name={detail ? "down" : "right"} size={13} />
             <span>
-              {view.steps.length} 步
-              {view.toolCount > 0 && ` · ${view.toolCount} 次工具调用`}
+              {view.external ? (view.toolCount > 0 ? `${view.toolCount} 次工具调用` : "过程") : `${view.steps.length} 步`}
+              {!view.external && view.toolCount > 0 && ` · ${view.toolCount} 次工具调用`}
               {view.tokens > 0 && ` · ${view.tokens} token`}
               {view.totalMs ? ` · ${fmtMs(view.totalMs)}` : ""}
             </span>

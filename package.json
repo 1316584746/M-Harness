@@ -26,6 +26,8 @@
     "desktop:dist": "electron-vite build && electron-builder"
   },
   "dependencies": {
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/schemastery": "~3.19.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "electron-updater": "^6.8.11",
     "lunar-javascript": "^1.7.8",

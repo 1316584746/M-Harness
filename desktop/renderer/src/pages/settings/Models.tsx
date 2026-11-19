@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AppState, KeyProbeDTO } from "../../../../shared/api";
 import { api } from "../../api";
 import { Icon } from "../../components/Icon";
+import { Req, useRequired } from "../../components/Required";
 import { envVarFor, useConfigEditor, type Cfg } from "../../lib/configEdit";
 
 const TYPE_LABEL: Record<string, string> = {
@@ -20,10 +21,13 @@ interface Draft {
   command: string;
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }) {
+export function Field({ label, hint, required, children }: { label: string; hint?: React.ReactNode; required?: boolean; children: React.ReactNode }) {
   return (
     <div className="field">
-      <div className="field-label">{label}</div>
+      <div className="field-label">
+        {label}
+        {required && <Req />}
+      </div>
       {hint && <div className="field-hint">{hint}</div>}
       {children}
     </div>
@@ -139,19 +143,23 @@ function ModelPicker({
   probe,
   placeholder,
   listId,
+  reqKey,
+  invalid,
 }: {
   value: string;
   onChange: (v: string) => void;
   probe: ReturnType<typeof useKeyProbe>;
   placeholder?: string;
   listId: string;
+  reqKey?: string;
+  invalid?: boolean;
 }) {
   const { models, labels } = probe;
   const label = (m: string) => (labels[m] ? `${labels[m]}（${m}）` : m);
   return (
     <div className="inputrow">
       {models.length > 0 ? (
-        <select className="input mono" data-testid={`model-pick-${listId}`} value={value} onChange={e => onChange(e.target.value)}>
+        <select className={invalid ? "input mono invalid" : "input mono"} data-req={reqKey} data-testid={`model-pick-${listId}`} value={value} onChange={e => onChange(e.target.value)}>
           {!value && <option value="">请选择模型</option>}
           {value && !models.includes(value) && <option value={value}>{value}（当前，不在列表中）</option>}
           {models.map(m => (
@@ -161,7 +169,7 @@ function ModelPicker({
           ))}
         </select>
       ) : (
-        <input className="input mono" value={value} placeholder={placeholder ?? "模型名称"} onChange={e => onChange(e.target.value)} />
+        <input className={invalid ? "input mono invalid" : "input mono"} data-req={reqKey} value={value} placeholder={placeholder ?? "模型名称"} onChange={e => onChange(e.target.value)} />
       )}
       <button className="btn" type="button" onClick={probe.refresh} disabled={probe.status === "loading" || probe.status === "idle"} title="重新验证并获取模型列表">
         <Icon name="refresh" size={14} /> 刷新
@@ -226,9 +234,18 @@ export function ProviderCard({
   const set = (k: keyof Draft, v: string) => {
     setD({ ...d, [k]: v });
     setMsg(null);
+    req.clear(k);
   };
 
+  const req = useRequired();
+  const modelRequired = type === "openai-compat" || type === "anthropic";
   const save = async () => {
+    const miss = req.check([
+      ...(type === "openai-compat" ? [{ key: "baseURL", label: "Base URL", ok: !!d.baseURL.trim() }] : []),
+      ...(modelRequired ? [{ key: "model", label: "默认模型", ok: !!d.model.trim() }] : []),
+      ...(type === "cli" && !d.preset ? [{ key: "command", label: "命令", ok: !!d.command.trim() }] : []),
+    ]);
+    if (miss) return setMsg({ ok: false, text: miss });
     setBusy(true);
     const keyChanged = HAS_KEY.has(type) && d.apiKey !== orig.apiKey;
     if (keyChanged) {
@@ -297,14 +314,14 @@ export function ProviderCard({
       )}
 
       {(type === "openai-compat" || type === "anthropic") && (
-        <Field label="Base URL" hint={type === "anthropic" ? "留空使用官方地址" : "例如 https://api.deepseek.com"}>
-          <input className="input mono" value={d.baseURL} placeholder={type === "anthropic" ? "https://api.anthropic.com" : "https://…"} onChange={e => set("baseURL", e.target.value)} />
+        <Field label="Base URL" required={type === "openai-compat"} hint={type === "anthropic" ? "留空使用官方地址" : "例如 https://api.deepseek.com"}>
+          <input className={req.cls("baseURL", "input mono")} data-req="baseURL" value={d.baseURL} placeholder={type === "anthropic" ? "https://api.anthropic.com" : "https://…"} onChange={e => set("baseURL", e.target.value)} />
         </Field>
       )}
 
       {type !== "cli" && (
-        <Field label="默认模型" >
-          <ModelPicker value={d.model} onChange={v => set("model", v)} probe={probe} placeholder={type === "cursor-sdk" ? "composer-2" : "模型名称"} listId={name} />
+        <Field label="默认模型" required={modelRequired}>
+          <ModelPicker value={d.model} onChange={v => set("model", v)} probe={probe} placeholder={type === "cursor-sdk" ? "composer-2" : "模型名称"} listId={name} reqKey="model" invalid={req.bad.includes("model")} />
         </Field>
       )}
 
@@ -320,8 +337,8 @@ export function ProviderCard({
               ))}
             </select>
           </Field>
-          <Field label="命令" hint="留空使用预设命令">
-            <input className="input mono" value={d.command} placeholder="codex" onChange={e => set("command", e.target.value)} />
+          <Field label="命令" required={!d.preset} hint="留空使用预设命令">
+            <input className={req.cls("command", "input mono")} data-req="command" value={d.command} placeholder="codex" onChange={e => set("command", e.target.value)} />
           </Field>
         </>
       )}
@@ -359,8 +376,15 @@ export function AddProvider({
   const [key, setKey] = useState("");
   const [err, setErr] = useState("");
   const probe = useKeyProbe(type, baseURL, key);
+  const req = useRequired();
 
   const add = async () => {
+    const miss = req.check([
+      { key: "name", label: "名称", ok: !!name.trim() },
+      ...(type === "openai-compat" ? [{ key: "baseURL", label: "Base URL", ok: !!baseURL.trim() }] : []),
+      ...(type !== "cli" ? [{ key: "model", label: "默认模型", ok: !!model.trim() }] : []),
+    ]);
+    if (miss) return setErr(miss);
     if (!/^[\w.-]+$/.test(name)) return setErr("名称只能包含字母、数字、下划线、点和短横线");
     if (names.includes(name)) return setErr("已存在同名提供方");
     if (type !== "cli" && !model) return setErr("请填写默认模型");
@@ -386,8 +410,8 @@ export function AddProvider({
         <div className="pcard-name">新增自定义提供方</div>
       </div>
       <div className="grid2">
-        <Field label="名称">
-          <input className="input" value={name} placeholder="如 qwen、my-gpt" onChange={e => setName(e.target.value)} />
+        <Field label="名称" required>
+          <input className={req.cls("name")} data-req="name" value={name} placeholder="如 qwen、my-gpt" onChange={e => (setName(e.target.value), req.clear("name"), setErr(""))} />
         </Field>
         <Field label="类型">
           <select className="input" value={type} onChange={e => setType(e.target.value)}>
@@ -398,8 +422,8 @@ export function AddProvider({
         </Field>
       </div>
       {type === "openai-compat" && (
-        <Field label="Base URL">
-          <input className="input mono" value={baseURL} placeholder="https://…/v1" onChange={e => setBaseURL(e.target.value)} />
+        <Field label="Base URL" required>
+          <input className={req.cls("baseURL", "input mono")} data-req="baseURL" value={baseURL} placeholder="https://…/v1" onChange={e => (setBaseURL(e.target.value), req.clear("baseURL"), setErr(""))} />
         </Field>
       )}
       {type !== "cli" && (
@@ -408,8 +432,8 @@ export function AddProvider({
             <KeyInput value={key} onChange={setKey} />
             <KeyInfo probe={probe} />
           </Field>
-          <Field label="默认模型" >
-            <ModelPicker value={model} onChange={setModel} probe={probe} listId="add" />
+          <Field label="默认模型" required>
+            <ModelPicker value={model} onChange={v => (setModel(v), req.clear("model"), setErr(""))} probe={probe} listId="add" reqKey="model" invalid={req.bad.includes("model")} />
           </Field>
         </>
       )}

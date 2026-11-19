@@ -264,8 +264,8 @@ function TodayTodos({ active, onOpenPlugin }: { active: boolean; onOpenPlugin?: 
     };
   }, [active, load]);
 
-  // 没有事项就整块不显示；只有「还没信任插件」时留一行提示，免得用户不知道为什么没有
-  if (!dto || dto.state === "none" || dto.state === "error" || (dto.state === "ok" && dto.items.length === 0)) return null;
+  // 没有事项就整块不显示（包括插件没装 / 没信任 / 读取失败的情况）
+  if (!dto || dto.state !== "ok" || dto.items.length === 0) return null;
   const items = dto.items;
   const shown = open ? items : items.slice(0, TODO_FOLD);
   const goTodo = () => onOpenPlugin?.(TODO_PLUGIN_ID);
@@ -274,21 +274,14 @@ function TodayTodos({ active, onOpenPlugin }: { active: boolean; onOpenPlugin?: 
     <aside className="home-todos" data-testid="home-todos" data-state={dto.state} data-count={items.length}>
       <div className="home-todos-head">
         <h3>今日待办</h3>
-        {dto.state === "ok" && items.length > 0 && (
-          <span className="home-todos-count" data-testid="todos-count">
-            {items.length}
-          </span>
-        )}
+        <span className="home-todos-count" data-testid="todos-count">
+          {items.length}
+        </span>
         <span className="spacer" />
         <button className="link-btn" data-testid="todos-open" onClick={goTodo}>
           打开待办
         </button>
       </div>
-      {dto.state === "untrusted" && (
-        <p className="home-todos-hint" data-testid="todos-untrusted">
-          待办插件还没有确认信任，先打开它并点「信任并运行」，今天的事项就会显示在这里。
-        </p>
-      )}
       {shown.length > 0 && (
         <ul className="home-todos-list" data-testid="todos-list">
           {shown.map(t => (

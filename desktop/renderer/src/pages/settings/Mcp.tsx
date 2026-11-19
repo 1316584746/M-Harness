@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppState, McpServerDTO } from "../../../../shared/api";
 import { api } from "../../api";
 import { Icon } from "../../components/Icon";
+import { ResourceDiscover } from "../../components/ResourceDiscover";
+import { useResourceTools } from "../../components/ResourceTools";
+import { Req, useRequired } from "../../components/Required";
 import { useConfigEditor } from "../../lib/configEdit";
 import { Switch } from "./Projects";
 
@@ -55,9 +58,15 @@ function McpForm({ initial, existing, onSubmit, onCancel }: { initial?: { name: 
   const [url, setUrl] = useState(c.url ?? "");
   const [headers, setHeaders] = useState(pairsText(c.headers, ": "));
   const [err, setErr] = useState("");
+  const req = useRequired();
 
   const submit = async () => {
     const n = name.trim();
+    const miss = req.check([
+      ...(initial ? [] : [{ key: "name", label: "名称", ok: !!n }]),
+      ...(kind === "stdio" ? [{ key: "command", label: "命令", ok: !!command.trim() }] : [{ key: "url", label: "地址", ok: !!url.trim() }]),
+    ]);
+    if (miss) return setErr(miss);
     if (!/^[\w.-]+$/.test(n)) return setErr("名称只能包含字母、数字、下划线、点和短横线");
     if (!initial && existing.includes(n)) return setErr("已有同名服务");
     const next: Record<string, any> = { ...c };
@@ -86,8 +95,11 @@ function McpForm({ initial, existing, onSubmit, onCancel }: { initial?: { name: 
   return (
     <div className="pcard add" data-testid="mcp-form">
       <div className="field">
-        <div className="field-label">名称</div>
-        <input className="input mono" data-testid="mcp-name" value={name} disabled={!!initial} placeholder="github" onChange={e => setName(e.target.value)} />
+        <div className="field-label">
+          名称
+          <Req />
+        </div>
+        <input className={req.cls("name", "input mono")} data-req="name" data-testid="mcp-name" value={name} disabled={!!initial} placeholder="github" onChange={e => (setName(e.target.value), req.clear("name"), setErr(""))} />
       </div>
       <div className="field">
         <div className="field-label">类型</div>
@@ -99,8 +111,11 @@ function McpForm({ initial, existing, onSubmit, onCancel }: { initial?: { name: 
       {kind === "stdio" ? (
         <>
           <div className="field">
-            <div className="field-label">命令</div>
-            <input className="input mono" data-testid="mcp-command" value={command} placeholder="npx -y @modelcontextprotocol/server-filesystem D:/work" onChange={e => setCommand(e.target.value)} />
+            <div className="field-label">
+              命令
+              <Req />
+            </div>
+            <input className={req.cls("command", "input mono")} data-req="command" data-testid="mcp-command" value={command} placeholder="npx -y @modelcontextprotocol/server-filesystem D:/work" onChange={e => (setCommand(e.target.value), req.clear("command"), setErr(""))} />
           </div>
           <div className="field">
             <div className="field-label">环境变量（每行 KEY=VALUE，可写 {"${NAME}"} 引用 .env）</div>
@@ -110,8 +125,11 @@ function McpForm({ initial, existing, onSubmit, onCancel }: { initial?: { name: 
       ) : (
         <>
           <div className="field">
-            <div className="field-label">地址</div>
-            <input className="input mono" data-testid="mcp-url" value={url} placeholder="https://example.com/mcp" onChange={e => setUrl(e.target.value)} />
+            <div className="field-label">
+              地址
+              <Req />
+            </div>
+            <input className={req.cls("url", "input mono")} data-req="url" data-testid="mcp-url" value={url} placeholder="https://example.com/mcp" onChange={e => (setUrl(e.target.value), req.clear("url"), setErr(""))} />
           </div>
           <div className="field">
             <div className="field-label">请求头（每行 Name: Value）</div>
@@ -135,7 +153,10 @@ function McpForm({ initial, existing, onSubmit, onCancel }: { initial?: { name: 
 function ImportBox({ existing, onImport, onCancel }: { existing: string[]; onImport: (servers: Record<string, any>) => Promise<string | null>; onCancel: () => void }) {
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
+  const req = useRequired();
   const go = async () => {
+    const miss = req.check([{ key: "text", label: "mcp.json 内容", ok: !!text.trim() }]);
+    if (miss) return setErr(miss);
     let v: any;
     try {
       v = JSON.parse(text);
@@ -157,12 +178,15 @@ function ImportBox({ existing, onImport, onCancel }: { existing: string[]; onImp
   return (
     <div className="pcard add" data-testid="mcp-import">
       <div className="field">
-        <div className="field-label">粘贴 mcp.json（Cursor / Claude 的格式都可以）</div>
-        <textarea className="input mono" rows={8} data-testid="mcp-import-text" value={text} placeholder={'{ "mcpServers": { "name": { "command": "npx", "args": ["-y", "..."] } } }'} onChange={e => setText(e.target.value)} />
+        <div className="field-label">
+          粘贴 mcp.json（Cursor / Claude 的格式都可以）
+          <Req />
+        </div>
+        <textarea className={req.cls("text", "input mono")} data-req="text" rows={8} data-testid="mcp-import-text" value={text} placeholder={'{ "mcpServers": { "name": { "command": "npx", "args": ["-y", "..."] } } }'} onChange={e => (setText(e.target.value), req.clear("text"), setErr(""))} />
       </div>
       {err && <div className="inline-warn">{err}</div>}
       <div className="pcard-actions">
-        <button className="btn primary" data-testid="mcp-import-go" disabled={!text.trim()} onClick={() => void go()}>
+        <button className="btn primary" data-testid="mcp-import-go" onClick={() => void go()}>
           导入
         </button>
         <button className="btn" onClick={onCancel}>
@@ -202,6 +226,7 @@ export function Mcp({ state, onChanged }: { state: AppState; onChanged: () => vo
   const [open, setOpen] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const timer = useRef<number>(0);
+  const tools = useResourceTools("mcp", onChanged);
 
   const refresh = useCallback(() => void api.mcpStatus().then(setStatus), []);
   useEffect(refresh, [refresh, state.configText]);
@@ -229,10 +254,12 @@ export function Mcp({ state, onChanged }: { state: AppState; onChanged: () => vo
   const byName = new Map(status.map(s => [s.name, s]));
 
   return (
+    <>
     <div className="card-section">
       <div className="shead">
         <h2>MCP 服务</h2>
         <span className="spacer" />
+        {tools.buttons}
         <button className="btn" data-testid="mcp-import-btn" onClick={() => setMode("import")}>
           导入 JSON
         </button>
@@ -240,6 +267,7 @@ export function Mcp({ state, onChanged }: { state: AppState; onChanged: () => vo
           <Icon name="plus" size={14} /> 新增
         </button>
       </div>
+      {tools.panel}
       {err && <div className="inline-warn">{err}</div>}
 
       {mode === "import" && (
@@ -308,7 +336,10 @@ export function Mcp({ state, onChanged }: { state: AppState; onChanged: () => vo
               <span className="muted" style={{ margin: 0 }}>
                 调用
               </span>
-              <select className="input sm" data-testid="mcp-permission" value={cfg.permission ?? "confirm"} onChange={e => void run(m => void (m[n].permission = e.target.value))}>
+              <select className="input sm" data-testid="mcp-permission" value={cfg.permission ?? "confirm"} onChange={e => {
+                  const v = e.target.value; // 先取值：保存是异步的，等会儿再读 e.target 会拿到被界面还原的旧值
+                  void run(m => void (m[n].permission = v));
+                }}>
                 <option value="confirm">每次确认</option>
                 <option value="auto">直接执行</option>
               </select>
@@ -339,5 +370,7 @@ export function Mcp({ state, onChanged }: { state: AppState; onChanged: () => vo
         );
       })}
     </div>
+    <ResourceDiscover kind="mcp" onAdded={onChanged} />
+    </>
   );
 }

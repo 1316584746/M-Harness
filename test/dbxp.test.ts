@@ -82,9 +82,9 @@ describe("installDbxp", () => {
     await expect(installDbxp(spec(buf, { sha256: "0".repeat(64) }), root, { fetchImpl: serve(buf) })).rejects.toThrow(/校验失败/);
     await expect(installDbxp(spec(buf, { sha256: "" }), root, { fetchImpl: serve(buf) })).rejects.toThrow(/校验值/);
     await expect(installDbxp(spec(buf, { size: 1 }), root, { fetchImpl: serve(buf) })).rejects.toThrow(/大小/);
-    await expect(installDbxp(spec(buf, { url: "https://evil.com/a.dbxp" }), root, { fetchImpl: serve(buf) })).rejects.toThrow(/官方/);
-    await expect(installDbxp(spec(buf, { url: "http://dl.dbxio.com/a.dbxp" }), root, { fetchImpl: serve(buf) })).rejects.toThrow(/官方/);
-    await expect(installDbxp(spec(buf, { url: "https://dl.dbxio.com/a.zip" }), root, { fetchImpl: serve(buf) })).rejects.toThrow(/官方/);
+    await expect(installDbxp(spec(buf, { url: "https://evil.com/a.dbxp" }), root, { fetchImpl: serve(buf) })).rejects.toThrow(/下载站/);
+    await expect(installDbxp(spec(buf, { url: "http://dl.dbxio.com/a.dbxp" }), root, { fetchImpl: serve(buf) })).rejects.toThrow(/下载站/);
+    await expect(installDbxp(spec(buf, { url: "https://dl.dbxio.com/a.zip" }), root, { fetchImpl: serve(buf) })).rejects.toThrow(/下载站/);
     await expect(installDbxp(spec(buf), root, { fetchImpl: serve(buf, 404) })).rejects.toThrow(/404/);
     expect(fs.existsSync(path.join(root, "a.b"))).toBe(false); // 校验没过：什么都没写
   });
@@ -139,7 +139,7 @@ describe("DbxBridge 直接安装", () => {
     const buf = pack();
     const catalog = { plugins: [{ id: "a.b", name: "Alpha", description: "d", latestVersion: "1.0.0", versions: [{ version: "1.0.0", artifacts: [{ target: "universal", url: "http://127.0.0.1:9/p.dbxp", sha256: sha(buf), size: buf.length }] }] }] };
     const fetchImpl = (async (u: any) => (String(u).endsWith("index.json") ? new Response(JSON.stringify(catalog)) : new Response(new Uint8Array(buf)))) as unknown as typeof fetch;
-    const b = new DbxBridge(fetchImpl, { catalogUrl: "http://127.0.0.1:9/index.json", localDir: path.join(root, "plugins"), dataDir: path.join(root, "no-dbx"), platform: "win32", arch: "x64" });
+    const b = new DbxBridge(fetchImpl, { catalogUrl: "http://127.0.0.1:9/index.json", repos: () => [{ id: "dbx", name: "DBX 插件中心", url: "http://127.0.0.1:9/index.json", enabled: true }], localDir: path.join(root, "plugins"), dataDir: path.join(root, "no-dbx"), platform: "win32", arch: "x64" });
     expect(b.info()).toMatchObject({ appFound: false, plugins: {}, local: {} });
     expect(await b.install("a.b")).toBe("1.0.0");
     expect(b.info().local["a.b"]).toMatchObject({ version: "1.0.0", name: "Alpha", tools: 2 });

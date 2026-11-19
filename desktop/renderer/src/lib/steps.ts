@@ -23,16 +23,30 @@ export interface Step {
   tools: ToolRun[];
 }
 
+export type LogKind = "thinking" | "text" | "tool" | "status" | "error";
+export interface LogEntry {
+  kind: LogKind;
+  text: string;
+}
+
+/** 过程日志最多保留多少条（太长的任务只留最近的，思考内容单条也限长） */
+const LOG_MAX = 400;
+const THINK_MAX = 6000;
+
 export interface RunView {
   provider?: string;
   input?: string;
   steps: Step[];
-  /** 外部 Agent 的过程输出 */
+  /** 外部 Agent 的过程输出（纯文本，兼容旧展示） */
   progress: string[];
+  /** 外部 Agent 的过程输出（带类别：思考 / 回复 / 工具 / 状态 / 错误；相邻的思考片段已合并） */
+  log: LogEntry[];
   notes: string[];
   done?: { reason: string; text?: string; error?: string };
   toolCount: number;
   tokens: number;
+  /** 外部 Agent（Cursor / 命令行 Agent）跑的：没有「模型步数 / token」这些概念，只统计工具调用和耗时 */
+  external?: boolean;
   /** 总耗时：有时间戳时用首尾差，否则用各步耗时累加 */
   totalMs?: number;
   /** 当前正在做什么（运行中展示） */
@@ -41,7 +55,7 @@ export interface RunView {
 
 /** 把扁平的事件流整理成"步骤 → 工具调用"的结构，供界面展示 */
 export function buildRunView(events: HarnessEvent[], timestamps?: number[]): RunView {
-  const view: RunView = { steps: [], progress: [], notes: [], toolCount: 0, tokens: 0 };
+  const view: RunView = { steps: [], progress: [], log: [], notes: [], toolCount: 0, tokens: 0 };
   const stepOf = (n: number): Step => {
     let s = view.steps.find(x => x.n === n);
     if (!s) {
@@ -114,10 +128,23 @@ export function buildRunView(events: HarnessEvent[], timestamps?: number[]): Run
         view.activity = "思考中…";
         break;
       }
-      case "agent_progress":
+      case "agent_progress": {
+        const kind: LogKind = e.kind ?? "text";
+        view.external = true;
+        // 外部 Agent 的工具调用开始行：「🔧 名称 参数」（结果行是缩进的 ✓ / ✗，不重复算）
+        if (/^🔧\s/.test(e.line)) view.toolCount++;
         view.progress.push(e.line);
-        view.activity = e.line.slice(0, 60);
+        const last = view.log[view.log.length - 1];
+        if (kind === "thinking" && last?.kind === "thinking") {
+          // 思考是一小段一小段流过来的：接在上一段后面，合成一整段
+          last.text = (last.text + e.line).slice(-THINK_MAX);
+        } else {
+          view.log.push({ kind, text: e.line });
+          if (view.log.length > LOG_MAX) view.log.splice(0, view.log.length - LOG_MAX);
+        }
+        view.activity = kind === "thinking" ? "思考中…" : kind === "error" ? "遇到错误…" : e.line.replace(/\s+/g, " ").trim().slice(0, 60);
         break;
+      }
       case "context_trim":
         view.notes.push(`上下文压缩：${e.before} → ${e.after} token，丢弃 ${e.dropped} 条早期消息`);
         break;

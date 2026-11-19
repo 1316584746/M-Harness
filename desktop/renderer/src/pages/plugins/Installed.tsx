@@ -1,9 +1,9 @@
 import { useMemo, useState, type ReactNode } from "react";
 import type { AppState } from "../../../../shared/api";
-import { DBX_SOURCE, LOCAL_SOURCE, type LocalPluginInfo, type MarketResult, type PluginEntry } from "../../../../shared/plugins";
+import { DBX_SOURCE, ECOSYSTEM_LABEL, LOCAL_SOURCE, type LocalPluginInfo, type MarketResult, type PluginEntry } from "../../../../shared/plugins";
 import { api } from "../../api";
 import { Icon, type IconName } from "../../components/Icon";
-import { Avatar, dateText, verText } from "./common";
+import { Avatar, dateText, Msg, verText } from "./common";
 
 function Section({ icon, title, desc, right, children }: { icon: IconName; title: string; desc?: ReactNode; right?: ReactNode; children?: ReactNode }) {
   return (
@@ -24,7 +24,8 @@ interface Row {
   key: string;
   name: string;
   version: string;
-  local: LocalPluginInfo;
+  /** 装在本软件插件目录里的内容摘要 */
+  local?: LocalPluginInfo;
   entry?: PluginEntry;
 }
 
@@ -34,20 +35,27 @@ export function Installed({ market, loading, reload }: { state?: AppState; onCha
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [cur, setCur] = useState<string | null>(null);
+  const [q, setQ] = useState("");
 
   const rows = useMemo<Row[]>(() => {
-    const entries = new Map((market?.entries ?? []).map(e => [e.id, e]));
-    return Object.entries(market?.dbx?.local ?? {})
-      .map(([id, local]) => {
-        const entry = entries.get(id);
-        return { id, key: entry?.key ?? `${DBX_SOURCE}:${id}`, name: entry?.name ?? local.name ?? id, version: local.version, local, entry } as Row;
-      })
-      .sort((a, b) => a.name.localeCompare(b.name, "zh"));
+    const dbxEntries = new Map((market?.entries ?? []).map(e => [e.id, e]));
+    const dbxRows = Object.entries(market?.dbx?.local ?? {}).map(([id, local]) => {
+      const entry = dbxEntries.get(id);
+      return { id, key: entry?.key ?? `${DBX_SOURCE}:${id}`, name: entry?.name ?? local.name ?? id, version: local.version, local, entry } as Row;
+    });
+    return dbxRows.sort((a, b) => a.name.localeCompare(b.name, "zh"));
   }, [market]);
-  const hasNew = (r: Row) => !!r.entry?.version && r.entry.version !== r.version;
+  const hasNew = (r: Row) => {
+    const have = r.local?.listed ?? r.version;
+    return !!r.entry?.version && !!have && r.entry.version !== have;
+  };
   const updatable = rows.filter(hasNew);
 
-  const row = rows.find(r => r.id === cur) ?? rows[0];
+  const shown = useMemo(() => {
+    const k = q.trim().toLowerCase();
+    return k ? rows.filter(r => [r.name, r.id, r.entry?.description ?? ""].join(" ").toLowerCase().includes(k)) : rows;
+  }, [rows, q]);
+  const row = rows.find(r => r.id === cur) ?? shown[0] ?? rows[0];
 
   const act = async (fn: () => Promise<{ ok: boolean; error?: string }>, okNote = "") => {
     setErr("");
@@ -90,8 +98,8 @@ export function Installed({ market, loading, reload }: { state?: AppState; onCha
             <Icon name="alert" size={14} /> 有 {updatable.length} 个插件可以更新
           </div>
         ))}
-      {err && <div className="px-msg bad">{err}</div>}
-      {note && <div className="px-msg ok">{note}</div>}
+      {err && <Msg className="px-msg bad">{err}</Msg>}
+      {note && <Msg className="px-msg ok">{note}</Msg>}
 
       {rows.length === 0 ? (
         <div className="wb-empty" data-testid="plugin-installed-empty">
@@ -100,19 +108,27 @@ export function Installed({ market, loading, reload }: { state?: AppState; onCha
       ) : (
         <div className="pi-split">
           <div className="pi-list">
-            {rows.map(r => (
+            <label className="pi-search">
+              <Icon name="search" size={13} />
+              <input data-testid="installed-search" placeholder={`搜索 ${rows.length} 个已安装插件…`} value={q} onChange={e => setQ(e.target.value)} />
+            </label>
+            <div className="pi-scroll" data-testid="installed-list">
+            {shown.length === 0 && <div className="pi-none" data-testid="installed-none">没有匹配「{q.trim()}」的插件</div>}
+            {shown.map(r => (
               <button key={r.id} className={`pi-item ${r.id === row?.id ? "on" : ""}`} data-testid="installed-row" data-key={r.key} onClick={() => setCur(r.id)}>
                 <span className="pi-tick">{r.id === row?.id && <Icon name="check" size={13} />}</span>
                 <Avatar name={r.name} size={32} />
                 <span className="pi-item-main">
                   <span className="pi-item-name">{r.name}</span>
                   <span className="pi-badges">
-                    <span className="px-tag">{verText(r.version)}</span>
+                    {r.local?.ecosystem && <span className={`px-eco eco-${r.local.ecosystem}`}>{ECOSYSTEM_LABEL[r.local.ecosystem]}</span>}
+                    {r.version && <span className="px-tag">{verText(r.version)}</span>}
                     {hasNew(r) && <span className="px-update">可更新</span>}
                   </span>
                 </span>
               </button>
             ))}
+            </div>
           </div>
 
           {row && (
@@ -132,7 +148,7 @@ export function Installed({ market, loading, reload }: { state?: AppState; onCha
                   </div>
                 </div>
                 <div className="pi-actions">
-                  {hasNew(row) && row.entry?.install.kind === "dbx" && row.entry.install.url && (
+                  {hasNew(row) && (row.entry?.install.kind !== "dbx" || !!row.entry.install.url) && (
                     <button className="btn sm primary" data-testid="installed-update" disabled={busy} onClick={() => void update(row)}>
                       {busy ? <span className="spinner" /> : <Icon name="download" size={13} />} 更新到 {verText(row.entry!.version)}
                     </button>
@@ -143,6 +159,14 @@ export function Installed({ market, loading, reload }: { state?: AppState; onCha
                 </div>
               </div>
 
+              {row.local?.ecosystem && (
+                <Section icon="box" title="插件内容" desc={`${ECOSYSTEM_LABEL[row.local.ecosystem]}，本软件按它自己的方式运行。`}>
+                  <div className="px-msg warn" data-testid="installed-foreign-note">
+                    {row.local.summary}
+                  </div>
+                </Section>
+              )}
+              {row.local && !row.local.ecosystem && (
               <Section icon="box" title="插件内容" desc="读自插件自带的清单。">
                 <div className="px-facts" data-testid="installed-content">
                   <span>界面</span>
@@ -158,10 +182,11 @@ export function Installed({ market, loading, reload }: { state?: AppState; onCha
                 </div>
                 {(row.local.ui || row.local.backend || row.local.tools > 0) && (
                   <div className="px-msg warn" data-testid="installed-runtime-note">
-                    {[row.local.ui && "这个插件有界面：点右侧插件栏里的图标打开。", row.local.backend && "它带有本机程序，第一次运行前需要你确认信任。", row.local.tools > 0 && "它声明的 AI 工具，本软件暂时不能让 AI 调用。"].filter(Boolean).join("")}
+                    {[row.local.ui && "这个插件有界面：点右侧插件栏里的图标打开。", row.local.backend && "它带有本机程序，第一次运行前需要你确认信任。", row.local.tools > 0 && (row.local.backend ? "它声明的 AI 工具，可以在「设置 → 让 AI 使用插件」里允许 AI 使用。" : "它声明的 AI 工具需要本机程序，这个插件没带，AI 用不了。")].filter(Boolean).join("")}
                   </div>
                 )}
               </Section>
+              )}
 
               <Section icon="info" title="来源">
                 <div className="px-facts">

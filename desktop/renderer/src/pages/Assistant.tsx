@@ -1,20 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 import type { AppState } from "../../../shared/api";
+import { AskForm } from "../components/AskCard";
 import { Icon } from "../components/Icon";
+import { QueuedList } from "../components/QueuedList";
 import { ModelPicker } from "../components/ModelPicker";
 import { ProviderPicker } from "../components/ProviderPicker";
 import type { Connection } from "../../../shared/connections";
-import type { DbFocus } from "../../../shared/db";
+import type { DbFocus, DbRunReq } from "../../../shared/db";
 import { api } from "../api";
 import { isRunning, type ChatStore } from "../lib/chatStore";
 import { buildDbPreamble, type DbScope } from "../lib/dbAiContext";
 import { AiContextBar } from "./db/AiContextBar";
 import { AssistantMsg, UserMsg } from "./Chat";
 
+const W_KEY = "harness.assistant.w";
+const W_MIN = 320;
+const W_MAX = 900;
+const W_DEFAULT = 400;
+
 const QUICK = "查看数据目录下 .traces 里最近几次失败或被中断的运行，分析失败原因并给出建议";
 
 /** 右侧 AI 助手面板：随时唤起的轻量对话（独立于主对话列表），默认可读取数据目录，方便排查配置和运行记录 */
-export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { state: AppState; store: ChatStore; wide: boolean; onToggleWide: () => void; onClose: () => void; db?: { focus: DbFocus | null } }) {
+export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { state: AppState; store: ChatStore; wide: boolean; onToggleWide: () => void; onClose: () => void; db?: { focus: DbFocus | null; onRunSql: (r: DbRunReq) => void } }) {
   const { active, provider } = store;
   const [input, setInput] = useState("");
   // 在「数据库」页时，输入框上方多一排库选择；提问时把选中的库和表结构一并交给 AI
@@ -36,6 +43,7 @@ export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { s
   const running = isRunning(active);
   const info = state.providers.find(p => p.name === provider);
   const last = turns.at(-1);
+  const ask = last?.status === "running" ? store.asks.find(a => a.runKey === last.id) : undefined;
   const sessions = [...store.sessions].sort((a, b) => b.updated - a.updated);
 
   // 助手默认的工作区是数据目录：能看到 harness.config.json 和 .traces
@@ -45,7 +53,7 @@ export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { s
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [active?.id, turns.length, last?.text, last?.events.length]);
+  }, [active?.id, turns.length, last?.text, last?.events.length, ask?.id]);
 
   useEffect(() => {
     area.current?.focus();
@@ -60,18 +68,57 @@ export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { s
 
   const send = async (override?: string) => {
     const text = (override ?? input).trim();
-    if (!text || running || info?.problem) return;
+    if (!text || info?.problem) return;
     setInput("");
     const conn = inDb && dbScope ? dbConns.find(c => c.id === dbScope.connId) : undefined;
-    if (!conn || !dbScope || override) return void store.send(text);
+    if (!conn || !dbScope || override) return void (running ? store.enqueue(text) : store.send(text));
     // 界面上还是显示用户打的这句话，发给 AI 的前面多一段库的上下文
     const table = db?.focus && db.focus.connId === dbScope.connId && (db.focus.database ?? conn.fields.database ?? "") === dbScope.database && (conn.fields.dbType !== "postgresql" || (db.focus.schema ?? "") === dbScope.schema) ? db.focus.table : undefined;
     const pre = await buildDbPreamble(conn, dbScope, table);
-    void store.send(text, undefined, `${pre}\n${text}`);
+    if (running) store.enqueue(text, undefined, `${pre}\n${text}`);
+    else void store.send(text, undefined, `${pre}\n${text}`);
   };
 
+  // 面板宽度：拖左边缘调整，记在本机；双击恢复默认。「展开」仍是固定的宽版
+  const [width, setWidth] = useState(() => {
+    const v = Number(localStorage.getItem(W_KEY));
+    return Number.isFinite(v) && v >= W_MIN ? v : W_DEFAULT;
+  });
+  const [dragging, setDragging] = useState(false);
+  const clampW = (v: number) => Math.round(Math.min(Math.max(W_MIN, Math.min(W_MAX, window.innerWidth - 420)), Math.max(W_MIN, v)));
+
   return (
-    <aside className={`assistant ${wide ? "wide" : ""}`} data-testid="assistant-panel">
+    <aside className={`assistant ${wide ? "wide" : ""}`} style={wide ? undefined : { width: clampW(width) }} data-testid="assistant-panel">
+      <div
+        className={`assistant-resizer ${dragging ? "dragging" : ""}`}
+        data-testid="assistant-resizer"
+        title="拖动调整宽度，双击恢复默认"
+        onDoubleClick={() => (setWidth(W_DEFAULT), localStorage.removeItem(W_KEY))}
+        onPointerDown={e => {
+          if (wide) return;
+          e.preventDefault();
+          const el = e.currentTarget;
+          el.setPointerCapture(e.pointerId);
+          const startX = e.clientX;
+          const startW = clampW(width);
+          setDragging(true);
+          document.body.classList.add("resizing-nav");
+          const calc = (ev: PointerEvent) => clampW(startW + (startX - ev.clientX));
+          const move = (ev: PointerEvent) => setWidth(calc(ev));
+          const up = (ev: PointerEvent) => {
+            el.releasePointerCapture(e.pointerId);
+            el.removeEventListener("pointermove", move);
+            el.removeEventListener("pointerup", up);
+            el.removeEventListener("pointercancel", up);
+            document.body.classList.remove("resizing-nav");
+            setDragging(false);
+            localStorage.setItem(W_KEY, String(calc(ev)));
+          };
+          el.addEventListener("pointermove", move);
+          el.addEventListener("pointerup", up);
+          el.addEventListener("pointercancel", up);
+        }}
+      />
       <header className="assistant-head">
         <div className="assistant-title" title={active?.title}>
           {active?.title ?? "新对话"}
@@ -128,13 +175,15 @@ export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { s
             </button>
           </div>
         ) : (
-          turns.map(t => (t.role === "user" ? <UserMsg key={t.id} text={t.text} /> : <AssistantMsg key={t.id} t={t} />))
+          turns.map(t => (t.role === "user" ? <UserMsg key={t.id} text={t.text} /> : <AssistantMsg key={t.id} t={t} onRunSql={db ? sql => db.onRunSql({ sql, connId: dbScope?.connId, database: dbScope?.database, schema: dbScope?.schema }) : undefined} />))
         )}
+        {ask && <AskForm key={ask.id} req={ask} onSubmit={a => void store.answerAsk(ask.id, a)} />}
         <div ref={bottom} />
       </div>
 
       <div className="assistant-composer">
         {info?.problem && <div className="inline-warn">{info.problem}</div>}
+        <QueuedList items={store.queued} onCancel={store.dequeue} />
         <div className="composer assistant-box">
           {inDb && <AiContextBar focus={db!.focus} conns={dbConns} onChange={setDbScope} />}
           <textarea
@@ -142,7 +191,7 @@ export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { s
             rows={3}
             data-testid="assistant-input"
             value={input}
-            placeholder={running ? "运行中…可点右下角停止" : "输入你的问题，我来帮你分析…（Enter 发送，Shift+Enter 换行）"}
+            placeholder={running ? "运行中…回车排队，这一轮结束后自动发送；也可点右下角停止" : "输入你的问题，我来帮你分析…（Enter 发送，Shift+Enter 换行）"}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {

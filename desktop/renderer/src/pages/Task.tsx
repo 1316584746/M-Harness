@@ -1,15 +1,24 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, McpServerDTO, RepoInfo, RepoSyncDTO } from "../../../shared/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AppState, McpServerDTO, RepoInfo, RepoSyncDTO, WorkChatDTO } from "../../../shared/api";
 import { md, startOfDay } from "../../../shared/schedule";
 import { api } from "../api";
 import { Icon } from "../components/Icon";
 import { Markdown } from "../components/Markdown";
 import { ModelPicker } from "../components/ModelPicker";
 import { ProviderPicker } from "../components/ProviderPicker";
-import { RunSteps } from "../components/Steps";
+import { FlowLive, FlowTranscript } from "../components/FlowRun";
+import { AdvanceDialog } from "../components/AdvanceDialog";
+import { ContextDialog } from "../components/ContextDialog";
+import { GroupDialog } from "../components/GroupDialog";
+import { InfoDialog } from "../components/InfoDialog";
+import { RunFailure } from "../components/RunLive";
+import { AskForm } from "../components/AskCard";
+import { QueuedList } from "../components/QueuedList";
 import { isRunning, type ChatStore, type Turn } from "../lib/chatStore";
+import { blockedSteps, visibleSteps } from "../lib/actionSteps";
+import { parseCfg } from "../lib/configEdit";
 import { buildRunView, fmtMs } from "../lib/steps";
-import { PHASE_TEXT, taskPhase, type Task, type TaskPhase, type TaskStore } from "../lib/taskStore";
+import { docKind, PHASE_TEXT, taskPhase, taskUrl, type Task, type TaskPhase, type TaskStore } from "../lib/taskStore";
 
 export const SOURCE_TEXT: Record<Task["source"], string> = { feishu: "飞书项目", dingtalk: "钉钉待办" };
 
@@ -18,6 +27,10 @@ export const taskPrompt = (t: Pick<Task, "source" | "itemId" | "title">) =>
   t.source === "feishu"
     ? `我在飞书项目里有一个需求「${t.title}」（工作项 ID：${t.itemId}）。请先用 feishu_project_read 查看它的详情，再告诉我现在该怎么推进，需要我做什么。`
     : `我在钉钉里有一个待办「${t.title}」（任务 ID：${t.itemId}）。请先用 dingtalk_project_read 查看它的详情，再告诉我现在该怎么推进，需要我做什么。`;
+
+const FLOW_DEFAULT = 420;
+const FLOW_MIN = 300;
+const FLOW_MAX = 760;
 
 const PHASE_CLASS: Record<TaskPhase, string> = { todo: "warn", running: "run", waiting: "", broken: "bad", done: "ok" };
 
@@ -42,13 +55,29 @@ function range(t: Task): string {
 function preamble(t: Task, repos: RepoInfo[]): string {
   const rs = t.repos.map(n => repos.find(r => r.name === n)).filter((r): r is RepoInfo => !!r);
   const lines = [`【任务】${t.title}`, `来源：${SOURCE_TEXT[t.source]}，工作项 ID ${t.itemId}${t.node ? `，当前节点 ${t.node}` : ""}`];
+  const link = taskUrl(t);
+  if (link) lines.push(`需求链接：${link}`);
+  if (t.reqId?.trim()) lines.push(`需求编号（REQ-ID）：${t.reqId.trim()}`);
   if (rs.length) lines.push(`关联仓库（需要看代码 / 改代码时就用这些）：\n${rs.map(r => `- ${r.name}：${r.path}${r.status.branch ? `（当前分支 ${r.status.branch}）` : ""}`).join("\n")}`);
   if (t.context.trim()) lines.push(`任务上下文：\n${t.context.trim()}`);
+  const docs = t.docs ?? [];
+  if (docs.length) {
+    lines.push(
+      `任务上下文文档（链接和本机文件需要时自己去读）：\n${docs
+        .map(d => {
+          const c = d.content.trim();
+          const k = docKind(c);
+          return k === "text" ? `- ${d.title}：\n${c.length > 4000 ? c.slice(0, 4000) + "…（已截断）" : c}` : `- ${d.title}（${k === "url" ? "链接" : "本机路径"}）：${c}`;
+        })
+        .join("\n")}`,
+    );
+  }
+  lines.push("回复里提到需求、文档、网页时，请用 Markdown 链接写成 [标题](完整网址)，界面里才能直接点开；只有标题没有网址的，请在后面补上网址。");
   return lines.join("\n");
 }
-const sigOf = (t: Task) => JSON.stringify([t.repos, t.context.trim()]);
+const sigOf = (t: Task) => JSON.stringify([t.repos, t.reqId ?? "", t.context.trim(), (t.docs ?? []).map(d => [d.title, d.content])]);
 
-type Pop = "info" | "ctx" | "mcp" | "repo" | null;
+type Pop = "info" | "ctx" | "mcp" | "repo" | "group" | null;
 
 export function TaskPage({
   state,
@@ -92,7 +121,56 @@ export function TaskPage({
   // 发起新一轮时自动切到最新一轮
   const nRounds = rounds.length;
   useEffect(() => setSel(null), [nRounds, task.id]);
-  const [sub, setSub] = useState<"out" | "proc">("out");
+  // ───── 右侧事件流栏：宽度可拖动（记住上次的宽度，双击分隔条恢复默认），输入框高度可拖动 ─────
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [flowW, setFlowW] = useState(() => {
+    const n = Number(localStorage.getItem("task.flowW"));
+    return Number.isFinite(n) && n >= FLOW_MIN ? n : FLOW_DEFAULT;
+  });
+  const [taH, setTaH] = useState(() => {
+    const n = Number(localStorage.getItem("task.inputH"));
+    return Number.isFinite(n) && n >= 60 ? Math.min(n, 420) : 96;
+  });
+  const clampFlow = (w: number) => Math.max(FLOW_MIN, Math.min(w, Math.min(FLOW_MAX, (bodyRef.current?.clientWidth ?? 1200) - 360)));
+  const drag = (onMove: (ev: MouseEvent) => void, onEnd: () => void, cursor: string) => {
+    const prev = document.body.style.cursor;
+    document.body.style.cursor = cursor;
+    document.body.style.userSelect = "none";
+    const up = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", up);
+      document.body.style.cursor = prev;
+      document.body.style.userSelect = "";
+      onEnd();
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", up);
+  };
+  // 推拉：full = 右侧铺满（左侧产物区收起），hidden = 右侧收起（左侧铺满），normal = 回到拖动前的宽度
+  const [flowMode, setFlowMode] = useState<"normal" | "full" | "hidden">("normal");
+  const startFlowResize = (e: React.MouseEvent) => {
+    if (flowMode !== "normal") return;
+    e.preventDefault();
+    const x0 = e.clientX;
+    const w0 = flowW;
+    let w = w0;
+    drag(
+      ev => setFlowW((w = clampFlow(w0 + (x0 - ev.clientX)))),
+      () => localStorage.setItem("task.flowW", String(w)),
+      "col-resize",
+    );
+  };
+  const startInputResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const y0 = e.clientY;
+    const h0 = taH;
+    let h = h0;
+    drag(
+      ev => setTaH((h = Math.max(60, Math.min(420, h0 + (y0 - ev.clientY))))),
+      () => localStorage.setItem("task.inputH", String(h)),
+      "ns-resize",
+    );
+  };
 
   // ───── 仓库 / 改动 / MCP ─────
   const [repos, setRepos] = useState<RepoInfo[]>([]);
@@ -138,6 +216,46 @@ export function TaskPage({
     };
   }, [pop]);
 
+  // ───── 需求群：自动读这个需求在飞书项目里对应的群 ─────
+  const [grp, setGrp] = useState<WorkChatDTO | null>(null);
+  const [grpBusy, setGrpBusy] = useState(false);
+  const [grpOpen, setGrpOpen] = useState(false);
+  const [ctxOpen, setCtxOpen] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [advOpen, setAdvOpen] = useState(false);
+  // 推进任务里的「自定义」= 设置 → ACTIONS 里配的动作
+  const steps = useMemo(() => visibleSteps(parseCfg(state.configText)), [state.configText]);
+  const blocked = useMemo(() => blockedSteps(parseCfg(state.configText), task.repos), [state.configText, reposKey]);
+  /** chatId：指定要读的群（刚关联 / 刚创建时用）；null = 用飞书项目里的默认群；不传 = 任务上记着的群，没有就用默认 */
+  const loadGroup = useCallback(
+    async (chatId?: string | null) => {
+      setGrpBusy(true);
+      const id = chatId === undefined ? task.groupId : chatId ?? undefined;
+      const r = await api.workItemChat({ projectKey: task.projectKey, wid: task.itemId, url: task.url, chatId: id }).catch((e): WorkChatDTO => ({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      setGrp(r);
+      setGrpBusy(false);
+      return r;
+    },
+    [task.projectKey, task.itemId, task.url, task.groupId],
+  );
+  useEffect(() => {
+    if (task.source === "feishu" || task.groupId) void loadGroup();
+  }, [task.source, loadGroup, task.groupId]);
+  const bindGroup = async (ref: string): Promise<string | undefined> => {
+    const r = await api.workItemChat({ projectKey: task.projectKey, wid: task.itemId, url: task.url, chatId: ref.trim() });
+    if (!r.ok || !r.groupId) return r.error ?? "关联失败";
+    tasks.update(task.id, { groupId: r.groupId });
+    setGrp(r);
+    return undefined;
+  };
+  const createGroup = async (): Promise<string | undefined> => {
+    const r = await api.workItemChatCreate({ name: task.title, description: task.url ? `需求：${task.url}` : undefined });
+    if (!r.ok || !r.groupId) return r.error ?? "建群失败";
+    tasks.update(task.id, { groupId: r.groupId });
+    setGrp(r);
+    return undefined;
+  };
+
   /** 刚关联的仓库：自动切到基线分支并拉最新代码；这里记着进度和结果 */
   const [syncing, setSyncing] = useState<Set<string>>(new Set());
   const [syncRes, setSyncRes] = useState<Record<string, RepoSyncDTO>>({});
@@ -168,12 +286,15 @@ export function TaskPage({
     el.style.height = "auto";
     el.style.height = Math.min(Math.max(el.scrollHeight, 64), 220) + "px";
   }, [input]);
-  const send = () => {
-    const text = input.trim();
-    if (!text || running) return;
-    setInput("");
-    const need = turns.length === 0 || task.ctxSent !== sigOf(task);
-    void chat.send(text, onChanged, need ? `${preamble(task, repos)}\n\n${text}` : undefined);
+  const send = (override?: string, opts?: { fresh?: boolean }) => {
+    const text = (override ?? input).trim();
+    if (!text) return;
+    if (override === undefined) setInput("");
+    const need = turns.length === 0 || task.ctxSent !== sigOf(task) || !!opts?.fresh;
+    const runInput = need ? `${preamble(task, repos)}\n\n${text}` : undefined;
+    // AI 还在运行：先排队，这一轮结束后自动发
+    if (running) chat.enqueue(text, onChanged, runInput);
+    else void chat.send(text, onChanged, runInput, opts);
     tasks.update(task.id, { ctxSent: sigOf(task) });
   };
   const attach = async (kind: "file" | "folder") => {
@@ -191,7 +312,7 @@ export function TaskPage({
   const [confirmDrop, setConfirmDrop] = useState(false);
   useEffect(() => setConfirmDrop(false), [task.id]);
 
-  const view = useMemo(() => (cur?.ai ? buildRunView(cur.ai.events) : null), [cur?.ai?.events]);
+  const view = useMemo(() => (cur?.ai ? buildRunView(cur.ai.events, cur.ai.times?.length === cur.ai.events.length ? cur.ai.times : undefined) : null), [cur?.ai?.events, cur?.ai?.times]);
   const picked = task.repos.map(n => repos.find(r => r.name === n) ?? ({ name: n, path: "", status: { exists: false, changed: 0, ahead: 0, behind: 0 } } as RepoInfo));
   const free = repos.filter(r => !task.repos.includes(r.name));
 
@@ -211,7 +332,10 @@ export function TaskPage({
         </span>
         <span className="chip">{SOURCE_TEXT[task.source]}</span>
         <span className="spacer" />
-        <button className="btn sm primary" data-testid="task-done" onClick={() => tasks.update(task.id, { done: !task.done })}>
+        <button className="btn sm primary" data-testid="task-advance-top" title="推进任务：选下一步（出方案 / 改代码 / 复核 / 联调 / 提测 / 你配置的动作）" onClick={() => setAdvOpen(true)} disabled={!!info?.problem}>
+          <Icon name="spark" size={14} /> 推进
+        </button>
+        <button className="btn sm" data-testid="task-done" onClick={() => tasks.update(task.id, { done: !task.done })}>
           <Icon name="check" size={14} /> {task.done ? "重新打开" : "完成"}
         </button>
         {confirmDrop ? (
@@ -287,67 +411,12 @@ export function TaskPage({
         )}
 
         <div className="task-acts">
-          <div className="pop-wrap">
-            <button className={`act-chip ${pop === "info" ? "on" : ""}`} data-testid="task-info-btn" onClick={() => setPop(pop === "info" ? null : "info")}>
-              <Icon name="info" size={13} /> 基本信息
-            </button>
-            {pop === "info" && (
-              <div className="pop wide" data-testid="pop-info">
-                <dl className="task-kv">
-                  <dt>需求</dt>
-                  <dd>{task.title}</dd>
-                  <dt>来源</dt>
-                  <dd>{SOURCE_TEXT[task.source]}</dd>
-                  <dt>工作项 ID</dt>
-                  <dd className="mono">{task.itemId}</dd>
-                  {task.node && (
-                    <>
-                      <dt>节点</dt>
-                      <dd>{task.node}</dd>
-                    </>
-                  )}
-                  <dt>排期</dt>
-                  <dd>{range(task)}</dd>
-                  {task.sub && (
-                    <>
-                      <dt>备注</dt>
-                      <dd>{task.sub}</dd>
-                    </>
-                  )}
-                  {task.url && (
-                    <>
-                      <dt>链接</dt>
-                      <dd>
-                        <a className="link" href={task.url} target="_blank" rel="noreferrer">
-                          在浏览器中打开
-                        </a>
-                      </dd>
-                    </>
-                  )}
-                  <dt>创建于</dt>
-                  <dd>{new Date(task.created).toLocaleString("zh-CN")}</dd>
-                </dl>
-              </div>
-            )}
-          </div>
-          <div className="pop-wrap">
-            <button className={`act-chip ${pop === "ctx" ? "on" : ""}`} data-testid="task-ctx-btn" onClick={() => setPop(pop === "ctx" ? null : "ctx")}>
-              <Icon name="file" size={13} /> 任务上下文 <span className="num">{task.context.trim() ? 1 : 0}</span>
-            </button>
-            {pop === "ctx" && (
-              <div className="pop wide" data-testid="pop-ctx">
-                <div className="pop-title">任务上下文</div>
-                <textarea
-                  data-testid="task-ctx-input"
-                  className="ctx-input"
-                  autoFocus
-                  value={task.context}
-                  placeholder="补充这个任务的背景、约束、接口文档链接……发给 AI 时会一起带上"
-                  onChange={e => tasks.quiet(task.id, { context: e.target.value })}
-                />
-              </div>
-            )}
-          </div>
+          <button className={`act-chip ${infoOpen ? "on" : ""}`} data-testid="task-info-btn" onClick={() => setInfoOpen(true)}>
+            <Icon name="info" size={13} /> 基本信息
+          </button>
+          <button className={`act-chip ${ctxOpen ? "on" : ""}`} data-testid="task-ctx-btn" onClick={() => setCtxOpen(true)}>
+            <Icon name="file" size={13} /> 任务上下文 <span className="num">{(task.docs?.length ?? 0) + (task.context.trim() ? 1 : 0)}</span>
+          </button>
           <div className="pop-wrap">
             <button className={`act-chip ${pop === "mcp" ? "on" : ""}`} data-testid="task-mcp-btn" onClick={() => setPop(pop === "mcp" ? null : "mcp")}>
               <Icon name="plug" size={13} /> MCP{" "}
@@ -383,32 +452,41 @@ export function TaskPage({
           <button className="act-chip" data-testid="task-folder" onClick={() => void api.taskFolder(task.id, true)}>
             <Icon name="folder" size={13} /> 任务文件夹
           </button>
+          {(task.source === "feishu" || task.groupId) && (
+            <button className={`act-chip ${grpOpen ? "on" : ""}`} data-testid="task-group-btn" onClick={() => setGrpOpen(true)} title={grp?.groupId ? `需求群：${grp.name ?? grp.groupId}` : "需求对应的飞书群"}>
+              <Icon name="chat" size={13} /> 需求群
+              {grpBusy && !grp ? <span className="num">…</span> : grp?.groupId ? <span className="dot ready" /> : null}
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="task-body">
-        <div className="task-main">
-          {rounds.length > 0 && (
-            <div className="round-tabs" data-testid="round-tabs">
-              {rounds.map(r => (
-                <button key={r.n} className={`round-tab${cur?.n === r.n ? " on" : ""}`} data-testid="round-tab" title={r.user.text} onClick={() => setSel(r.n)}>
-                  <i>#{r.n}</i>
-                  {short(r.user.text, 10)}
-                  {r.ai?.status === "running" && <span className="spinner" />}
-                </button>
-              ))}
-            </div>
-          )}
+      {advOpen && <AdvanceDialog builtins={steps.builtins} actions={steps.custom} blocked={blocked} hasHistory={turns.length > 0} agent={<><ProviderPicker providers={state.providers} value={provider} onChange={chat.setProvider} disabled={running} /><ModelPicker provider={provider} info={info} value={chat.model} onChange={chat.setModel} disabled={running} /></>} vars={{ taskTitle: task.title, taskId: task.id, repoPath: picked.find(r => r.path)?.path ?? "未关联仓库" }} onClose={() => setAdvOpen(false)} onAdvance={(t, o) => send(t, o)} />}
+      {infoOpen && <InfoDialog task={task} repos={repos} sourceText={SOURCE_TEXT[task.source]} schedule={range(task)} onClose={() => setInfoOpen(false)} onSave={patch => tasks.update(task.id, patch)} onRepos={setTaskRepos} />}
+      {ctxOpen && <ContextDialog task={task} onClose={() => setCtxOpen(false)} onChange={patch => tasks.update(task.id, patch)} />}
+      {grpOpen && (
+        <GroupDialog
+          task={task}
+          grp={grp}
+          busy={grpBusy}
+          onClose={() => setGrpOpen(false)}
+          onReload={() => void loadGroup()}
+          onBind={bindGroup}
+          onCreate={createGroup}
+          onUnbind={() => (tasks.update(task.id, { groupId: undefined }), void loadGroup(null))}
+          onReply={r => tasks.update(task.id, { groupReply: r })}
+        />
+      )}
 
+      <div className="task-body" ref={bodyRef} data-flow={flowMode} data-testid="task-body" style={{ ["--flow-w" as string]: `${flowW}px` }}>
+        <div className="task-main">
           {cur ? (
             <>
               <div className="out-tabs">
-                <button className={`out-tab${sub === "out" ? " on" : ""}`} data-testid="out-tab" onClick={() => setSub("out")}>
+                <span className="out-title">
                   <Icon name="file" size={13} /> 产物
-                </button>
-                <button className={`out-tab${sub === "proc" ? " on" : ""}`} data-testid="proc-tab" onClick={() => setSub("proc")}>
-                  <Icon name="list" size={13} /> 过程
-                </button>
+                  <em>#{cur.n}</em>
+                </span>
                 <span className="spacer" />
                 {cur.ai?.text && cur.ai.status === "done" && (
                   <button className="btn sm ghost" onClick={() => void navigator.clipboard.writeText(cur.ai!.text)}>
@@ -421,30 +499,18 @@ export function TaskPage({
                   </button>
                 )}
               </div>
+              {/* 左边只放阶段产物（比如方案设计生成后的内容）；思考、工具调用这些过程在右侧事件流里 */}
               <div className="out-body" data-testid="out-body">
-                {sub === "out" ? (
-                  cur.ai?.status === "running" && !cur.ai.text ? (
-                    <div className="activity">
-                      <span className="typing">
-                        <i />
-                        <i />
-                        <i />
-                      </span>
-                      {view?.activity ?? "准备中…"}
-                    </div>
-                  ) : cur.ai?.text ? (
-                    cur.ai.status === "error" || cur.ai.status === "aborted" ? (
-                      <div className="errtext">{cur.ai.text}</div>
-                    ) : (
-                      <Markdown text={cur.ai.text} />
-                    )
-                  ) : (
-                    <div className="out-empty">这一轮还没有产出</div>
-                  )
-                ) : view && cur.ai ? (
-                  <RunSteps view={view} events={cur.ai.events} running={cur.ai.status === "running"} />
-                ) : (
-                  <div className="out-empty">还没有过程记录</div>
+                {cur.ai?.status === "running" && (() => {
+                  const ask = chat.asks.find(a => a.runKey === cur.ai!.id);
+                  return ask ? <AskForm key={ask.id} req={ask} onSubmit={a => void chat.answerAsk(ask.id, a)} /> : null;
+                })()}
+                {cur.ai && (cur.ai.status === "error" || cur.ai.status === "aborted") ? (
+                  <RunFailure text={cur.ai.text ?? ""} aborted={cur.ai.status === "aborted"} />
+                ) : cur.ai?.text ? (
+                  <Markdown text={cur.ai.text} />
+                ) : cur.ai?.status === "running" ? null : (
+                  <div className="out-empty">这一轮还没有产出</div>
                 )}
               </div>
             </>
@@ -462,6 +528,42 @@ export function TaskPage({
           )}
         </div>
 
+        <div
+          className="task-resizer"
+          data-testid="task-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          title={flowMode === "normal" ? "拖动调整右侧宽度，双击恢复默认" : "点击中间的箭头恢复"}
+          onMouseDown={startFlowResize}
+          onDoubleClick={() => {
+            setFlowMode("normal");
+            setFlowW(FLOW_DEFAULT);
+            localStorage.removeItem("task.flowW");
+          }}
+        >
+          <div className="rz-grip" onMouseDown={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}>
+            <button
+              type="button"
+              className="rz-btn rz-left"
+              data-testid="flow-expand"
+              title={flowMode === "hidden" ? "恢复" : "右侧铺满"}
+              onClick={() => setFlowMode(flowMode === "hidden" ? "normal" : "full")}
+              disabled={flowMode === "full"}
+            >
+              <Icon name="right" size={14} />
+            </button>
+            <button
+              type="button"
+              className="rz-btn rz-right"
+              data-testid="flow-collapse"
+              title={flowMode === "full" ? "恢复" : "收起右侧（左侧铺满）"}
+              onClick={() => setFlowMode(flowMode === "full" ? "normal" : "hidden")}
+              disabled={flowMode === "hidden"}
+            >
+              <Icon name="right" size={14} />
+            </button>
+          </div>
+        </div>
         <aside className="task-flow">
           <div className="flow-head">
             <b>事件流</b>
@@ -470,29 +572,36 @@ export function TaskPage({
           <div className="flow-list" ref={flow} data-testid="task-flow">
             {!rounds.length && <div className="flow-empty">还没有事件，发出第一条指令后会记录在这里</div>}
             {rounds.map(r => {
-              const v = r.ai ? buildRunView(r.ai.events) : null;
+              const v = r.ai ? buildRunView(r.ai.events, r.ai.times?.length === r.ai.events.length ? r.ai.times : undefined) : null;
               const st = r.ai?.status;
               return (
                 <div key={r.n} className="flow-round" data-testid="flow-round">
-                  <div className="flow-user" onClick={() => setSel(r.n)}>
+                  <div className="flow-user">
                     <span className="flow-who">我</span>
                     {short(r.user.text, 160)}
                   </div>
                   {r.ai && (
-                    <button className={`flow-ai ${st}`} onClick={() => (setSel(r.n), setSub("out"))}>
-                      {st === "running" ? <span className="spinner" /> : <span className={`dot ${st === "done" ? "ready" : "error"}`} />}
-                      <span className="flow-ai-main">
-                        <b>
-                          #{r.n} {st === "running" ? v?.activity ?? "准备中…" : st === "done" ? "已完成，产出已更新" : st === "aborted" ? "已中断" : "失败"}
-                        </b>
-                        {v && v.steps.length > 0 && (
-                          <em>
-                            {v.steps.length} 步{v.toolCount > 0 && ` · ${v.toolCount} 次工具调用`}
-                            {v.totalMs ? ` · ${fmtMs(v.totalMs)}` : ""}
-                          </em>
-                        )}
-                      </span>
-                    </button>
+                    <div className="flow-proc" data-testid="flow-proc">
+                      <FlowTranscript events={r.ai.events} times={r.ai.times?.length === r.ai.events.length ? r.ai.times : undefined} startedAt={r.ai.startedAt} running={st === "running"} />
+                      {(st === "error" || st === "aborted") && <RunFailure text={r.ai.text ?? ""} aborted={st === "aborted"} />}
+                    </div>
+                  )}
+                  {r.ai && (
+                    <div className={`flow-ai ${st}`} data-testid="flow-ai">
+                      {st === "running" ? (
+                        <FlowLive events={r.ai.events} times={r.ai.times?.length === r.ai.events.length ? r.ai.times : undefined} startedAt={r.ai.startedAt} />
+                      ) : (
+                        <>
+                          <span className={`dot ${st === "done" ? "ready" : "error"}`} />
+                          <span className="flow-ai-main">
+                            <b>
+                              #{r.n} {st === "done" ? "已完成，产出已更新" : st === "aborted" ? "已中断" : "失败"}
+                            </b>
+                            {v && v.totalMs ? <em>{fmtMs(v.totalMs)}</em> : null}
+                          </span>
+                        </>
+                      )}
+                    </div>
                   )}
                 </div>
               );
@@ -501,13 +610,16 @@ export function TaskPage({
 
           <div className="flow-composer">
             {info?.problem && <div className="inline-warn">{info.problem}</div>}
+            <QueuedList items={chat.queued} onCancel={chat.dequeue} />
             <div className="composer" data-testid="task-composer">
+              <div className="composer-grip" data-testid="task-input-grip" title="拖动调整输入框高度" onMouseDown={startInputResize} />
               <textarea
                 ref={area}
                 data-testid="task-input"
                 rows={2}
+                style={{ height: taH }}
                 value={input}
-                placeholder={running ? "运行中…可点右下角停止" : "想改、想问、拖入文件引用路径（Enter 发送，Shift+Enter 换行）"}
+                placeholder={running ? "运行中…回车排队，这一轮结束后自动发送；也可点右下角停止" : "想改、想问、拖入文件引用路径（Enter 发送，Shift+Enter 换行）"}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -516,25 +628,32 @@ export function TaskPage({
                   }
                 }}
               />
-              <div className="composer-row">
-                <ProviderPicker providers={state.providers} value={provider} onChange={chat.setProvider} disabled={running} />
-                <ModelPicker provider={provider} info={info} value={chat.model} onChange={chat.setModel} disabled={running} />
-                <span className="spacer" />
-                <button type="button" className="icon-btn" title="添加文件（插入路径）" onClick={() => void attach("file")} disabled={running}>
-                  <Icon name="file" size={16} />
-                </button>
-                <button type="button" className="icon-btn" title="添加文件夹（插入路径）" onClick={() => void attach("folder")} disabled={running}>
-                  <Icon name="folder" size={16} />
-                </button>
-                {running ? (
-                  <button className="send stop" data-testid="task-stop" title="停止" onClick={() => session && chat.abort(session.id)}>
-                    <Icon name="stop" size={16} />
+              {/* 左边是模型选择（栏窄时自己换行），右边是操作按钮（永远在、不会被挤出去） */}
+              <div className="composer-row flow-row">
+                <div className="row-pickers">
+                  <ProviderPicker providers={state.providers} value={provider} onChange={chat.setProvider} disabled={running} />
+                  <ModelPicker provider={provider} info={info} value={chat.model} onChange={chat.setModel} disabled={running} />
+                </div>
+                <div className="row-actions">
+                  <button type="button" className="icon-btn" data-testid="task-advance-btn" title="推进任务：选下一步（出方案 / 改代码 / 复核 / 你配置的动作）" onClick={() => setAdvOpen(true)} disabled={!!info?.problem}>
+                    <Icon name="spark" size={20} />
                   </button>
-                ) : (
-                  <button className="send" data-testid="task-send" title="发送" onClick={send} disabled={!input.trim() || !!info?.problem}>
-                    <Icon name="send" size={17} strokeWidth={2.2} />
+                  <button type="button" className="icon-btn" title="添加文件（插入路径）" onClick={() => void attach("file")} disabled={running}>
+                    <Icon name="file" size={20} />
                   </button>
-                )}
+                  <button type="button" className="icon-btn" title="添加文件夹（插入路径）" onClick={() => void attach("folder")} disabled={running}>
+                    <Icon name="folder" size={20} />
+                  </button>
+                  {running ? (
+                    <button className="send stop" data-testid="task-stop" title="停止" onClick={() => session && chat.abort(session.id)}>
+                      <Icon name="stop" size={19} />
+                    </button>
+                  ) : (
+                    <button className="send" data-testid="task-send" title="发送" onClick={() => send()} disabled={!input.trim() || !!info?.problem}>
+                      <Icon name="send" size={20} strokeWidth={2.2} />
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </div>

@@ -3,12 +3,20 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Icon } from "./Icon";
 
-function CodeBlock({ lang, code }: { lang: string; code: string }) {
+const SQL_LANGS = new Set(["sql", "mysql", "pgsql", "postgresql", "postgres", "plpgsql"]);
+
+function CodeBlock({ lang, code, onRunSql }: { lang: string; code: string; onRunSql?: (sql: string) => void }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="codeblock">
       <div className="codeblock-head">
         <span>{lang || "text"}</span>
+        {onRunSql && SQL_LANGS.has(lang.toLowerCase()) && (
+          <button className="icon-btn sm codeblock-run" data-testid="codeblock-run" title="新开一个查询页，带上这段 SQL 直接运行" style={{ marginLeft: "auto" }} onClick={() => onRunSql(code)}>
+            <Icon name="play" size={12} />
+            <span>运行</span>
+          </button>
+        )}
         <button
           className="icon-btn sm"
           title="复制"
@@ -30,7 +38,7 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
 }
 
 /** 渲染助手回复的 Markdown。不渲染原始 HTML（react-markdown 默认行为），外链交给主进程打开。 */
-export function Markdown({ text }: { text: string }) {
+export function Markdown({ text, onRunSql }: { text: string; onRunSql?: (sql: string) => void }) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -40,8 +48,17 @@ export function Markdown({ text }: { text: string }) {
           code({ className, children }) {
             const code = String(children ?? "").replace(/\n$/, "");
             const lang = /language-(\w+)/.exec(className ?? "")?.[1];
-            if (!lang && !code.includes("\n")) return <code className="inline">{code}</code>;
-            return <CodeBlock lang={lang ?? ""} code={code} />;
+            if (!lang && !code.includes("\n")) {
+              // 行内代码里写的网址也要能点开
+              return /^https?:\/\/\S+$/i.test(code) ? (
+                <a href={code} target="_blank" rel="noreferrer noopener">
+                  <code className="inline">{code}</code>
+                </a>
+              ) : (
+                <code className="inline">{code}</code>
+              );
+            }
+            return <CodeBlock lang={lang ?? ""} code={code} onRunSql={onRunSql} />;
           },
           a: ({ href, children }) => (
             <a href={href} target="_blank" rel="noreferrer noopener">

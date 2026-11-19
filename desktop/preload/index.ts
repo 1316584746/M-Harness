@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils, type IpcRendererEvent } from "electron";
-import type { HarnessApi } from "../shared/api";
+import type { HarnessApi, IntegrationKind } from "../shared/api";
 
 function on<T extends unknown[]>(channel: string, cb: (...args: T) => void) {
   const handler = (_e: IpcRendererEvent, ...args: unknown[]) => cb(...(args as T));
@@ -9,6 +9,7 @@ function on<T extends unknown[]>(channel: string, cb: (...args: T) => void) {
 
 const api: HarnessApi = {
   getState: () => ipcRenderer.invoke("state:get"),
+  configText: () => ipcRenderer.invoke("config:text"),
   saveConfig: text => ipcRenderer.invoke("config:save", text),
   pickWorkspace: () => ipcRenderer.invoke("workspace:pick"),
   pickFolder: title => ipcRenderer.invoke("folder:pick", title),
@@ -36,6 +37,12 @@ const api: HarnessApi = {
   pluginFetchUrl: url => ipcRenderer.invoke("plugins:fetch-url", url),
   pluginInstall: id => ipcRenderer.invoke("plugins:install", id),
   pluginUninstall: id => ipcRenderer.invoke("plugins:uninstall", id),
+  resourceRecommended: kind => ipcRenderer.invoke("resources:recommended", kind),
+  resourceScan: url => ipcRenderer.invoke("resources:scan", url),
+  resourceAdd: key => ipcRenderer.invoke("resources:add", key),
+  resourceScanLocal: dir => ipcRenderer.invoke("resources:scan-local", dir),
+  resourceSyncPlatforms: () => ipcRenderer.invoke("resources:sync-platforms"),
+  resourceSyncScan: id => ipcRenderer.invoke("resources:sync-scan", id),
   connectionList: () => ipcRenderer.invoke("connections:list"),
   connectionSave: input => ipcRenderer.invoke("connections:save", input),
   connectionRemove: id => ipcRenderer.invoke("connections:remove", id),
@@ -46,6 +53,7 @@ const api: HarnessApi = {
   pluginInstallPackage: bytes => ipcRenderer.invoke("plugins:install-package", bytes),
   pluginInstallUrl: url => ipcRenderer.invoke("plugins:install-url", url),
   pluginRepos: () => ipcRenderer.invoke("plugins:repos"),
+  pluginRepoTest: r => ipcRenderer.invoke("plugins:repo-test", r),
   pluginRepoAdd: r => ipcRenderer.invoke("plugins:repo-add", r),
   pluginRepoRemove: id => ipcRenderer.invoke("plugins:repo-remove", id),
   pluginRepoToggle: (id, on) => ipcRenderer.invoke("plugins:repo-toggle", id, on),
@@ -62,18 +70,27 @@ const api: HarnessApi = {
   dbApply: req => ipcRenderer.invoke("db:apply", req),
   pluginUiList: () => ipcRenderer.invoke("pluginhost:list"),
   pluginConnections: id => ipcRenderer.invoke("pluginhost:connections", id),
+  pluginAiList: () => ipcRenderer.invoke("pluginai:list"),
+  pluginAiSet: (id, on) => ipcRenderer.invoke("pluginai:set", id, on),
   pluginTrust: (id, grants) => ipcRenderer.invoke("pluginhost:trust", id, grants),
   pluginDbAccess: id => ipcRenderer.invoke("pluginhost:db-access", id),
   pluginSetGrants: (id, ids) => ipcRenderer.invoke("pluginhost:db-grants", id, ids),
   pluginRequest: (id, method, params) => ipcRenderer.invoke("pluginhost:request", id, method, params),
   onPluginEvent: cb => on<[{ id: string; method: string; params: unknown }]>("pluginhost:event", p => cb(p)),
   workbenchTodos: () => ipcRenderer.invoke("workbench:todos"),
+  workbenchTodosCached: () => ipcRenderer.invoke("workbench:todos-cached"),
+  workbenchSubtaskUpdate: req => ipcRenderer.invoke("workbench:subtask-update", req),
+  workItemChat: req => ipcRenderer.invoke("workitem:chat", req),
+  workItemChatCreate: req => ipcRenderer.invoke("workitem:chat-create", req),
   inspectRepo: dir => ipcRenderer.invoke("repo:inspect", dir),
   cloneRepo: (url, parentDir, name) => ipcRenderer.invoke("repo:clone", url, parentDir, name),
   openPath: p => ipcRenderer.invoke("path:open", p),
   feishuProjectStatus: () => ipcRenderer.invoke("project:feishu-status"),
   integrationStatus: kind => ipcRenderer.invoke("integration:status", kind),
   integrationCheckUpdate: kind => ipcRenderer.invoke("integration:update", kind),
+  integrationLogin: kind => ipcRenderer.invoke("integration:login", kind),
+  onIntegrationLoginProgress: cb => on<[{ kind: IntegrationKind; url?: string; userCode?: string; text?: string }]>("integration:login-progress", p => cb(p)),
+  integrationInstall: kind => ipcRenderer.invoke("integration:install", kind),
   feishuSpaces: () => ipcRenderer.invoke("project:feishu-spaces"),
   getSecret: name => ipcRenderer.invoke("secret:get", name),
   setSecret: (name, value) => ipcRenderer.invoke("secret:set", name, value),
@@ -90,6 +107,10 @@ const api: HarnessApi = {
   homeTodos: () => ipcRenderer.invoke("home:todos"),
   updateState: () => ipcRenderer.invoke("update:state"),
   updateCheck: () => ipcRenderer.invoke("update:check"),
+  dataDirGet: () => ipcRenderer.invoke("datadir:get"),
+  dataDirSet: dir => ipcRenderer.invoke("datadir:set", dir),
+  autostartGet: () => ipcRenderer.invoke("autostart:get"),
+  autostartSet: on => ipcRenderer.invoke("autostart:set", on),
   updateDownload: () => ipcRenderer.invoke("update:download"),
   updateInstall: () => ipcRenderer.invoke("update:install"),
   onUpdate: cb => on<[any]>("update:state", cb),
@@ -104,6 +125,7 @@ const api: HarnessApi = {
 
   run: req => ipcRenderer.invoke("run:start", req),
   abort: runKey => ipcRenderer.invoke("run:abort", runKey),
+  respondAsk: (id, answers) => ipcRenderer.invoke("ask:respond", id, answers),
   respondApproval: (id, approved, remember) => ipcRenderer.invoke("approval:respond", id, approved, remember),
 
   listTraces: () => ipcRenderer.invoke("trace:list"),
@@ -115,6 +137,7 @@ const api: HarnessApi = {
 
   onRunEvent: cb => on<[{ runKey: string; event: any }]>("run:event", p => cb(p.runKey, p.event)),
   onApproval: cb => on<[any]>("approval:request", cb),
+  onAsk: cb => on<[any]>("ask:request", cb),
   onChannelLog: cb => on<[string]>("channel:log", cb),
 };
 

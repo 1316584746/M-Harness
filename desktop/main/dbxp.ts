@@ -87,7 +87,7 @@ export const OFFICIAL_HOSTS = ["dl.dbxio.com"];
 export async function installDbxp(spec: InstallSpec, root: string, opts: InstallOpts = {}): Promise<string> {
   if (!safeId(spec.id)) throw new Error(`插件 id 不合法：${spec.id}`);
   if (!/^[A-Za-z0-9._+-]+$/.test(spec.version)) throw new Error(`插件版本号不合法：${spec.version}`);
-  if (!/^[0-9a-f]{64}$/i.test(spec.sha256)) throw new Error("官方目录里没有这个插件的校验值，为了安全不安装");
+  if (!/^[0-9a-f]{64}$/i.test(spec.sha256)) throw new Error("仓库目录里没有这个插件的校验值，为了安全不安装");
   const allow = opts.hosts ?? OFFICIAL_HOSTS;
   let u: URL;
   try {
@@ -95,7 +95,7 @@ export async function installDbxp(spec: InstallSpec, root: string, opts: Install
   } catch {
     throw new Error("下载地址不合法");
   }
-  if (!hostOk(u, allow) || !allow.includes(u.host) || !/\.dbxp$/.test(u.pathname)) throw new Error("下载地址不在官方插件下载站，已拒绝");
+  if (!hostOk(u, allow) || !allow.includes(u.host) || !/\.dbxp$/.test(u.pathname)) throw new Error("下载地址不在允许的插件下载站（要 https、.dbxp 结尾，且主机是仓库指定的下载站），已拒绝");
 
   const res = await (opts.fetchImpl ?? fetch)(u, { signal: AbortSignal.timeout(opts.timeoutMs ?? 180_000) });
   if (!res.ok) throw new Error(`下载失败（HTTP ${res.status}）`);
@@ -104,7 +104,7 @@ export async function installDbxp(spec: InstallSpec, root: string, opts: Install
   const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length > MAX_PACKAGE) throw new Error("插件包太大，已拒绝");
   if (spec.size && buf.length !== spec.size) throw new Error(`下载的插件包大小不对（应为 ${spec.size}，实际 ${buf.length}）`);
-  if (sha256(buf) !== spec.sha256.toLowerCase()) throw new Error("插件包校验失败（sha256 和官方目录不一致），已丢弃");
+  if (sha256(buf) !== spec.sha256.toLowerCase()) throw new Error("插件包校验失败（sha256 和仓库目录里的不一致），已丢弃");
 
   return installDbxpBuffer(buf, root, { expect: { id: spec.id, version: spec.version } }).version;
 }

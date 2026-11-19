@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { HarnessEvent } from "../../../shared/api";
 import { argSummary, fmtMs, type RunView, type Step, type ToolRun } from "../lib/steps";
+import { AskedCard } from "./AskCard";
 import { Icon, type IconName } from "./Icon";
 import { RawEvents } from "./Timeline";
 
@@ -37,6 +38,8 @@ function pretty(v: unknown, max = 12000): string {
 export function ToolCard({ t }: { t: ToolRun }) {
   const [open, setOpen] = useState(false);
   const st = STATUS[t.status];
+  // AI 向操作人提的问题：像一张问答记录，不当普通工具展示
+  if (t.name === "ask_user" && t.status !== "blocked" && t.status !== "denied") return <AskedCard args={t.args} output={t.output} running={t.status === "running"} />;
   const sum = argSummary(t.name, t.args);
   const expandable = t.args !== undefined || t.output !== undefined || t.reason;
   return (
@@ -107,19 +110,23 @@ export function RunSteps({ view, events, running }: { view: RunView; events: Har
   const lastIdx = view.steps.length - 1;
   return (
     <div className="runsteps">
-      <div className="stats">
-        <div className="stat">
-          <b>{view.steps.length}</b>
-          <span>步</span>
-        </div>
+      <div className="stats" style={view.external ? { gridTemplateColumns: "repeat(2, 1fr)" } : undefined}>
+        {!view.external && (
+          <div className="stat">
+            <b>{view.steps.length}</b>
+            <span>步</span>
+          </div>
+        )}
         <div className="stat">
           <b>{view.toolCount}</b>
           <span>工具调用</span>
         </div>
-        <div className="stat">
-          <b>{view.tokens}</b>
-          <span>token</span>
-        </div>
+        {!view.external && (
+          <div className="stat">
+            <b>{view.tokens}</b>
+            <span>token</span>
+          </div>
+        )}
         <div className="stat">
           <b>{fmtMs(view.totalMs) || "—"}</b>
           <span>耗时</span>
