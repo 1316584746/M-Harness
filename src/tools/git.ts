@@ -236,6 +236,49 @@ export async function listBranches(dir: string): Promise<string[]> {
   return [...new Set(names)].sort();
 }
 
+export interface BranchInfo {
+  /** 这个目录在 Git 仓库里吗 */
+  isRepo: boolean;
+  /** 当前分支；游离 HEAD 时为空 */
+  current?: string;
+  /** 本地分支 */
+  local: string[];
+  /** 只在远端有的分支（切换时会自动建同名本地分支并跟踪它） */
+  remote: string[];
+  /** 有没有未提交的改动 */
+  dirty?: boolean;
+}
+
+const BRANCH_NAME = /^[A-Za-z0-9_][A-Za-z0-9_./@+-]*$/;
+export const validBranchName = (n: string) => BRANCH_NAME.test(n) && !n.includes("..") && !n.endsWith("/") && !n.endsWith(".lock");
+
+/** 聊天输入框里的分支选择器用：当前分支 + 本地 / 远端分支 */
+export async function branchInfo(dir: string): Promise<BranchInfo> {
+  if (!fs.existsSync(dir)) return { isRepo: false, local: [], remote: [] };
+  const top = await runGit(["rev-parse", "--is-inside-work-tree"], dir, undefined, 15);
+  if (top.code !== 0 || top.out.trim() !== "true") return { isRepo: false, local: [], remote: [] };
+  const names = (out: string) => out.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const [cur, loc, rem, st] = await Promise.all([
+    runGit(["branch", "--show-current"], dir, undefined, 15),
+    runGit(["branch", "--format=%(refname:short)"], dir, undefined, 20),
+    runGit(["branch", "-r", "--format=%(refname:short)"], dir, undefined, 20),
+    runGit(["status", "--porcelain=v1"], dir, undefined, 20),
+  ]);
+  const local = names(loc.out).filter(s => !s.startsWith("("));
+  const have = new Set(local);
+  const remote = [...new Set(names(rem.out).filter(s => !/(^|\/)HEAD$/.test(s) && s.startsWith("origin/")).map(s => s.slice("origin/".length)))].filter(s => s && !have.has(s)).sort();
+  return { isRepo: true, current: cur.out.trim() || undefined, local: local.sort(), remote, dirty: st.code === 0 ? names(st.out).length > 0 : undefined };
+}
+
+/** 切换分支：git switch（和命令行一样，改动和目标分支冲突时 git 会拒绝，原样把原因带回来；不强制、不丢改动） */
+export async function switchBranch(dir: string, branch: string): Promise<{ ok: boolean; error?: string; current?: string }> {
+  if (!validBranchName(branch)) return { ok: false, error: `分支名不合法：${branch}` };
+  const r = await runGit(["switch", branch], dir, undefined, 60);
+  if (r.code !== 0) return { ok: false, error: (r.err || r.out).trim() || `git 退出码 ${r.code}` };
+  const cur = (await runGit(["branch", "--show-current"], dir, undefined, 15)).out.trim();
+  return { ok: true, current: cur || undefined };
+}
+
 export interface RepoStatus {
   exists: boolean;
   branch?: string;

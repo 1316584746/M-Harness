@@ -243,7 +243,7 @@ export function groupFeishu(all: FsRow[], active: FsRow[], overdue: FsRow[], sub
       const act = activeKeys.has(rowKey(r)) || undefined;
       if (r.subId) {
         const s = subs.get(r.subId);
-        const c: TodoChild = { id: r.subId, title: s?.name || "子任务", kind: "subtask", parent: s?.parent, nodeKey: s?.nodeKey ?? r.nodeKey, start: s?.start ?? r.start, end: s?.end ?? r.end, done: s?.done, active: act, days: s?.days, owner: me.name };
+        const c: TodoChild = { id: r.subId, title: s?.name || "任务", kind: "subtask", parent: s?.parent, nodeKey: s?.nodeKey ?? r.nodeKey, start: s?.start ?? r.start, end: s?.end ?? r.end, done: s?.done, active: act, days: s?.days, owner: me.name };
         children.push(c);
         span(c.start, c.end);
       } else if (r.node) {
@@ -425,7 +425,7 @@ function cliFailure(text: string): string | undefined {
  * 写完立刻把这个需求的子任务重新读一遍：和我们要写的对得上才算成功，对不上就报错（不会假装成功）。
  */
 export async function updateFeishuSubtask(cfg: FeishuProjectConfig, req: SubtaskUpdate): Promise<SubtaskResult> {
-  for (const v of [req.projectKey, req.wid, req.nodeKey, req.subId]) if (!v || !SAFE_ID.test(v)) return { ok: false, error: "缺少子任务的定位信息（空间 / 需求 / 节点），请先刷新工作台再试" };
+  for (const v of [req.projectKey, req.wid, req.nodeKey, req.subId]) if (!v || !SAFE_ID.test(v)) return { ok: false, error: "缺少任务的定位信息（空间 / 需求 / 节点），请先刷新工作台再试" };
   for (const n of [req.start, req.end, req.days]) if (n !== undefined && (typeof n !== "number" || !Number.isFinite(n))) return { ok: false, error: "日期或人天的格式不对" };
   const c = { ...cfg, timeoutSec: 30 };
   const base = [`--node-id=${req.nodeKey}`, `--project-key=${req.projectKey}`, `--work-item-id=${req.wid}`, `--task-id=${req.subId}`, "--format=json"];
@@ -450,10 +450,63 @@ export async function updateFeishuSubtask(cfg: FeishuProjectConfig, req: Subtask
   const now = subs.get(req.subId);
   if (!now) return { ok: true };
   const child = { done: now.done, start: now.start, end: now.end, days: now.days };
-  if (req.done !== undefined && (now.done === true) !== req.done) return { ok: false, error: `飞书没有接受这次操作（子任务仍是${now.done ? "已完成" : "未完成"}）。可能要先完成它前面的节点，或者你没有权限`, child };
+  if (req.done !== undefined && (now.done === true) !== req.done) return { ok: false, error: `飞书没有接受这次操作（任务仍是${now.done ? "已完成" : "未完成"}）。可能要先完成它前面的节点，或者你没有权限`, child };
   if (req.start !== undefined && req.end !== undefined && (dayOf(now.start) !== dayOf(req.start) || dayOf(now.end) !== dayOf(req.end))) return { ok: false, error: "飞书没有接受这次排期修改，请到飞书项目里确认", child };
   if (req.done === undefined && req.days !== undefined && now.days !== req.days) return { ok: false, error: "飞书没有接受这次人天修改，请到飞书项目里确认", child };
   return { ok: true, child };
+}
+
+/** 在本软件里给飞书项目的一个节点新增子任务 */
+export interface SubtaskCreate {
+  projectKey: string;
+  /** 需求（工作项）id */
+  wid: string;
+  /** 要加到哪个节点（节点 key） */
+  nodeKey: string;
+  name: string;
+  start?: number;
+  end?: number;
+  days?: number;
+}
+
+export interface SubtaskCreated {
+  ok: boolean;
+  error?: string;
+  /** 新建后从飞书读回来的子任务（界面直接加进列表） */
+  child?: TodoChild;
+}
+
+/**
+ * 在飞书项目里新增一个子任务，负责人是当前登录的账号。
+ * 建完立刻把这个需求的子任务重新读一遍，找到新出现的那一条才算成功；找不到就报错（不会假装成功）。
+ */
+export async function createFeishuSubtask(cfg: FeishuProjectConfig, req: SubtaskCreate): Promise<SubtaskCreated> {
+  for (const v of [req.projectKey, req.wid, req.nodeKey]) if (!v || !SAFE_ID.test(v)) return { ok: false, error: "缺少节点的定位信息（空间 / 需求 / 节点），请先刷新工作台再试" };
+  const name = String(req.name ?? "").trim();
+  if (!name) return { ok: false, error: "请填写任务名称" };
+  if (name.length > 200) return { ok: false, error: "任务名称太长了" };
+  const c = { ...cfg, timeoutSec: 30 };
+  const before = new Set((await fetchSubs(c, req.wid, req.projectKey, true).catch(() => new Map<string, SubInfo>())).keys());
+  const me = await whoAmI(c).catch(() => ({} as { name?: string; key?: string }));
+  const params: Record<string, unknown> = { action: "create", node_id: req.nodeKey, project_key: req.projectKey, work_item_id: req.wid, fields: [{ field_key: "name", field_value: name }] };
+  if (me.key) params.assignee = [me.key];
+  const schedule: Record<string, number> = {};
+  if (req.start !== undefined && req.end !== undefined && Number.isFinite(req.start) && Number.isFinite(req.end)) {
+    schedule.estimate_start_date = dayOf(req.start)!;
+    schedule.estimate_end_date = dayOf(req.end)! + 86_400_000 - 1;
+  }
+  if (req.days !== undefined && Number.isFinite(req.days) && req.days >= 0) schedule.points = req.days;
+  if (Object.keys(schedule).length) params.schedule = schedule;
+  const text = await runMeegle(c, ["subtask", "update", "-P", JSON.stringify(params), "--format=json"], sig());
+  const bad = cliFailure(text);
+  if (bad) return { ok: false, error: bad };
+
+  const subs = await fetchSubs(c, req.wid, req.projectKey, true).catch(() => new Map<string, SubInfo>());
+  let found: [string, SubInfo] | undefined;
+  for (const e of subs) if (!before.has(e[0]) && e[1].name === name) found = e;
+  if (!found) return { ok: false, error: "已经提交给飞书项目，但没在需求里读到新的任务。请点「刷新」确认，或到飞书项目里查看" };
+  const [id, s] = found;
+  return { ok: true, child: { id, title: s.name, kind: "subtask", parent: s.parent, nodeKey: s.nodeKey ?? req.nodeKey, start: s.start, end: s.end, done: s.done, days: s.days, owner: me.name } };
 }
 
 export async function fetchDingtalkTodos(cfg: DingtalkProjectConfig): Promise<TodoSource> {

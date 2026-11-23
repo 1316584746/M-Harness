@@ -47,7 +47,7 @@ export function AiPlugins() {
           还没有装可以给 AI 用的插件。装了带 AI 工具的插件（DBX 插件清单里有 mcp 一项，比如 XXL-JOB；或 DSH 插件）后，会出现在这里。Codex / Claude 的插件包装的是技能、MCP、命令、规则，在对应的设置页里，不在这里。
         </div>
       )}
-      <div className="prepo-list">
+      <div className="prepo-list ai-plugin-scroll" data-testid="ai-plugins-scroll">
         {list.map(p => (
           <div key={p.id} className={`prepo-row ${p.enabled ? "" : "off"}`} data-testid="ai-plugin-row" data-id={p.id} style={{ alignItems: "flex-start" }}>
             <div className="prepo-main">

@@ -9,6 +9,7 @@ import { QueuedList } from "../components/QueuedList";
 import { ModelPicker } from "../components/ModelPicker";
 import { ProviderPicker } from "../components/ProviderPicker";
 import { McpPicker } from "../components/McpPicker";
+import { BranchPicker } from "../components/BranchPicker";
 import { WorkspacePicker } from "../components/WorkspacePicker";
 import { parseCfg } from "../lib/configEdit";
 import { RunSteps, ToolCard } from "../components/Steps";
@@ -198,6 +199,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
             <div className="composer-grip" title="拖动调整输入框高度" onMouseDown={startResize} />
             <div className="composer-top">
               <WorkspacePicker current={ws} repos={repos} onPick={store.setWorkspace} onBrowse={pickWs} disabled={running} />
+              <BranchPicker dir={ws} disabled={running} refreshKey={running} />
               <McpPicker disabled={store.disabledTools} onChange={store.setDisabledTools} busy={running} />
             </div>
             <textarea

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { TodoChildDTO, TodoItemDTO } from "../../../../shared/api";
 import { WEEK, WINDOW_DAYS, DAY, layoutBars, md, startOfDay, windowStart } from "../../../../shared/schedule";
 import { Icon } from "../../components/Icon";
@@ -36,49 +36,123 @@ const fromInput = (s: string): number | undefined => {
   return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime() : undefined;
 };
 
-/** 改子任务的排期：起止日期 + 人天，保存时直接写到飞书项目 */
+/** 改子任务的排期：起止日期 + 人天。改完自动同步到飞书项目（防抖），不用再点保存 */
 function SchedEditor({ init, onSave, onClose }: { init?: { start?: number; end?: number; days?: number }; onSave: (v: { start?: number; end?: number; days?: number }) => Promise<string | undefined>; onClose: () => void }) {
   const [s, setS] = useState(toInput(init?.start));
   const [e, setE] = useState(toInput(init?.end));
   const [d, setD] = useState(init?.days !== undefined ? String(init.days) : "");
-  const [busy, setBusy] = useState(false);
+  const [state, setState] = useState<"idle" | "pending" | "saving" | "done">("idle");
   const [err, setErr] = useState<string>();
-  const save = async () => {
-    let a = fromInput(s);
-    let b = fromInput(e);
-    if (a !== undefined && b === undefined) b = a;
-    if (b !== undefined && a === undefined) a = b;
+  /** 上一次已经同步（或打开时就是这个值）的内容，没变化就不重复写飞书 */
+  const synced = useRef<string>("");
+  const latest = useRef({ s, e, d });
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const running = useRef(false);
+  const again = useRef(false);
+  const mounted = useRef(true);
+
+  /** 当前输入 → 要写的内容；还不完整（只填了一个日期 / 什么都没填）返回 null */
+  const build = () => {
+    const { s: s0, e: e0, d: d0 } = latest.current;
+    let a = fromInput(s0);
+    let b = fromInput(e0);
+    if ((a === undefined) !== (b === undefined)) return null;
     if (a !== undefined && b !== undefined && b < a) [a, b] = [b, a];
-    const days = d.trim() === "" ? undefined : Math.max(0, Number(d));
-    const v = { start: a, end: b, days: days !== undefined && Number.isFinite(days) ? days : undefined };
-    if (v.start === undefined && v.days === undefined) return setErr("请填写日期或人天");
-    setBusy(true);
-    setErr(undefined);
-    const bad = await onSave(v);
-    setBusy(false);
-    if (bad) setErr(bad);
-    else onClose();
+    const n = d0.trim() === "" ? undefined : Math.max(0, Number(d0));
+    const days = n !== undefined && Number.isFinite(n) ? n : undefined;
+    if (a === undefined && days === undefined) return null;
+    return { start: a, end: b, days };
   };
+
+  const flush = async (): Promise<boolean> => {
+    clearTimeout(timer.current);
+    if (running.current) {
+      again.current = true;
+      return false;
+    }
+    const v = build();
+    if (!v) {
+      if (mounted.current) setState("idle");
+      return true;
+    }
+    const sig = JSON.stringify(v);
+    if (sig === synced.current) {
+      if (mounted.current) setState(st => (st === "pending" ? "done" : st));
+      return true;
+    }
+    running.current = true;
+    if (mounted.current) {
+      setState("saving");
+      setErr(undefined);
+    }
+    const bad = await onSave(v);
+    running.current = false;
+    if (!bad) synced.current = sig;
+    if (mounted.current) {
+      if (bad) {
+        setErr(bad);
+        setState("idle");
+      } else setState("done");
+    }
+    if (again.current) {
+      again.current = false;
+      return flush();
+    }
+    return !bad;
+  };
+
+  useEffect(() => {
+    mounted.current = true;
+    synced.current = JSON.stringify(
+      init?.start !== undefined || init?.days !== undefined ? { start: init?.start, end: init?.end ?? init?.start, days: init?.days } : null,
+    );
+    return () => {
+      mounted.current = false;
+      // 还没来得及同步的改动：关掉编辑框也要写出去
+      if (timer.current) {
+        clearTimeout(timer.current);
+        void flush();
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const change = (k: "s" | "e" | "d", v: string) => {
+    latest.current = { ...latest.current, [k]: v };
+    if (k === "s") setS(v);
+    else if (k === "e") setE(v);
+    else setD(v);
+    setErr(undefined);
+    if (!build()) return setState("idle");
+    setState("pending");
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => void flush(), 700);
+  };
+
   return (
     <div className="sched-edit" data-testid="sched-edit" onClick={ev => ev.stopPropagation()}>
       <label>
-        开始 <input type="date" data-testid="sched-start" value={s} onChange={ev => setS(ev.target.value)} />
+        开始 <input type="date" data-testid="sched-start" value={s} onChange={ev => change("s", ev.target.value)} />
       </label>
       <label>
-        结束 <input type="date" data-testid="sched-end" value={e} min={s} onChange={ev => setE(ev.target.value)} />
+        结束 <input type="date" data-testid="sched-end" value={e} min={s} onChange={ev => change("e", ev.target.value)} />
       </label>
       <label>
-        人天 <input type="number" data-testid="sched-days" min={0} step={0.5} value={d} onChange={ev => setD(ev.target.value)} />
+        人天 <input type="number" data-testid="sched-days" min={0} step={0.5} value={d} onChange={ev => change("d", ev.target.value)} />
       </label>
-      <button className="btn sm primary" data-testid="sched-save" onClick={() => void save()} disabled={busy} title="保存后直接写到飞书项目">
-        {busy ? <span className="spinner" /> : null} 保存到飞书项目
-      </button>
-      <button className="btn sm ghost" onClick={onClose} disabled={busy}>
-        取消
+      <span className="sched-state" data-testid="sched-state" data-state={state} hidden />
+      <button
+        className="btn sm ghost"
+        data-testid="sched-close"
+        onClick={async () => {
+          if ((await flush()) || !err) onClose();
+        }}
+      >
+        收起
       </button>
       {err && (
         <span className="bad sched-err" data-testid="sched-err">
-          {err}
+          没有同步到飞书项目：{err}
         </span>
       )}
     </div>
@@ -103,7 +177,7 @@ function Nodes({ t }: { t: TodoItemDTO }) {
 /** 需求自己的排期：只显示飞书项目里的日期（需求和节点的排期要到飞书里改，这里只改子任务） */
 function SelfSched({ t }: { t: TodoItemDTO }) {
   return (
-    <span className="self-when" data-testid="wb-self-sched" title="需求 / 节点的排期来自飞书项目；子任务的排期可以在下面直接改">
+    <span className="self-when" data-testid="wb-self-sched" title="需求 / 节点的排期来自飞书项目；任务的排期可以在下面直接改">
       {range(t)}
     </span>
   );
@@ -111,6 +185,85 @@ function SelfSched({ t }: { t: TodoItemDTO }) {
 
 /** 改子任务（完成 / 回滚 / 排期）。返回错误文字，成功返回 undefined */
 export type ChildEdit = (t: TodoItemDTO, c: TodoChildDTO, change: { done?: boolean; start?: number; end?: number; days?: number }) => Promise<string | undefined>;
+
+/** 新增子任务（节点 key + 名称）。返回错误文字，成功返回 undefined */
+export type ChildCreate = (t: TodoItemDTO, nodeKey: string, name: string) => Promise<string | undefined>;
+
+/** 新子任务加到哪个节点：已有子任务所在的节点（进行中的优先，这个 key 改子任务时验证过）→ 进行中的节点 → 第一个节点 */
+function createNode(t: TodoItemDTO): string | undefined {
+  const kids = t.children ?? [];
+  const subs = kids.filter(c => c.kind === "subtask" && c.nodeKey);
+  const nodes = kids.filter(c => c.kind === "node");
+  return (subs.find(c => c.active) ?? subs[0])?.nodeKey ?? nodes.find(n => n.active)?.id ?? nodes[0]?.id;
+}
+
+/** 子任务分组标题：▸ 子任务 (已完成/全部)，点一下折叠 / 展开 */
+function SubHead({ t, open, onToggle, testid }: { t: TodoItemDTO; open: boolean; onToggle: () => void; testid: string }) {
+  const subs = (t.children ?? []).filter(c => c.kind === "subtask");
+  if (!subs.length && !(t.projectKey && createNode(t))) return null;
+  const done = subs.filter(c => c.done).length;
+  return (
+    <button className="sub-head" data-testid={testid} aria-expanded={open} onClick={ev => (ev.stopPropagation(), onToggle())}>
+      <span className={`sub-caret${open ? " open" : ""}`}>▸</span>
+      全部任务 ({done}/{subs.length})
+    </button>
+  );
+}
+
+/** 「+ 新增任务」：点开输入名称，回车建到飞书项目 */
+function AddSub({ t, onCreate }: { t: TodoItemDTO; onCreate: ChildCreate }) {
+  const [on, setOn] = useState(false);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string>();
+  const node = createNode(t);
+  if (!t.projectKey || !node) return null;
+  const submit = async () => {
+    const v = name.trim();
+    if (!v || busy) return;
+    setBusy(true);
+    setErr(undefined);
+    const bad = await onCreate(t, node, v);
+    setBusy(false);
+    if (bad) return setErr(bad);
+    setName("");
+    setOn(false);
+  };
+  if (!on)
+    return (
+      <button className="sub-add" data-testid="sub-add" onClick={() => setOn(true)}>
+        <Icon name="plus" size={13} /> 新增任务
+      </button>
+    );
+  return (
+    <div className="sub-add-form" data-testid="sub-add-form" onClick={ev => ev.stopPropagation()}>
+      <input
+        autoFocus
+        className="input sm"
+        data-testid="sub-add-name"
+        placeholder="任务名称，回车创建"
+        value={name}
+        disabled={busy}
+        onChange={ev => setName(ev.target.value)}
+        onKeyDown={ev => {
+          if (ev.key === "Enter" && !ev.nativeEvent.isComposing) void submit();
+          if (ev.key === "Escape") (setOn(false), setErr(undefined));
+        }}
+      />
+      <button className="btn sm primary" data-testid="sub-add-ok" disabled={busy || !name.trim()} onClick={() => void submit()}>
+        {busy ? <span className="spinner" /> : null} 创建
+      </button>
+      <button className="btn sm ghost" disabled={busy} onClick={() => (setOn(false), setErr(undefined))}>
+        取消
+      </button>
+      {err && (
+        <span className="bad sched-err" data-testid="sub-add-err">
+          没有创建到飞书项目：{err}
+        </span>
+      )}
+    </div>
+  );
+}
 
 /** 需求下我负责的子任务：名字、负责人、人天、排期（可以在这里填） */
 function Children({ t, onEdit }: { t: TodoItemDTO; onEdit: ChildEdit }) {
@@ -188,10 +341,12 @@ export function Schedule({
   items,
   loaded,
   loading,
+  refreshKey,
   title,
   user,
   error,
   onEdit,
+  onCreate,
   tasked,
   onTask,
 }: {
@@ -199,6 +354,8 @@ export function Schedule({
   items: TodoItemDTO[];
   loaded: boolean;
   loading: boolean;
+  /** 每次刷新 +1：子任务行里没写完的编辑框、错误提示、临时状态都按新数据重来 */
+  refreshKey: number;
   /** 副标题：空间名 */
   title?: string;
   /** 当前登录的账号（待办都是这个人的） */
@@ -207,6 +364,8 @@ export function Schedule({
   error?: string;
   /** 改飞书项目里的子任务（完成 / 回滚 / 排期） */
   onEdit: ChildEdit;
+  /** 在飞书项目里新增子任务 */
+  onCreate: ChildCreate;
   /** 已经建过任务的需求（source + id） */
   tasked: Set<string>;
   /** 点击需求：在左侧创建任务；open=true 同时打开任务 */
@@ -223,6 +382,14 @@ export function Schedule({
   const active = useMemo(() => items.filter(i => i.active), [items]);
   const unscheduled = useMemo(() => noDate.filter(i => !i.active), [noDate]);
   const [subOpen, setSubOpen] = useState<string | null>(null);
+  /** 进行中的需求里，被折叠起来的子任务列表（默认都展开） */
+  const [folded, setFolded] = useState<Set<string>>(new Set());
+  const toggleFold = (k: string) =>
+    setFolded(s => {
+      const n = new Set(s);
+      if (!n.delete(k)) n.add(k);
+      return n;
+    });
   const key = (t: TodoItemDTO) => t.source + t.id;
   const last = ws + (WINDOW_DAYS - 1) * DAY;
 
@@ -238,7 +405,7 @@ export function Schedule({
       <button className="btn sm" data-testid="wb-todo-ai" onClick={() => onTask(t, true)}>
         <Icon name="spark" size={13} /> 打开任务
       </button>
-      <Children t={t} onEdit={onEdit} />
+      <Children key={refreshKey} t={t} onEdit={onEdit} />
     </div>
   );
 
@@ -288,7 +455,7 @@ export function Schedule({
         {outside > 0 && <span className="muted sch-outside">另有 {outside} 项不在这段时间里</span>}
       </div>
 
-      <div className="gantt" data-testid="gantt">
+      <div className={`gantt${bars.length === 0 ? " gantt-none" : ""}`} data-testid="gantt">
         <div className="gantt-head">
           {days.map((d, i) => {
             const wd = new Date(d).getDay();
@@ -343,7 +510,9 @@ export function Schedule({
 
       {active.length > 0 && (
         <div className="sch-active" data-testid="wb-active">
-          <div className="sch-sub">进行中的需求 · {active.length}</div>
+          <div className="sch-sub">
+            进行中的需求 <em>{active.length}</em>
+          </div>
           {active.map(t => (
             <div className="act-item" key={key(t)} data-testid="wb-active-item">
               <div className="act-head">
@@ -360,7 +529,13 @@ export function Schedule({
                   <Icon name="spark" size={13} /> {tasked.has(key(t)) ? "打开任务" : "创建任务"}
                 </button>
               </div>
-              <Children t={t} onEdit={onEdit} />
+              <SubHead t={t} open={!folded.has(key(t))} onToggle={() => toggleFold(key(t))} testid="wb-sub-fold" />
+              {!folded.has(key(t)) && (
+                <>
+                  <Children key={refreshKey} t={t} onEdit={onEdit} />
+                  <AddSub key={`add${refreshKey}`} t={t} onCreate={onCreate} />
+                </>
+              )}
             </div>
           ))}
         </div>
@@ -368,20 +543,23 @@ export function Schedule({
 
       {unscheduled.length > 0 && (
         <div className="sch-unscheduled" data-testid="wb-unscheduled">
-          <div className="sch-sub">未排期 · {unscheduled.length}</div>
+          <div className="sch-sub">
+            未排期 <em>{unscheduled.length}</em>
+          </div>
           {unscheduled.map(t => (
             <div className="wb-todo" key={key(t)} data-testid="wb-todo">
               <div className="wb-todo-main">
                 <div className={`wb-todo-title${tasked.has(key(t)) ? " jump" : ""}`} onClick={() => tasked.has(key(t)) && onTask(t, true)} title={tasked.has(key(t)) ? "打开对应任务" : undefined}>{t.title}</div>
                 <div className="wb-sub">
                   {t.sub} <SelfSched t={t} />
-                  {t.children?.some(c => c.kind === "subtask") ? (
-                    <button className="link sub-toggle" data-testid="wb-sub-toggle" onClick={() => setSubOpen(subOpen === key(t) ? null : key(t))}>
-                      {" · "}我的子任务 {t.children.filter(c => c.kind === "subtask").length} {subOpen === key(t) ? "▴" : "▾"}
-                    </button>
-                  ) : null}
                 </div>
-                {subOpen === key(t) && <Children t={t} onEdit={onEdit} />}
+                <SubHead t={t} open={subOpen === key(t)} onToggle={() => setSubOpen(subOpen === key(t) ? null : key(t))} testid="wb-sub-toggle" />
+                {subOpen === key(t) && (
+                  <>
+                    <Children key={refreshKey} t={t} onEdit={onEdit} />
+                    <AddSub key={`add${refreshKey}`} t={t} onCreate={onCreate} />
+                  </>
+                )}
               </div>
               <button className="btn sm wb-ai" data-testid="wb-todo-ai" onClick={() => onTask(t, true)}>
                 <Icon name="spark" size={13} /> {tasked.has(key(t)) ? "打开任务" : "创建任务"}

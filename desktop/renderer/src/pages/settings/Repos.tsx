@@ -214,13 +214,16 @@ export function Repos({ state, onChanged, onUse }: { state: AppState; onChanged:
                   )}
                 </>
               )}
-              {r.url && <span className="muted repo-url">{r.url}</span>}
               <span className="spacer" />
               <button className="btn sm" data-testid={`repo-use-${r.name}`} disabled={!!r.status.error} onClick={() => onUse(r.path)}>
                 <Icon name="chat" size={13} /> 在新对话中使用
               </button>
             </div>
-            {r.status.last && <div className="muted repo-last">最近提交：{r.status.last}</div>}
+            {(r.url || r.status.last) && (
+              <div className="muted repo-last" title={[r.url, r.status.last && `最近提交：${r.status.last}`].filter(Boolean).join("\n")}>
+                {[r.url, r.status.last && `最近提交：${r.status.last}`].filter(Boolean).join("　·　")}
+              </div>
+            )}
           </div>
         ))}
 
@@ -236,7 +239,7 @@ export function Repos({ state, onChanged, onUse }: { state: AppState; onChanged:
           </div>
         )}
 
-        <div className="repo-add">
+        <div className="repo-adds">
           <button className="btn" data-testid="repo-add-local" onClick={addLocal} disabled={busy}>
             <Icon name="folder" size={14} /> 选择文件夹
           </button>

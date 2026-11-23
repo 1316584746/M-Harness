@@ -219,6 +219,7 @@ function registerIpc() {
   ipcMain.handle("workbench:todos", () => backend.workbenchTodos());
   ipcMain.handle("workbench:todos-cached", () => backend.workbenchTodosCached());
   ipcMain.handle("workbench:subtask-update", (_e, req) => backend.workbenchSubtaskUpdate(req));
+  ipcMain.handle("workbench:subtask-create", (_e, req) => backend.workbenchSubtaskCreate(req));
   ipcMain.handle("workitem:chat", (_e, req) => backend.workItemChat(req));
   ipcMain.handle("workitem:chat-create", (_e, req) => backend.workItemChatCreate(req));
   ipcMain.handle("repo:inspect", (_e, dir: string) => backend.inspectRepo(String(dir)));
@@ -231,6 +232,8 @@ function registerIpc() {
   ipcMain.handle("skills:delete", (_e, name: string) => backend.deleteSkill(String(name)));
   ipcMain.handle("rules:preview", () => backend.rulesPreview());
   ipcMain.handle("provider:models", (_e, name: string, opts) => backend.providerModels(String(name), opts ?? {}));
+  ipcMain.handle("repo:branch-info", (_e, dir: string) => backend.branchInfo(String(dir)));
+  ipcMain.handle("repo:switch-branch", (_e, dir: string, branch: string) => backend.switchBranch(String(dir), String(branch)));
   ipcMain.handle("repo:branches", (_e, dir: string) => backend.listBranches(String(dir)));
   ipcMain.handle("githost:probe", (_e, req) => backend.probeGitHost(req ?? {}));
   ipcMain.handle("repo:clone", (_e, url: string, parentDir: string, name: string) => backend.cloneRepo(String(url), String(parentDir), String(name)));

@@ -223,7 +223,10 @@ try {
     await until(`document.querySelector('[data-testid="send"]') && !document.querySelector('[data-testid="send"]').disabled`);
     await ev(click("send"));
   };
+  // 顶栏「对话」只切到对话页；真要新建，点侧边栏顶部的「新建对话」
   const newChat = async () => {
+    await ev(click("nav-chat"));
+    await until(`!!document.querySelector('[data-testid="new-chat"]')`);
     await ev(click("new-chat"));
   };
   const lastAnswer = `[...document.querySelectorAll('[data-testid="msg-assistant"]')].pop()`;
@@ -285,7 +288,7 @@ try {
   ok("可以恢复 IP 定位", (await ev(`localStorage.getItem('harness.home.city')`)) === null);
   ok("一进来首页铺满整个窗口，侧边栏不占位", await ev(`!document.querySelector('.nav') && document.querySelector('[data-testid="home"]').getBoundingClientRect().left < 2`));
   // 只有对话页有侧边栏：点新建对话进去，在对话页里测宽度、折叠
-  await ev(click("new-chat"));
+  await newChat();
   await until(`document.querySelector('.nav')`);
   // 侧边栏宽度可拖动，范围受限，双击恢复，并记住
   const navW = () => ev(`document.querySelector('.nav').getBoundingClientRect().width`);
@@ -325,7 +328,7 @@ try {
   await ev(click("nav-workbench"));
   await until(`document.querySelector('[data-testid="workbench"]') && !document.querySelector('[data-testid="workbench"]').closest('[hidden]')`);
   ok("工作台页还没有任务时没有侧边栏，也不显示历史对话", await ev(`!document.querySelector('.nav') && !document.querySelector('[data-testid="session-item"]')`));
-  await ev(click("new-chat"));
+  await newChat();
   await until(`document.querySelector('.nav')`);
   ok("回到对话页侧边栏还是折叠的", (await navW()) < 70);
   await ev(click("nav-toggle"));
@@ -346,7 +349,7 @@ try {
   await shot("0c-workbench");
   const nItems = `document.querySelectorAll('[data-testid="session-item"]').length`;
   ok("还没点新建对话时，没有任何对话", (await ev(nItems)) === 0);
-  await ev(click("new-chat"));
+  await newChat();
   await until(`document.querySelector('[data-testid="workbench"]').closest('[hidden]')`);
   ok("点新建对话进入对话页", true);
   ok("对话按工作区分组，分组标题是文件夹名", await ev(`(() => { const h = document.querySelector('[data-testid="session-group-head"]'); return !!h && h.querySelector('.sess-group-name').innerText.length > 0 && !!document.querySelector('[data-testid="session-group"] [data-testid="session-item"]'); })()`));
@@ -367,10 +370,10 @@ try {
   await ev(click("session-group-head"));
   ok("再点展开", (await ev("document.querySelectorAll('[data-testid=\"session-item\"]').length")) === 1);
   ok("发送后这条对话的标题变成第一句话", (await ev(`document.querySelector('[data-testid="session-item"] .session-title').innerText`)).includes("你好 harness"));
-  await ev(click("new-chat"));
+  await newChat();
   await until(`document.querySelectorAll('[data-testid="session-item"]').length === 2`);
   ok("每点一次新建对话就多一个，原对话仍在列表里", (await ev(nItems)) === 2);
-  await ev(click("new-chat"));
+  await newChat();
   await until(`document.querySelectorAll('[data-testid="session-item"]').length === 3`);
   ok("连点也是每次多一个，对话页是空的新对话", (await ev(nItems)) === 3 && (await ev(`!document.querySelector('[data-testid="msg-assistant"]')`)));
   await ev(`document.querySelectorAll('[data-testid="session-item"]')[2].click()`);
@@ -571,6 +574,8 @@ try {
   await ev(setVal('[data-testid="branch-test-demo"]', "test/1.30.1", "HTMLInputElement", "input"));
   await ev(setVal('[data-testid="branch-integration-demo"]', "master", "HTMLInputElement", "input"));
   await until(`document.querySelector('[data-testid="branch-save-demo"]')`);
+  await ev("document.querySelector('[data-testid=\"repo-list\"]').scrollIntoView({ block: 'end' })");
+  await sleep(200);
   await shot("8a3-repo-branches");
   await ev(click("branch-save-demo"));
   await until(`!document.querySelector('[data-testid="branch-save-demo"]')`);
@@ -644,7 +649,7 @@ try {
   };
   await ev(click("nav-plugins"));
   await until(`document.querySelector('[data-testid="plugins-page"]')`);
-  ok("标题栏有新建对话 / 工作台 / 插件中心；插件中心有 插件商店 / 已安装 / 设置", await ev(`['new-chat','nav-workbench','nav-plugins'].every(i => !!document.querySelector('.titlebar [data-testid="' + i + '"]')) && ['store','installed','settings'].every(k => !!document.querySelector('[data-testid="plugin-tab-' + k + '"]'))`));
+  ok("标题栏有对话 / 工作台 / 插件中心；插件中心有 插件商店 / 已安装 / 设置", await ev(`['nav-chat','nav-workbench','nav-plugins'].every(i => !!document.querySelector('.titlebar [data-testid="' + i + '"]')) && ['store','installed','settings'].every(k => !!document.querySelector('[data-testid="plugin-tab-' + k + '"]'))`));
   await until(`document.querySelectorAll('[data-testid="plugin-card"]').length === 2`, 20000);
   ok("插件商店只有 DBX 插件（含名称、作者、标签、安装按钮），没有技能 / MCP / 规则 / 动作", await ev(`(() => { const cs = [...document.querySelectorAll('[data-testid="plugin-card"]')]; return cs.every(c => c.dataset.key.startsWith('DBX 插件中心:') && !!c.querySelector('.px-name') && !!c.querySelector('.px-by') && !!c.querySelector('[data-testid="plugin-install"], [data-testid="plugin-nopkg"]')) && !document.querySelector('[data-testid="plugin-kind"]') && !document.querySelector('[data-testid="plugin-batch"]'); })()`));
   await ev(click("plugin-tab-settings"));
@@ -848,12 +853,23 @@ const item = (id, name, s, e, node, sub) => ({ work_item_info: { work_item_id: i
 if (a[0] === "mywork" && a.includes("--action=todo") && a.includes("--todo-scope=in_progress")) console.log(JSON.stringify({ list: [item(1, "飞书排期A", day(-1), day(2), "技术排期"), item(4, "飞书进行中无排期", "", "", "技术开发联调")] }));
 else if (a[0] === "mywork" && a.includes("--action=todo")) console.log(JSON.stringify({ list: [item(1, "飞书排期A", day(-1), day(2), "技术排期"), item(1, "飞书排期A", day(0), day(1), "", 101), item(2, "飞书排期B", day(3), day(3)), item(3, "飞书未排期"), item(3, "飞书未排期", "", "", "", 301), item(4, "飞书进行中无排期", "", "", "技术开发联调")] }));
 else if (a[0] === "mywork") console.log(JSON.stringify({ list: null, total: 0 }));
-else if (a[0] === "workflow" && a[1] === "get-node") { const ss = require("fs").existsSync(require("path").join(__dirname, "sub-state.json")) ? JSON.parse(require("fs").readFileSync(require("path").join(__dirname, "sub-state.json"), "utf8")) : {}; console.log(JSON.stringify({ list: [{ basic: { name: "技术排期", node_key: "jishu" }, sub_tasks: [{ sub_task_id: "101", sub_task_name: "后端开发", estimate_start_date: "", estimate_end_date: "", is_finished: false, points: 1, owner: '[{"username":"u1"}]' }, { sub_task_id: "102", sub_task_name: "已做完的联调", estimate_start_date: "", estimate_end_date: "", is_finished: true, points: 0.5, owner: '[{"username":"u1"}]' }, { sub_task_id: "103", sub_task_name: "别人的子任务", is_finished: false, owner: '[{"username":"u2"}]' }, { sub_task_id: "301", sub_task_name: "写接口文档", is_finished: false, owner: '[{"username":"u1"}]' }].map(s => ({ ...s, ...(ss[s.sub_task_id] || {}) })).filter(s => (a.includes("--work-item-id=3") ? s.sub_task_id === "301" : a.includes("--work-item-id=1") && s.sub_task_id !== "301")) }], pagination: { has_more: false } })); }
+else if (a[0] === "workflow" && a[1] === "get-node") { const ss = require("fs").existsSync(require("path").join(__dirname, "sub-state.json")) ? JSON.parse(require("fs").readFileSync(require("path").join(__dirname, "sub-state.json"), "utf8")) : {}; console.log(JSON.stringify({ list: [{ basic: { name: "技术排期", node_key: "jishu" }, sub_tasks: [{ sub_task_id: "101", sub_task_name: "后端开发", estimate_start_date: "", estimate_end_date: "", is_finished: false, points: 1, owner: '[{"username":"u1"}]' }, { sub_task_id: "102", sub_task_name: "已做完的联调", estimate_start_date: "", estimate_end_date: "", is_finished: true, points: 0.5, owner: '[{"username":"u1"}]' }, { sub_task_id: "103", sub_task_name: "别人的子任务", is_finished: false, owner: '[{"username":"u2"}]' }, { sub_task_id: "301", sub_task_name: "写接口文档", is_finished: false, owner: '[{"username":"u1"}]' }].concat(ss.__created || []).map(s => ({ ...s, ...(ss[s.sub_task_id] || {}) })).filter(s => (a.includes("--work-item-id=3") ? s.sub_task_id === "301" : a.includes("--work-item-id=1") && s.sub_task_id !== "301")) }], pagination: { has_more: false } })); }
 else if (a[0] === "subtask" && a[1] === "update") {
   // 假飞书：子任务的改动记在 sub-state.json 里，get-node 读回来
   const g = k => (a.find(x => x.startsWith("--" + k + "=")) || "").slice(k.length + 3);
   const f = require("path").join(__dirname, "sub-state.json");
   const ss = require("fs").existsSync(f) ? JSON.parse(require("fs").readFileSync(f, "utf8")) : {};
+  if (a.includes("-P")) {
+    const p = JSON.parse(a[a.indexOf("-P") + 1]);
+    if (p.action === "create") {
+      if (p.node_id !== "jishu" || p.project_key !== "p1" || (p.assignee || [])[0] !== "u1") { console.error("bad create"); process.exit(3); }
+      const nm = (p.fields || []).find(f => f.field_key === "name");
+      (ss.__created = ss.__created || []).push({ sub_task_id: "9001", sub_task_name: nm ? nm.field_value : "", is_finished: false, owner: '[{"username":"u1"}]' });
+      require("fs").writeFileSync(f, JSON.stringify(ss));
+      console.log("{}");
+      process.exit(0);
+    }
+  }
   const id = g("task-id");
   if (g("node-id") !== "jishu" || g("project-key") !== "p1" || !id) { console.error("bad locate"); process.exit(3); }
   const cur = ss[id] || {};
@@ -906,7 +922,7 @@ else { console.error("unknown"); process.exit(2); }`,
   await sleep(500);
   // 重启后：已有历史对话，但一进来侧边栏不显示；点「新建对话」进到对话页才出现
   ok("重启后一进来侧边栏不显示历史对话", await ev(`!document.querySelector('[data-testid="session-group"]') && !document.querySelector('[data-testid="session-item"]') && !document.querySelector('.session-empty')`));
-  await ev(click("new-chat"));
+  await newChat();
   await until(`document.querySelector('[data-testid="session-group"] [data-testid="session-item"]')`);
   ok("点新建对话后侧边栏出现分组和历史对话", (await ev(`document.querySelectorAll('[data-testid="session-item"]').length`)) > 1);
   // 删除对话：侧边栏少一个，工作台里的「全部对话」也同步
@@ -916,7 +932,7 @@ else { console.error("unknown"); process.exit(2); }`,
   await ev(click("nav-workbench"));
   await until(`document.querySelector('[data-testid="workbench"]') && !document.querySelector('[data-testid="workbench"]').closest('[hidden]')`);
   ok("删除对话后，工作台的「全部对话」同步少一个", (await ev(`document.querySelectorAll('.wb-stat b')[3].innerText`)) === String(delTotal - 1));
-  await ev(click("new-chat"));
+  await newChat();
   await until(`document.querySelector('.nav')`);
   await ev(click("nav-workbench"));
   await until(`document.querySelector('[data-testid="workbench"]') && !document.querySelector('[data-testid="workbench"]').closest('[hidden]')`);
@@ -931,6 +947,11 @@ else { console.error("unknown"); process.exit(2); }`,
   ok("「进行中的需求」按需求列出（不管有没有排期），每个需求下是我负责的节点 / 子任务", await ev(`(() => { const a = [...document.querySelectorAll('[data-testid="wb-active-item"]')]; const t = a.map(x => x.innerText); return a.length === 2 && t[0].includes('飞书排期A') && t[0].includes('后端开发') && t[0].includes('技术排期') && t[1].includes('飞书进行中无排期') && t[1].includes('技术开发联调'); })()`));
   ok("节点是需求上的小标签，下面的列表只放子任务", await ev(`(() => { const it = document.querySelector('[data-testid="wb-active-item"]'); return !!it.querySelector('[data-testid="wb-node"]') && [...it.querySelectorAll('[data-testid="wb-child"]')].every(x => x.dataset.kind === 'subtask'); })()`));
   ok("子任务显示名字、负责人、人天；我名下已做完的也在，别人的子任务不在", await ev(`(() => { const r = [...document.querySelectorAll('[data-testid="wb-active-item"]')[0].querySelectorAll('[data-testid="wb-child"]')]; const t = r.map(x => x.innerText); return r.length === 2 && t[0].includes('后端开发') && t[0].includes('测试用户') && t[0].includes('1 人天') && t[1].includes('已做完的联调') && t[1].includes('0.5 人天') && !!r[1].querySelector('.sub-check.on') && !r[0].querySelector('.sub-check.on') && !document.body.innerText.includes('别人的子任务'); })()`));
+  // 子任务列表可以折叠 / 展开
+  await ev(`document.querySelectorAll('[data-testid="wb-active-item"]')[0].querySelector('[data-testid="wb-sub-fold"]').click()`);
+  await until(`document.querySelectorAll('[data-testid="wb-active-item"]')[0].querySelectorAll('[data-testid="wb-child"]').length === 0`);
+  await ev(`document.querySelectorAll('[data-testid="wb-active-item"]')[0].querySelector('[data-testid="wb-sub-fold"]').click()`);
+  ok("进行中的需求下，子任务列表可以折叠，再点展开", await (async () => { await until(`document.querySelectorAll('[data-testid="wb-active-item"]')[0].querySelectorAll('[data-testid="wb-child"]').length === 2`); return true; })());
   // 在本软件里改子任务 = 直接改飞书项目（假飞书把改动记在 sub-state.json 里）
   const iso = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
   const subState = () => { try { return JSON.parse(fs.readFileSync(path.join(home, "sub-state.json"), "utf8")); } catch { return {}; } };
@@ -939,7 +960,7 @@ else { console.error("unknown"); process.exit(2); }`,
     await ev(setVal('[data-testid="sched-start"]', iso(a), "HTMLInputElement", "change"));
     await ev(setVal('[data-testid="sched-end"]', iso(b), "HTMLInputElement", "change"));
     if (d !== undefined) await ev(setVal('[data-testid="sched-days"]', String(d), "HTMLInputElement", "change"));
-    await ev(click("sched-save"));
+    // 改完自动同步到飞书项目，不用点保存\n    await until(`document.querySelector('[data-testid="sched-state"]')?.dataset.state === 'done'`);
   };
   const row = n => `document.querySelectorAll('[data-testid="wb-active-item"]')[0].querySelectorAll('[data-testid="wb-child"]')[${n}]`;
   ok("子任务没有排期时显示「未排期」", await ev(`document.querySelectorAll('[data-testid="wb-active-item"]')[0].querySelectorAll('[data-testid="wb-child-when"]')[1].innerText.includes('未排期')`));
@@ -956,6 +977,14 @@ else { console.error("unknown"); process.exit(2); }`,
   await ev(`${row(0)}.querySelector('[data-testid="wb-child-check"]').click()`);
   await until(`!${row(0)}.querySelector('.sub-check.on')`);
   ok("再点一下回滚成未完成，飞书那边也回滚", await (async () => { for (let i = 0; i < 20; i++) { if (subState()["101"]?.is_finished === false) return true; await sleep(250); } return false; })());
+  // 新增子任务：直接建到飞书项目（假飞书记在 sub-state.json 的 __created 里）
+  const act0 = `document.querySelectorAll('[data-testid="wb-active-item"]')[0]`;
+  await ev(`${act0}.querySelector('[data-testid="sub-add"]').click()`);
+  await until(`!!${act0}.querySelector('[data-testid="sub-add-name"]')`);
+  await ev(setVal('[data-testid="wb-active-item"] [data-testid="sub-add-name"]', "新增的测试子任务", "HTMLInputElement", "input"));
+  await ev(`${act0}.querySelector('[data-testid="sub-add-ok"]').click()`);
+  await until(`${act0}.querySelectorAll('[data-testid="wb-child"]').length === 3 && ${act0}.innerText.includes('新增的测试子任务')`);
+  ok("点「新增任务」输入名称：飞书那边（假飞书）建出了子任务，列表里马上多一行，输入框收起", (subState().__created || []).some(s => s.sub_task_name === "新增的测试子任务") && (await ev(`!${act0}.querySelector('[data-testid="sub-add-name"]')`)));
   ok("需求自己的排期只显示、不能在本软件里改", await ev(`document.querySelectorAll('[data-testid="wb-active-item"]')[1].querySelector('[data-testid="wb-self-sched"]').tagName !== 'BUTTON'`));
   ok("同一个需求只出现一次，未排期里不重复也不含进行中的", await ev(`(() => { const u = [...document.querySelectorAll('[data-testid="wb-todo"]')].map(x => x.querySelector('.wb-todo-title').innerText); return u.length === 1 && u[0] === '飞书未排期'; })()`));
   await ev(click("wb-sub-toggle"));
@@ -966,7 +995,7 @@ else { console.error("unknown"); process.exit(2); }`,
   // 点需求：左侧创建任务；点任务：打开任务详情（需求信息 / 关联仓库 / 改动 / MCP / 事件流）
   ok("点排期条后，左侧「进行中的任务」里多了一个以需求命名的任务，状态待确认", await ev(`(() => { const it = document.querySelectorAll('[data-testid="task-item"]'); const nav = document.querySelector('[data-testid="task-nav"]'); return it.length === 1 && it[0].innerText.includes('飞书排期A') && it[0].innerText.includes('待确认') && !!nav && nav.innerText.includes('进行中的任务') && nav.innerText.includes('今天'); })()`));
   ok("工作台的侧边栏里只有任务，没有历史对话", await ev(`!!document.querySelector('.nav [data-testid="task-nav"]') && !document.querySelector('.nav [data-testid="session-group"]') && !document.querySelector('.nav [data-testid="session-item"]:not(.task-item)')`));
-  await ev(click("new-chat"));
+  await newChat();
   await until(`!!document.querySelector('.nav [data-testid="session-group"]')`);
   ok("新建对话页的侧边栏只有对话，没有任务", await ev(`!document.querySelector('.nav [data-testid="task-nav"]') && !document.querySelector('.nav [data-testid="task-item"]') && !document.querySelector('.nav [data-testid="task-chip"]')`));
   await ev(click("nav-workbench"));

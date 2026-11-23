@@ -47,10 +47,10 @@ describe("飞书待办按需求聚合", () => {
     expect(by("2").start).toBeUndefined();
   });
 
-  it("在 in_progress 里有行的需求才算进行中；名字取不到的子任务叫「子任务」", () => {
+  it("在 in_progress 里有行的需求才算进行中；名字取不到的子任务叫「任务」", () => {
     expect(r.filter(x => x.active).map(x => x.id)).toEqual(["1", "3"]);
     expect(by("1").children?.find(c => c.kind === "node")?.active).toBe(true);
-    expect(by("2").children?.map(c => c.title)).toEqual(["写用例", "子任务"]);
+    expect(by("2").children?.map(c => c.title)).toEqual(["写用例", "任务"]);
     expect(by("2").active).toBeUndefined();
   });
 

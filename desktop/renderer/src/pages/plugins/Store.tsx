@@ -4,7 +4,6 @@ import { api } from "../../api";
 import { Icon } from "../../components/Icon";
 import { Avatar, dateText, haveVersions, Msg, verText } from "./common";
 
-type Sort = "name-asc" | "name-desc" | "updated";
 type St = "none" | "installed" | "update";
 
 /** 插件商店：所有已启用仓库里的插件（.dbxp）。搜索、按状态筛选、卡片 / 列表，点安装直接装进本软件。技能 / MCP 这类不是插件，不在这里 */
@@ -12,7 +11,6 @@ const PLATFORM_NAME = /Mac/i.test(navigator.platform) ? "macOS" : /Linux/i.test(
 
 export function Store({ market, loading, reload }: { market: MarketResult | null; loading: boolean; reload: (refresh?: boolean, silent?: boolean) => void }) {
   const [q, setQ] = useState("");
-  const [sort, setSort] = useState<Sort>("name-asc");
   const [status, setStatus] = useState("all");
   const [eco, setEco] = useState("all");
   /** 用户选的插件库（按库的显示名）；没选 / 选的库已被停用 = 第一个已启用的库 */
@@ -28,7 +26,7 @@ export function Store({ market, loading, reload }: { market: MarketResult | null
   const entries = market?.entries ?? [];
   const local = useMemo(() => haveVersions(market), [market]);
   useEffect(() => localStorage.setItem("harness.plugins.view", view), [view]);
-  useEffect(() => setLimit(120), [q, sort, status, eco, libPick]);
+  useEffect(() => setLimit(120), [q, status, eco, libPick]);
   useEffect(() => localStorage.setItem("harness.plugins.lib", libPick), [libPick]);
   useEffect(() => {
     let alive = true;
@@ -67,8 +65,8 @@ export function Store({ market, loading, reload }: { market: MarketResult | null
       const stOk = status === "all" || (status === "installed" ? st !== "none" : status === "none" ? st === "none" : st === "update");
       return stOk && e.source === lib && (eco === "all" || ecoOf(e) === eco) && (!k || [e.name, e.id, e.author ?? "", e.description, e.tags.join(" "), e.source].join(" ").toLowerCase().includes(k));
     });
-    return list.sort((a, b) => (sort === "updated" ? (b.updated ?? "").localeCompare(a.updated ?? "") || a.name.localeCompare(b.name, "zh") : sort === "name-desc" ? b.name.localeCompare(a.name, "zh") : a.name.localeCompare(b.name, "zh")));
-  }, [libEntries, q, sort, status, eco, local, lib]);
+    return list.sort((a, b) => a.name.localeCompare(b.name, "zh"));
+  }, [libEntries, q, status, eco, local, lib]);
   /** 目录里出现了哪几家的插件（只有一家时不显示筛选） */
   const ecosystems = useMemo(() => [...new Set(libEntries.map(ecoOf))], [libEntries]);
 
@@ -101,11 +99,6 @@ export function Store({ market, loading, reload }: { market: MarketResult | null
             ))}
           </select>
         )}
-        <select className="select" data-testid="plugin-sort" value={sort} onChange={e => setSort(e.target.value as Sort)}>
-          <option value="name-asc">名称 (A-Z)</option>
-          <option value="name-desc">名称 (Z-A)</option>
-          <option value="updated">最近更新</option>
-        </select>
         <select className="select" data-testid="plugin-status" value={status} onChange={e => setStatus(e.target.value)}>
           <option value="all">全部状态</option>
           <option value="installed">已安装</option>

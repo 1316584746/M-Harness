@@ -18,3 +18,16 @@ export function patchChild(items: TodoItemDTO[], wid: string, childId: string, c
     return { ...t, children, start, end, due: end };
   });
 }
+
+/** 新增了一个子任务：加到对应需求的子任务列表里（需求起止日期按带日期的子项重新算） */
+export function addChild(items: TodoItemDTO[], wid: string, child: TodoChildDTO): TodoItemDTO[] {
+  return items.map(t => {
+    if (t.id !== wid || t.children?.some(c => c.id === child.id && c.kind === "subtask")) return t;
+    const children = [...(t.children ?? []), child];
+    const dated = children.filter(c => c.start !== undefined || c.end !== undefined);
+    if (!dated.length) return { ...t, children };
+    const start = Math.min(...dated.map(c => c.start ?? c.end!));
+    const end = Math.max(...dated.map(c => c.end ?? c.start!));
+    return { ...t, children, start, end, due: end };
+  });
+}

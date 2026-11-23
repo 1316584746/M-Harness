@@ -37,9 +37,9 @@ import { BUNDLED } from "./plugin-catalog";
 import { importGithubRepo, parseGithubUrl } from "./repo-import";
 import { copySkillFiles, PLATFORM_IDS, PLATFORM_NAME, platformFound, scanLocalFolder, scanPlatform, type LocalScan, type PlatformId } from "./local-import";
 import { createChat, fetchWorkItemChat, inspectChat, parseChatRef, type WorkChat } from "../../src/tools/work-chat";
-import { fetchDingtalkTodos, fetchFeishuTodos, sortTodos, updateFeishuSubtask, type SubtaskResult, type SubtaskUpdate, type TodoSource } from "../../src/tools/workbench";
-import { patchChild } from "../shared/todoPatch";
-import { cloneRepo, detectBaseBranch, diffStat, inspectRepo, listBranches, repoStatus, syncBaseBranch } from "../../src/tools/git";
+import { fetchDingtalkTodos, fetchFeishuTodos, sortTodos, createFeishuSubtask, updateFeishuSubtask, type SubtaskCreated, type SubtaskResult, type SubtaskUpdate, type TodoSource } from "../../src/tools/workbench";
+import { addChild, patchChild } from "../shared/todoPatch";
+import { branchInfo, cloneRepo, detectBaseBranch, diffStat, inspectRepo, listBranches, repoStatus, switchBranch, syncBaseBranch } from "../../src/tools/git";
 import { authEnvFor, hostEnabled, probeHost } from "../../src/tools/git-hosts";
 import type {
   AppState,
@@ -266,6 +266,14 @@ export class Backend {
     return dir;
   }
 
+  branchInfo(dir: string) {
+    return branchInfo(path.resolve(dir));
+  }
+
+  switchBranch(dir: string, branch: string) {
+    return switchBranch(path.resolve(dir), String(branch));
+  }
+
   listBranches(dir: string): Promise<string[]> {
     return listBranches(path.resolve(dir));
   }
@@ -363,6 +371,26 @@ export class Backend {
         try {
           const items = patchChild(cache.feishu.items as never, req.wid, req.subId, r.child) as unknown as typeof cache.feishu.items;
           const merged = { ...cache, feishu: { ...cache.feishu, items }, items: patchChild(cache.items as never, req.wid, req.subId, r.child) as unknown as typeof cache.items };
+          fs.writeFileSync(path.join(this.home, "workbench-cache.json"), JSON.stringify(merged), "utf8");
+        } catch {
+          /* 缓存没改成只影响下次先显示的内容，刷新后会更新 */
+        }
+      }
+    }
+    return r;
+  }
+
+  /** 工作台：在飞书项目的某个节点下新增子任务（负责人是当前登录账号）；成功后本地缓存也加上这一条 */
+  async workbenchSubtaskCreate(req: { projectKey: string; wid: string; nodeKey: string; name: string }): Promise<SubtaskCreated> {
+    const fp = this.config.integrations.feishuProject;
+    if (!fp) return { ok: false, error: "还没有接入飞书项目" };
+    const r = await createFeishuSubtask(fp, { projectKey: String(req?.projectKey ?? ""), wid: String(req?.wid ?? ""), nodeKey: String(req?.nodeKey ?? ""), name: String(req?.name ?? "") });
+    if (r.ok && r.child) {
+      const cache = this.workbenchTodosCached();
+      if (cache) {
+        try {
+          const items = addChild(cache.feishu.items as never, req.wid, r.child as never) as unknown as typeof cache.feishu.items;
+          const merged = { ...cache, feishu: { ...cache.feishu, items }, items: addChild(cache.items as never, req.wid, r.child as never) as unknown as typeof cache.items };
           fs.writeFileSync(path.join(this.home, "workbench-cache.json"), JSON.stringify(merged), "utf8");
         } catch {
           /* 缓存没改成只影响下次先显示的内容，刷新后会更新 */

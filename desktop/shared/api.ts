@@ -140,6 +140,14 @@ export interface RepoSyncDTO {
   error?: string;
 }
 
+export interface BranchInfoDTO {
+  isRepo: boolean;
+  current?: string;
+  local: string[];
+  remote: string[];
+  dirty?: boolean;
+}
+
 export interface RepoInfo {
   name: string;
   path: string;
@@ -210,6 +218,13 @@ export interface SubtaskUpdateReq {
   start?: number;
   end?: number;
   days?: number;
+}
+export interface SubtaskCreateReq {
+  projectKey: string;
+  wid: string;
+  /** 加到哪个节点（节点 key） */
+  nodeKey: string;
+  name: string;
 }
 export interface TodoSourceDTO {
   enabled: boolean;
@@ -460,6 +475,8 @@ export interface HarnessApi {
   /** 上一次读成功的待办（立即返回、不联网），用来先显示；at 是读取时间 */
   workbenchTodosCached(): Promise<(WorkbenchTodosDTO & { at: number }) | null>;
   /** 在飞书项目里完成 / 回滚子任务，或改子任务的排期和人天；成功后返回从飞书重新读到的这个子任务 */
+  /** 在飞书项目的某个节点下新增一个子任务（负责人是当前登录账号）；成功后返回从飞书读到的新子任务 */
+  workbenchSubtaskCreate(req: SubtaskCreateReq): Promise<{ ok: boolean; error?: string; child?: TodoChildDTO }>;
   workbenchSubtaskUpdate(req: SubtaskUpdateReq): Promise<{ ok: boolean; error?: string; child?: { done?: boolean; start?: number; end?: number; days?: number } }>;
   /** 读需求（飞书项目工作项）对应的飞书群：群 id、群名、状态、打开链接；没拉群就 none */
   workItemChat(req: { projectKey?: string; wid: string; url?: string; chatId?: string }): Promise<WorkChatDTO>;
@@ -483,6 +500,10 @@ export interface HarnessApi {
   /** 拖入窗口的文件对应的本地绝对路径 */
   pathForFile(file: File): string;
   /** 仓库的本地 + 远端分支名，用于分支下拉候选 */
+  /** 聊天输入框的分支选择器：当前分支 + 本地 / 远端分支 */
+  branchInfo(dir: string): Promise<BranchInfoDTO>;
+  /** 切换分支（git switch，有冲突时原样返回 git 的拒绝原因） */
+  switchBranch(dir: string, branch: string): Promise<{ ok: boolean; error?: string; current?: string }>;
   listBranches(dir: string): Promise<string[]>;
   probeGitHost(req: { platform: string; baseURL?: string; token?: string }): Promise<HostProbeDTO>;
   /** 检测飞书项目 CLI（meegle）是否可用、是否已登录 */

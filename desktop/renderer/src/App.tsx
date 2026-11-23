@@ -269,17 +269,9 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
           {anyRunning && <span className="spinner" style={{ color: "var(--run)", marginLeft: 8 }} />}
         </div>
         <div className="titlebar-nav">
-          <button
-            className="tn-btn"
-            data-testid="new-chat"
-            title="新建对话"
-            onClick={() => {
-              store.newChat();
-              setTab("chat");
-            }}
-          >
+          <button className={`tn-btn ${tab === "chat" ? "on" : ""}`} data-testid="nav-chat" title="对话" onClick={() => setTab("chat")}>
             <Icon name="chat" size={15} />
-            <span>新建对话</span>
+            <span>对话</span>
           </button>
           <button className={`tn-btn ${tab === "workbench" ? "on" : ""}`} data-testid="nav-workbench" title="工作台" onClick={() => setTab("workbench")}>
             <Icon name="grid" size={15} />
@@ -349,6 +341,17 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
             <button className="nav-fold" data-testid="nav-toggle" title={navCollapsed ? "展开侧边栏" : "折叠侧边栏"} onClick={toggleNav}>
               <Icon name="panel" size={15} />
             </button>
+            {onChat && (
+              <button
+                className="nav-new"
+                data-testid="new-chat"
+                title="新建对话"
+                onClick={() => store.newChat()}
+              >
+                <Icon name="plus" size={14} />
+                <span>新建对话</span>
+              </button>
+            )}
             <div className="session-list" data-testid="session-list">
               {!navCollapsed && !onChat && (openTasks.length > 0 || doneTasks.length > 0) && (
                 <div className="task-nav" data-testid="task-nav">
