@@ -390,10 +390,25 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
               className={`upd-pill ${update!.state}`}
               data-testid="update-pill"
               style={updPct !== undefined ? ({ "--p": `${updPct}%` } as CSSProperties) : undefined}
-              title={`当前 v${update!.current} → v${update!.latest}，点击查看`}
-              onClick={() => setUpdateOpen(true)}
+              title={
+                update!.state === "downloading"
+                  ? `正在下载 v${update!.latest}（${updPct ?? 0}%），下载完会自动安装并重新打开`
+                  : update!.state === "downloaded"
+                    ? update!.canAutoInstall
+                      ? `v${update!.latest} 已下载，没有任务在跑时会自动安装并重新打开；点一下立即安装`
+                      : `v${update!.latest} 已下载，点一下重启并安装`
+                    : update!.state === "error"
+                      ? `更新失败：${update!.error ?? ""}，点一下重试`
+                      : `当前 v${update!.current} → v${update!.latest}${update!.canAutoInstall ? "，正在后台下载" : "，点一下查看"}`
+              }
+              onClick={() => {
+                // 不弹窗：能自动装的直接后台处理，点胶囊只是「立刻装 / 重试」；不能自动装的（macOS / Linux）才展开说明
+                if (update!.state === "downloaded") void api.updateInstall();
+                else if (update!.state === "error" || (update!.state === "available" && update!.canAutoInstall)) void api.updateDownload();
+                else if (update!.state === "available") setUpdateOpen(true);
+              }}
             >
-              <Icon name="cloud" size={14} />
+              <Icon name="updateUp" size={15} />
               <span>{updLabel}</span>
             </button>
           )}

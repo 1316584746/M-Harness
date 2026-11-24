@@ -113,6 +113,7 @@ const P: Record<string, ReactNode> = {
   ),
   expand: <path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7" />,
   collapse: <path d="M20 10h-6V4M4 14h6v6M14 10l7-7M3 21l7-7" />,
+  updateUp: <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16V8M8.5 11.5L12 8l3.5 3.5" />,
   cloud: <path d="M7 18a4.5 4.5 0 0 1-.7-8.95A6 6 0 0 1 17.8 8.6 4.8 4.8 0 0 1 17.5 18M12 11v8M9 16l3 3 3-3" />,
   home: <path d="M4 11l8-7 8 7v8.5a1.5 1.5 0 0 1-1.5 1.5H15v-6H9v6H5.5A1.5 1.5 0 0 1 4 19.5V11z" />,
   grid: <path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" />,

@@ -223,8 +223,8 @@ export class Updater {
     return this.state;
   }
 
-  /** 退出并安装已下载的更新（silent：不显示安装界面） */
-  install(silent = false): void {
+  /** 退出并安装已下载的更新：一律静默安装（不出安装向导），装完自动重新打开 */
+  install(silent = true): void {
     if (this.st.state === "downloaded") this.au?.quitAndInstall(silent, true);
   }
 }
