@@ -239,6 +239,10 @@ export function TaskPage({
   const mcpReady = mcpOn.filter(s => s.state === "ready").length;
 
   const [pop, setPop] = useState<Pop>(null);
+  // 任务页是常驻的（切到设置再回来不会重建）：设置里新增 / 修改了仓库、或打开关联仓库 / 基本信息时，重新读一遍仓库列表
+  useEffect(() => {
+    void api.listRepos().then(setRepos).catch(() => {});
+  }, [state.configText, pop === "repo" || pop === "info"]);
   const bar = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!pop) return;
@@ -267,12 +271,12 @@ export function TaskPage({
     async (chatId?: string | null) => {
       setGrpBusy(true);
       const id = chatId === undefined ? task.groupId : chatId ?? undefined;
-      const r = await api.workItemChat({ projectKey: task.projectKey, wid: task.itemId, url: task.url, chatId: id }).catch((e): WorkChatDTO => ({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      const r = await api.workItemChat({ projectKey: task.projectKey, wid: task.itemId, url: task.url, title: task.title, chatId: id }).catch((e): WorkChatDTO => ({ ok: false, error: e instanceof Error ? e.message : String(e) }));
       setGrp(r);
       setGrpBusy(false);
       return r;
     },
-    [task.projectKey, task.itemId, task.url, task.groupId],
+    [task.projectKey, task.itemId, task.url, task.title, task.groupId],
   );
   useEffect(() => {
     if (task.source === "feishu" || task.groupId) void loadGroup();

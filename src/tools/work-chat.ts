@@ -17,6 +17,8 @@ export interface WorkChat {
   how?: string;
   /** 在飞书客户端里打开这个群的链接 */
   link?: string;
+  /** 需求本身没关联群时，按需求名在「我所在的群」里搜到的可能的群（供一键绑定） */
+  candidates?: Array<{ id: string; name: string }>;
   error?: string;
 }
 
@@ -143,8 +145,57 @@ export function createChat(lark: LarkBin | undefined, req: { name: string; descr
   });
 }
 
+function larkSearch(cfg: LarkBin, query: string): Promise<unknown | null> {
+  return new Promise(resolve => {
+    let child;
+    try {
+      child = spawnCli(cfg.bin, [...(cfg.binArgs ?? []), "api", "GET", "/open-apis/im/v1/chats/search", "--params", JSON.stringify({ query, page_size: 20 }), "--as", "user"]);
+    } catch {
+      return resolve(null);
+    }
+    const out: Buffer[] = [];
+    child.stdout.on("data", (b: Buffer) => out.push(b));
+    child.stderr.on("data", () => {});
+    const timer = setTimeout(() => child.kill(), 15_000);
+    child.on("error", () => (clearTimeout(timer), resolve(null)));
+    child.on("close", () => {
+      clearTimeout(timer);
+      resolve(parseJson(Buffer.concat(out).toString("utf8")));
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end();
+  });
+}
+
+/** 去掉标题里的【】括号，剩下的当搜索词：「【数英满班率】组班」→「数英满班率 组班」 */
+export function chatQueries(title: string): string[] {
+  const t = title.replace(/\s+/g, " ").trim();
+  const bracket = [...t.matchAll(/【([^】]+)】/g)].map(m => m[1].trim()).filter(Boolean);
+  const rest = t.replace(/【[^】]*】/g, " ").replace(/\s+/g, " ").trim();
+  return [...new Set([t, bracket[0], [bracket[0], rest].filter(Boolean).join(" ")].filter((x): x is string => !!x && x.length >= 2))].slice(0, 3);
+}
+
+/** 按需求名在「我所在的群」里找可能的群：名字里同时含括号里的关键词和正文的排前面 */
+export async function findChatCandidates(lark: LarkBin | undefined, title: string): Promise<Array<{ id: string; name: string }>> {
+  const cfg = lark ?? { bin: "lark-cli" };
+  const seen = new Map<string, string>();
+  for (const q of chatQueries(title)) {
+    const j = await larkSearch(cfg, q);
+    const items = isObj(j) && j.ok !== false && isObj(j.data) && Array.isArray(j.data.items) ? j.data.items : [];
+    for (const it of items) {
+      if (!isObj(it)) continue;
+      const id = typeof it.chat_id === "string" ? it.chat_id : "";
+      const name = typeof it.name === "string" ? it.name.trim() : "";
+      if (/^oc_[A-Za-z0-9]+$/.test(id) && name && !seen.has(id)) seen.set(id, name);
+    }
+  }
+  const core = title.replace(/[【】\s]/g, "");
+  const score = (n: string) => (n.replace(/[【】\s]/g, "").includes(core) ? 0 : 1);
+  return [...seen].map(([id, name]) => ({ id, name })).sort((a, b) => score(a.name) - score(b.name)).slice(0, 8);
+}
+
 /** 读一个需求对应的飞书群；没拉群就如实说没有，不会编一个 */
-export async function fetchWorkItemChat(fp: FeishuProjectConfig, lark: LarkBin | undefined, req: { projectKey?: string; wid: string; url?: string }): Promise<WorkChat> {
+export async function fetchWorkItemChat(fp: FeishuProjectConfig, lark: LarkBin | undefined, req: { projectKey?: string; wid: string; url?: string; title?: string }): Promise<WorkChat> {
   if (!req.wid || !SAFE_ID.test(req.wid)) return { ok: false, error: "缺少需求 ID" };
   // 任务上没记空间（老任务、或没从工作台点进来）：先看需求链接，再用设置里配的默认空间
   const dflt = fp.defaultSpace?.key;
@@ -155,7 +206,12 @@ export async function fetchWorkItemChat(fp: FeishuProjectConfig, lark: LarkBin |
   if (j === null) return { ok: false, error: text.replace(/^meegle 退出码 \d+\n?/, "").trim().slice(0, 200) || "读取需求失败" };
   const g = parseGroupField(j);
   if (!g.found) return { ok: false, error: "这个需求没有「拉群方式」字段，可能这类工作项不支持建群" };
-  if (!g.groupId) return { ok: true, none: true, how: g.how };
+  if (!g.groupId) {
+    // 需求上没配群（如「不拉群」），但你可能自己拉了群：按需求名搜出来给你选，不自动绑定
+    // candidates 有值（哪怕是空数组）= 已经搜过了，界面据此区分「没搜」和「没搜到」
+    const candidates = req.title?.trim() ? await findChatCandidates(lark, req.title).catch(() => []) : undefined;
+    return { ok: true, none: true, how: g.how, ...(candidates ? { candidates } : {}) };
+  }
   const info = await chatInfo(lark ?? { bin: "lark-cli" }, g.groupId).catch(() => ({}) as { name?: string; status?: string });
   return { ok: true, groupId: g.groupId, how: g.how, name: info.name, status: info.status, link: chatLink(g.groupId) };
 }

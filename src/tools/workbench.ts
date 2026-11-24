@@ -339,11 +339,14 @@ let meCache: { at: number; id: string; name?: string; key?: string } | undefined
 export async function whoAmI(cfg: FeishuProjectConfig): Promise<{ name?: string; key?: string }> {
   const id = JSON.stringify([cfg.bin, cfg.binArgs ?? []]); // 换了命令行（比如换账号 / 测试）不能用旧缓存
   if (meCache && meCache.id === id && Date.now() - meCache.at < 10 * 60_000) return meCache;
-  const j = parseJson(await runMeegle(cfg, ["user", "me"], sig()));
+  // 偶尔一次超时 / 被限流读不到：重试一次；还是读不到就别缓存（否则 10 分钟内都拿不到 user_key，「我的排期」就一直没有工时排期）
+  let j: unknown = null;
+  for (let i = 0; i < 2 && !(isObj(j) && typeof pick(j, ["user_key"]) === "string"); i++) j = parseJson(await runMeegle(cfg, ["user", "me"], sig()));
   const name = isObj(j) ? pick(j, ["name_cn", "name_en", "name"]) : undefined;
   const key = isObj(j) ? pick(j, ["user_key"]) : undefined;
-  meCache = { at: Date.now(), id, name: typeof name === "string" ? name : undefined, key: typeof key === "string" ? key : undefined };
-  return meCache;
+  const me = { at: Date.now(), id, name: typeof name === "string" ? name : undefined, key: typeof key === "string" ? key : undefined };
+  if (me.key) meCache = me;
+  return me;
 }
 
 /** workhour list-schedule 的返回 → 需求（只取需求自己的起止，子任务名只在子任务里有） */
@@ -386,8 +389,11 @@ async function addWorkhour(cfg: FeishuProjectConfig, items: TodoItem[], userKey:
   const got = await Promise.all(
     projectKeys.map(async pk => {
       try {
-        const text = await runMeegle(cfg, ["workhour", "list-schedule", "--project-key", pk, "--user-keys", JSON.stringify([userKey]), "--start-time", ymd(now - 30 * 86_400_000), "--end-time", ymd(now + 60 * 86_400_000), "--work-item-type-keys", '["_all"]'], sig());
-        return workhourItems(parseJson(text), pk);
+        // 读不到（超时 / 限流）时重试一次：排期只靠这一个来源，偶尔失败不能让整张甘特图空着
+        const args = ["workhour", "list-schedule", "--project-key", pk, "--user-keys", JSON.stringify([userKey]), "--start-time", ymd(now - 30 * 86_400_000), "--end-time", ymd(now + 60 * 86_400_000), "--work-item-type-keys", '["_all"]'];
+        let j = parseJson(await runMeegle(cfg, args, sig()));
+        if (j === null) j = parseJson(await runMeegle(cfg, args, sig()));
+        return workhourItems(j, pk);
       } catch {
         return [];
       }

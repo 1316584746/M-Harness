@@ -111,9 +111,41 @@ export function GroupDialog({ task, grp, busy, onClose, onReload, onBind, onCrea
               </div>
             </>
           ) : (
-            <span className="muted">
-              这个需求还没有关联群{grp?.how ? `（飞书项目里的拉群方式：${grp.how}）` : ""}。可以在下面自动创建一个，或绑定已有的群。
-            </span>
+            <div>
+              <span className="muted">
+                这个需求在飞书项目里没有关联群{grp?.how ? `（拉群方式：${grp.how}）` : ""}。可以在下面自动创建一个，或绑定已有的群。
+              </span>
+              {grp?.candidates && !grp.candidates.length && (
+                <div className="grp-note" data-testid="group-no-candidates">
+                  按需求名没在你所在的群里搜到名字相近的群（也可能 lark-cli 还没登录）。已有的群请选「绑定已有群」，粘贴群链接或群 ID。
+                </div>
+              )}
+              {!!grp?.candidates?.length && (
+                <div className="grp-cands" data-testid="group-candidates">
+                  <div className="grp-label">按需求名在你所在的群里找到：</div>
+                  {grp.candidates.map(c => (
+                    <div className="grp-row" key={c.id}>
+                      <b className="grp-name" title={c.id}>
+                        {c.name}
+                      </b>
+                      <button
+                        className="btn sm"
+                        disabled={working}
+                        onClick={async () => {
+                          setErr("");
+                          setWorking(true);
+                          const e = await onBind(c.id).catch((x: unknown) => (x instanceof Error ? x.message : String(x)));
+                          setWorking(false);
+                          if (e) setErr(e);
+                        }}
+                      >
+                        关联这个群
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
 
@@ -145,6 +177,7 @@ export function GroupDialog({ task, grp, busy, onClose, onReload, onBind, onCrea
         {active === "bind" && (
           <input className="grp-input" autoFocus placeholder="粘贴群 ID（oc_…）或群链接" value={ref} onChange={e => setRef(e.target.value)} onKeyDown={e => e.key === "Enter" && !disabled && void submit()} data-testid="group-bind-input" />
         )}
+        {active === "bind" && !ref.trim() && <p className="grp-note">先粘贴群 ID 或群链接，「绑定并关联」才能点。群链接：飞书群 → 设置 → 群链接 / 复制群 ID。</p>}
         {err && <div className="grp-err" data-testid="group-error">{err}</div>}
 
         <p className="grp-note">建议只绑定都是可信同事的内部群。</p>

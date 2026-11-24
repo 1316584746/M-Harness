@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fetchWorkItemChat, parseGroupField, spaceOf } from "../src/tools/work-chat";
+import { chatQueries, fetchWorkItemChat, parseGroupField, spaceOf } from "../src/tools/work-chat";
 
 describe("需求群", () => {
   it("自动拉群：读出群 id 和拉群方式", () => {
@@ -16,6 +16,11 @@ describe("需求群", () => {
     expect(parseGroupField({ work_item_fields: [] }).found).toBe(false);
     expect(parseGroupField("oops").found).toBe(false);
     expect(parseGroupField({ work_item_fields: [{ key: "group_type", value: { group_id: "../etc", label: "x" } }] }).groupId).toBeUndefined();
+  });
+
+  it("按需求名搜群：括号里的关键词和正文都会作为搜索词", () => {
+    expect(chatQueries("【数英满班率】组班")).toEqual(["【数英满班率】组班", "数英满班率", "数英满班率 组班"]);
+    expect(chatQueries("x")).toEqual([]);
   });
 
   it("项目空间：优先 project_key，没有就从需求链接取空间简称", () => {

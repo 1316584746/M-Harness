@@ -227,6 +227,8 @@ export interface WorkChatDTO {
   /** 飞书项目里的「拉群方式」，如「自动拉群」「不拉群」 */
   how?: string;
   link?: string;
+  /** 需求没配群时，按需求名搜到的可能的群 */
+  candidates?: Array<{ id: string; name: string }>;
   error?: string;
 }
 export interface SubtaskUpdateReq {
@@ -566,7 +568,7 @@ export interface HarnessApi {
   workbenchSubtaskCreate(req: SubtaskCreateReq): Promise<{ ok: boolean; error?: string; child?: TodoChildDTO }>;
   workbenchSubtaskUpdate(req: SubtaskUpdateReq): Promise<{ ok: boolean; error?: string; child?: { done?: boolean; start?: number; end?: number; days?: number } }>;
   /** 读需求（飞书项目工作项）对应的飞书群：群 id、群名、状态、打开链接；没拉群就 none */
-  workItemChat(req: { projectKey?: string; wid: string; url?: string; chatId?: string }): Promise<WorkChatDTO>;
+  workItemChat(req: { projectKey?: string; wid: string; url?: string; title?: string; chatId?: string }): Promise<WorkChatDTO>;
   /** 新建一个飞书群（以 lark-cli 登录的用户身份）；返回新群的 id / 名称 / 打开链接 */
   workItemChatCreate(req: { name: string; description?: string }): Promise<WorkChatDTO>;
   inspectRepo(dir: string): Promise<RepoInspectDTO>;

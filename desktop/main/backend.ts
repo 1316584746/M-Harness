@@ -455,7 +455,7 @@ export class Backend {
   }
 
   /** 需求对应的飞书群（群 id 来自飞书项目的「拉群方式」字段，群名来自 lark-cli；群名读不到不影响） */
-  async workItemChat(req: { projectKey?: string; wid: string; url?: string; chatId?: string }): Promise<WorkChat> {
+  async workItemChat(req: { projectKey?: string; wid: string; url?: string; title?: string; chatId?: string }): Promise<WorkChat> {
     const lc = this.config.channels.larkCli;
     const lark = lc ? { bin: lc.bin, binArgs: lc.binArgs } : undefined;
     // 手动关联过群：直接查这个群，不再看飞书项目里的默认群
@@ -469,6 +469,7 @@ export class Backend {
       projectKey: typeof req?.projectKey === "string" ? req.projectKey : undefined,
       wid: String(req?.wid ?? ""),
       url: typeof req?.url === "string" ? req.url : undefined,
+      title: typeof req?.title === "string" ? req.title : undefined,
     });
   }
 
