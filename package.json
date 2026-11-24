@@ -1,6 +1,6 @@
 {
   "name": "m-harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "多模型、可接入办公 OA 的 Agent Harness（引擎 + CLI + 桌面端 + 飞书/钉钉通道）",
@@ -93,8 +93,28 @@
     },
     "mac": {
       "target": [
-        "dmg"
-      ]
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "maintainer": "M-Harness <noreply@users.noreply.github.com>",
+      "icon": "build/icon.png"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "1316584746",
+      "repo": "M-Harness"
     },
     "nsis": {
       "oneClick": false,

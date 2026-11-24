@@ -1,0 +1,87 @@
+name: Release
+
+# 推一个形如 v0.2.0 的 tag（必须和 package.json 的 version 一致）就会：
+# Windows / macOS(arm64) / Linux 三个平台各自打包，最后汇总成一个 GitHub Release。
+# 也可以在 Actions 页面手动运行（只打包、不发布，产物在该次运行的 Artifacts 里）。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: win
+          - os: macos-latest # Apple Silicon（arm64）
+            name: mac
+          - os: ubuntu-latest
+            name: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 校验 tag 和 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          v=$(node -p "require('./package.json').version")
+          if [ "v$v" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} 和 package.json 版本 v$v 不一致，请先改 package.json 的 version 再打 tag"
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: 类型检查
+        if: matrix.name == 'linux'
+        run: npm run typecheck
+
+      # bundle-cli 会下载当前平台的 lark-cli / meegle / dws，所以每个平台要在自己的机器上打
+      - name: 打包
+        run: npm run desktop:dist -- --publish never
+        env:
+          # macOS 没有开发者证书：不签名（用户首次打开需在「隐私与安全性」里放行）
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/*.dmg
+            release/*.dmg.blockmap
+            release/*.AppImage
+            release/*.deb
+            release/latest*.yml
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - run: ls -la dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
