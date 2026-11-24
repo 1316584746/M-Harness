@@ -30,7 +30,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # 锁文件是 npm 11（Node 24）生成的，低版本 npm 的 npm ci 会报锁文件不同步
+          node-version: 24
           cache: npm
 
       - name: 校验 tag 和 package.json 版本一致
