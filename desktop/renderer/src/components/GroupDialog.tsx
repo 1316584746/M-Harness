@@ -37,7 +37,7 @@ export function GroupDialog({ task, grp, busy, onClose, onReload, onBind, onCrea
   const [working, setWorking] = useState(false);
   const [copied, setCopied] = useState(false);
   const reply = task.groupReply ?? "global";
-  // 还没有关联群时，默认停在「自动创建」；已有群时默认不选，主按钮是「进入需求群」
+  // 还没有关联群时，默认停在「自动创建」；已有群时默认不选，主按钮是置灰的「绑定需求群」
   const active: Mode | null = mode ?? (!linked && !busy ? "auto" : null);
 
   useEffect(() => {
@@ -59,8 +59,9 @@ export function GroupDialog({ task, grp, busy, onClose, onReload, onBind, onCrea
     }
   };
 
-  const primary = active === "auto" ? (working ? "正在创建…" : "自动创建并关联") : active === "bind" ? (working ? "正在关联…" : "绑定并关联") : "进入需求群";
-  const disabled = working || (active === "bind" && !ref.trim()) || (!active && (!grp?.link || grp.status === "dissolved"));
+  const primary = active === "auto" ? (working ? "正在创建…" : "自动创建并关联") : active === "bind" ? (working ? "正在关联…" : "绑定并关联") : "绑定需求群";
+  // 已关联群、又没选要换成什么时，主按钮置灰（不可操作）；没关联群时默认是「自动创建并关联」，可以直接点
+  const disabled = working || (active === "bind" && !ref.trim()) || !active;
   const manual = !!task.groupId;
 
   return (

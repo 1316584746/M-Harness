@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { LarkCliChannel, runOnce } from "../../src/channels/lark-cli";
+import { LarkCliChannel, MH_PROFILE, autoStartDecision, isBound, runOnce } from "../../src/channels/lark-cli";
+import { FeishuMirror } from "../../src/channels/mirror";
 import { sendOnlineNotice } from "../../src/channels/online-notice";
 import { loadImage, MAX_IMAGE_BYTES, MAX_IMAGES } from "../../src/models/images";
 import { SessionManager } from "../../src/channels/session";
@@ -15,7 +16,7 @@ import { SKILL_NAME } from "../../src/prompt/skills";
 import { Runtime } from "../../src/runtime";
 import { probeKey } from "../../src/models/probe";
 import { pingModel } from "../../src/models/ping";
-import { dwsCheckUpdate, dwsStatus, installCli, larkCheckUpdate, larkStatus, loginCli, type LoginHooks } from "../../src/tools/cli-status";
+import { dwsCheckUpdate, dwsStatus, installCli, larkCheckUpdate, larkCreateProfile, larkProfileExists, larkStatus, loginCli, type LoginHooks } from "../../src/tools/cli-status";
 import { feishuProjectSpaces, feishuProjectStatus } from "../../src/tools/feishu-project";
 import { PluginMarket } from "./plugins";
 import { AutomationEngine, type RunResult } from "./automation";
@@ -40,6 +41,10 @@ import { applyInstall, applyUninstall, DBX_CATALOG_URL, installedOf, isForeignId
 import { fetchReadme, isRecKind, mcpRawFromReadme, topRepos, type RecRepo } from "./recommend";
 import { importGithubRepo, parseGithubUrl } from "./repo-import";
 import { copySkillFiles, PLATFORM_IDS, PLATFORM_NAME, platformFound, scanLocalFolder, scanPlatform, type LocalScan, type PlatformId } from "./local-import";
+import { ApprovalGate, approvalPrompt, replyBody, replyModeOf, type TaskGroupBinding } from "../../src/channels/group-task";
+import { sweepAttachments } from "../../src/channels/feishu-api";
+import { ProgressText, type StreamHandle } from "../../src/channels/stream";
+import type { IncomingMessage } from "../../src/channels/types";
 import { createChat, fetchWorkItemChat, inspectChat, parseChatRef, type WorkChat } from "../../src/tools/work-chat";
 import { fetchDingtalkTodos, fetchFeishuTodos, sortTodos, createFeishuSubtask, updateFeishuSubtask, type SubtaskCreated, type SubtaskResult, type SubtaskUpdate, type TodoSource } from "../../src/tools/workbench";
 import { addChild, patchChild } from "../shared/todoPatch";
@@ -60,6 +65,9 @@ import type {
   RepoInfo,
   RunOutcome,
   RunRequest,
+  FeishuBotTestResult,
+  TaskGroupBindingDTO,
+  FeishuSetupResult,
   ToolInfo,
   TraceInfo,
   TraceLineDTO,
@@ -68,6 +76,10 @@ import type {
 /** 主进程向渲染进程推送消息的出口（由 Electron 层实现，便于脱离 Electron 测试） */
 export interface Host {
   send(channel: string, payload: unknown): void;
+  /** 界面是否已就绪（没有就不往里派飞书群里的任务消息） */
+  ready?(): boolean;
+  /** 飞书通道运行期间别让电脑睡眠（睡了就收不到群里的消息）；on=false 解除 */
+  keepAwake?(on: boolean): void;
   /** 系统通知（没有就不弹） */
   notify?(title: string, body: string): void;
   /** 秘密落盘加密（系统 safeStorage）；没有就明文存在数据目录里 */
@@ -120,6 +132,12 @@ export class Backend {
   private mcp = new McpManager();
   private configError?: string;
   private runs = new Map<string, AbortController>();
+  /** 飞书需求群里群主的消息：已派给界面里任务的对话、等着它开跑（reqId → 这条消息） */
+  private groupPending = new Map<string, { msg: IncomingMessage; mode: "stream" | "whole"; ack: (ok: boolean) => void; at: number }>();
+  /** 正在跑的群消息（runKey → 这条消息），/stop 和收尾用 */
+  private groupActive = new Map<string, IncomingMessage>();
+  /** 写 / 执行要不要继续：群里问群主，群主回「确认」才继续（群消息和群里的确认共用一个） */
+  private groupGate = new ApprovalGate();
   private pending = new Map<string, Pending>();
   private alwaysAllow = new Set<string>();
   private asks = new Map<string, { runKey: string; questions: AskQuestion[]; resolve: (a: AskAnswer[] | null) => void }>();
@@ -196,6 +214,7 @@ export class Backend {
       traceDir: this.resolve(this.config.traceDir),
       providers,
       larkConfigured: !!this.config.channels.larkCli,
+      larkBound: isBound(this.config.channels.larkCli),
       channel: { running: !!this.lark, logs: this.channelLogs.slice(-200) },
     };
   }
@@ -222,7 +241,14 @@ export class Backend {
     const wasRunning = !!this.lark;
     this.channelStop();
     this.reload();
-    if (wasRunning) this.log("配置已更新，通道已停止，请重新启动。");
+    // 通道默认开启：按新配置重新拉起（改了允许名单、bin 之类都要重启才生效），用户不用再手动启动
+    if (!process.env.HARNESS_NO_SETUP) {
+      if (autoStartDecision(this.config.channels.larkCli).start) this.channelStart();
+      else {
+        if (wasRunning) this.log("配置已更新，飞书通道已停止（没有可用的「允许的用户」）。");
+        void this.ensureChannel();
+      }
+    }
     return { ok: true };
   }
 
@@ -265,12 +291,13 @@ export class Backend {
   }
 
   /** 任务关联仓库（按配置里的名字）当前的改动行数合计 */
-  async repoDiffStat(names: string[]): Promise<{ added: number; deleted: number; files: number }> {
-    const sum = { added: 0, deleted: 0, files: 0 };
+  async repoDiffStat(names: string[]): Promise<{ added: number; deleted: number; files: number; base?: string }> {
+    const sum: { added: number; deleted: number; files: number; base?: string } = { added: 0, deleted: 0, files: 0 };
     for (const n of names) {
       const r = this.config.repos[n];
       if (!r) continue;
-      const d = await diffStat(this.resolve(r.path));
+      const d = await diffStat(this.resolve(r.path), r.branches?.base);
+      sum.base ??= d.base;
       sum.added += d.added;
       sum.deleted += d.deleted;
       sum.files += d.files;
@@ -322,7 +349,8 @@ export class Backend {
   private cliSpec(kind: string): { bin: string; binArgs?: string[] } {
     if (kind === "lark") {
       const c = this.config.channels.larkCli;
-      return { bin: c?.bin ?? "lark-cli", binArgs: c?.binArgs };
+      // 没绑定时也指向 M-Harness 专属配置：登录状态只看自己的机器人，不会把本机别的软件（如 Flowship）的登录当成自己的
+      return { bin: c?.bin ?? "lark-cli", binArgs: isBound(c) ? c?.binArgs : ["--profile", MH_PROFILE] };
     }
     if (kind === "dws") return { bin: this.config.integrations.dingtalk?.bin ?? "dws" };
     const c = this.config.integrations.feishuProject;
@@ -350,6 +378,8 @@ export class Backend {
   /** 一键登录：走官方设备授权 / OAuth，链接由 hooks 交给界面打开；同一个 CLI 同时只允许一个登录流程 */
   private loggingIn = new Set<string>();
   async integrationLogin(kind: string, hooks: LoginHooks) {
+    // 飞书：登录 = 创建（或连接）M-Harness 专属机器人 + 授权 + 启动通道，和 Flowship 一样并在同一个「登录」里
+    if (kind === "lark") return this.feishuSetup(hooks);
     if (this.loggingIn.has(kind)) return { ok: false, message: "已经有一个登录流程在进行" };
     this.loggingIn.add(kind);
     try {
@@ -1339,6 +1369,25 @@ export class Backend {
   async run(req: RunRequest): Promise<RunOutcome> {
     const ac = new AbortController();
     this.runs.set(req.runKey, ac);
+    // 这一轮是群里问的：过程 / 结果发回群里；写 / 执行要不要继续在群里问群主（不是等界面上点）；不向群主「提问」，因为人可能不在电脑前
+    const g = req.groupReq ? this.groupPending.get(req.groupReq) : undefined;
+    if (req.groupReq) this.groupPending.delete(req.groupReq);
+    if (g) this.groupActive.set(req.runKey, g.msg);
+    const stream: StreamHandle | undefined = g && g.mode === "stream" && g.msg.stream ? await g.msg.stream().catch(() => undefined) : undefined;
+    const prog = stream ? new ProgressText() : undefined;
+    const finishGroup = async (r: { reason: string; text?: string; error?: string }) => {
+      if (!g) return;
+      const body = replyBody(r);
+      try {
+        if (stream) await stream.finish(body, r.reason !== "final");
+        else await g.msg.reply(body);
+        if (r.reason === "final") await g.msg.react?.("DONE");
+      } catch (e: any) {
+        this.log(`[飞书] 群里回复失败：${e?.message ?? e}`);
+      }
+    };
+    const mir = req.mirror && typeof req.mirror.question === "string" ? { title: String(req.mirror.title ?? ""), question: req.mirror.question } : undefined;
+    if (mir) this.mirror().question(mir.title, mir.question, Array.isArray(req.images) ? req.images.length : 0);
     try {
       const r = await this.rt.runTask({
         input: req.input,
@@ -1352,10 +1401,16 @@ export class Backend {
         ...(req.toolBudget ? { toolBudget: req.toolBudget } : {}),
         mode: "local",
         signal: ac.signal,
-        approve: ({ tool, args, reason }) => this.askApproval(req.runKey, tool, args, reason),
-        ask: (questions, signal) => this.askUser(req.runKey, questions, signal),
-        emit: (e: HarnessEvent) => this.host.send("run:event", { runKey: req.runKey, event: e }),
+        approve: g ? q => this.groupGate.ask(g.msg.conversationId, g.msg.userId, approvalPrompt(q), t => g.msg.reply(t), g.msg.approvalCard) : ({ tool, args, reason }) => this.askApproval(req.runKey, tool, args, reason),
+        ...(g ? {} : { ask: (questions: any, signal: any) => this.askUser(req.runKey, questions, signal) }),
+        emit: (e: HarnessEvent) => {
+          this.host.send("run:event", { runKey: req.runKey, event: e });
+          const t = prog?.feed(e);
+          if (t) stream?.update(t);
+        },
       });
+      if (mir) this.mirror().answer(mir.title, { reason: r.reason, text: r.text, error: r.error });
+      await finishGroup(r);
       return {
         reason: r.reason,
         text: r.text,
@@ -1368,9 +1423,12 @@ export class Backend {
       };
     } catch (e: any) {
       // 例如 provider 缺 Key：作为一次失败的运行返回，而不是让 IPC 抛异常
+      if (mir) this.mirror().answer(mir.title, { reason: "error", error: e?.message ?? String(e) });
+      await finishGroup({ reason: "error", error: e?.message ?? String(e) });
       return { reason: "error", text: "", error: e?.message ?? String(e), steps: 0, tokens: 0, messages: req.history, traceFile: "", runId: "" };
     } finally {
       this.runs.delete(req.runKey);
+      this.groupActive.delete(req.runKey);
       this.denyPending(req.runKey);
     }
   }
@@ -1459,6 +1517,7 @@ export class Backend {
         approve: a.access === "ask" ? ({ tool, args, reason }) => this.askApproval(key, tool, args, reason) : async () => false,
         emit: () => {},
       });
+      this.mirror().answer(`自动化「${a.name}」`, { reason: r.reason, text: r.text, error: r.error });
       if (r.reason === "final") return { status: "done", text: r.text || "（模型没有返回内容）", traceFile: r.traceFile };
       return { status: r.reason === "aborted" ? "aborted" : "error", text: r.text, error: r.error ?? r.reason, traceFile: r.traceFile };
     } catch (e: any) {
@@ -1589,18 +1648,261 @@ export class Backend {
     if (this.lark) return { ok: true };
     const cfg = this.config.channels.larkCli;
     if (!cfg) return { ok: false, error: "配置里没有 channels.larkCli，请先在「设置」里添加" };
-    const sessions = new SessionManager(this.rt, l => this.log(l));
-    const ch = new LarkCliChannel(cfg, l => this.log(l));
-    ch.start(m => void sessions.handle(m));
+    const sessions = new SessionManager(
+      this.rt,
+      l => this.log(l),
+      {
+        binding: chatId => this.taskGroups.get(chatId),
+        repoPath: name => this.config.repos[name]?.path,
+        defaultReply: () => this.config.channels.larkCli?.groupReply ?? "stream",
+        siblings: chatId => this.groupSiblings.get(chatId) ?? [],
+        dispatch: (b, msg) => this.groupDispatch(b, msg),
+        stop: chatId => this.groupStop(chatId),
+      },
+      this.groupGate,
+    );
+    // 群里发来的图片 / 文件下载到数据目录下（超过 30 天的顺手清掉）
+    const attachDir = path.join(this.home, "feishu-attachments");
+    sweepAttachments(attachDir);
+    const ch = new LarkCliChannel(cfg, l => this.log(l), undefined, { attachDir });
+    ch.start(
+      m => void sessions.handle(m),
+      a => {
+        if (!sessions.handleAction(a)) this.log("[feishu-cli] 收到卡片点击，但对应的确认已经过期或不是你本人点的");
+      },
+    );
     this.lark = ch;
+    this.host.keepAwake?.(true);
     this.log("飞书通道启动中…");
     return { ok: true };
+  }
+
+  /**
+   * 群主在需求群里说话：交给界面里这个任务自己的对话去跑（带任务全部上下文、产物、工具），跑的时候由 run() 把过程 / 结果发回群里。
+   * 界面还没加载好、或界面说接不了（任务被删了等）就返回 false，由会话在主进程里答
+   */
+  private async groupDispatch(b: TaskGroupBinding, msg: IncomingMessage): Promise<boolean> {
+    if (!this.host.ready?.()) return false;
+    // 派出去很久都没开跑的（任务被删了、界面重载过）清掉，免得越攒越多
+    for (const [k, v] of this.groupPending) if (Date.now() - v.at > 6 * 3600_000) this.groupPending.delete(k);
+    const reqId = `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const ok = await new Promise<boolean>(resolve => {
+      const timer = setTimeout(() => resolve(false), 8000);
+      this.groupPending.set(reqId, {
+        msg,
+        mode: replyModeOf(b, this.config.channels.larkCli?.groupReply),
+        at: Date.now(),
+        ack: v => (clearTimeout(timer), resolve(v)),
+      });
+      this.host.send("group:inbound", { reqId, taskId: b.taskId, text: msg.text, ...(msg.images?.length ? { images: msg.images } : {}) });
+    });
+    if (!ok) this.groupPending.delete(reqId);
+    return ok;
+  }
+
+  /** 界面回复：这条群消息接了没有、前面有任务在跑要不要排队 */
+  groupAck(reqId: string, ok: boolean, queued: boolean): boolean {
+    const p = this.groupPending.get(reqId);
+    // 已经超时被主进程自己接手了（或不存在）：返回 false，界面就不要再跑这一条，免得同一条消息跑两遍
+    if (!p) return false;
+    p.ack(ok);
+    if (ok && queued) void p.msg.reply("收到，前面这个任务还在进行，做完就处理你这条。").catch(() => {});
+    return ok;
+  }
+
+  /** 界面接了又没法处理（排队期间任务被删了等）：告诉群里 */
+  groupDrop(reqId: string, why: string): void {
+    const p = this.groupPending.get(reqId);
+    if (!p) return;
+    this.groupPending.delete(reqId);
+    void p.msg.reply(why).catch(() => {});
+  }
+
+  /** 群主在群里发 /stop：中断这个群正在跑的任务 */
+  private groupStop(chatId: string): boolean {
+    let n = 0;
+    for (const [runKey, m] of this.groupActive) {
+      if (m.chatId === chatId) {
+        this.runs.get(runKey)?.abort();
+        n++;
+      }
+    }
+    return n > 0;
+  }
+
+  /** 软件里的对话和结果同步到飞书智能体（配置每次现读，设置里改了立刻生效） */
+  /** 需求群 → 绑定的任务（桌面端同步过来；飞书群里的提问据此按需求回答） */
+  private taskGroups = new Map<string, TaskGroupBinding>();
+  /** 群 → 绑定在它上面的所有任务标题（一个群绑了好几个任务时，只有第一个生效，群里会提示） */
+  private groupSiblings = new Map<string, string[]>();
+  syncTaskGroups(list: TaskGroupBindingDTO[]): void {
+    const m = new Map<string, TaskGroupBinding>();
+    const sib = new Map<string, string[]>();
+    for (const b of list) {
+      if (!b || typeof b.groupId !== "string" || !b.groupId) continue;
+      if (!m.has(b.groupId)) m.set(b.groupId, { ...b, repos: Array.isArray(b.repos) ? b.repos : [] });
+      sib.set(b.groupId, [...(sib.get(b.groupId) ?? []), String(b.title ?? "")]);
+    }
+    this.taskGroups = m;
+    this.groupSiblings = sib;
+  }
+
+  private _mirror?: FeishuMirror;
+  private mirror(): FeishuMirror {
+    return (this._mirror ??= new FeishuMirror(
+      () => this.config.channels.larkCli,
+      cfg => (a, s) => runOnce(cfg, a, s),
+      l => this.log(l),
+    ));
+  }
+
+  /**
+   * 飞书「登录」（设置 → 办公集成）：没有专属机器人就创建，有就直接连接。
+   * M-Harness 只用自己专属的飞书机器人（lark-cli 里名为 m-harness 的独立配置），不借用本机别的软件（如 Flowship）的：
+   * 1. 本机还没有这个专属配置 → 走 lark-cli 官方流程新建机器人（浏览器里确认一次）；已经有就直接用
+   * 2. 用这个配置授权登录（拿到你的飞书账号，机器人才知道把消息发给谁）
+   * 3. 把配置绑定到 M-Harness（binArgs 指向专属配置）、把你加进「允许的用户」，启动通道，并发一条欢迎语
+   */
+  async feishuSetup(hooks: LoginHooks): Promise<FeishuSetupResult> {
+    const bin = this.config.channels.larkCli?.bin ?? "lark-cli";
+    const base = { bin };
+    const spec = { bin, binArgs: ["--profile", MH_PROFILE] };
+    const v = await larkStatus(base);
+    if (!v.installed) return { ok: false, message: v.detail ?? "没有找到 lark-cli，请重装软件或在设置里指定路径" };
+    if (this.loggingIn.has("lark")) return { ok: false, message: "已经有一个飞书登录流程在进行" };
+    this.loggingIn.add("lark");
+    try {
+      const had = await larkProfileExists(base, MH_PROFILE);
+      if (!had) {
+        hooks.onStep?.("正在创建 M-Harness 专属的飞书机器人…");
+        const c = await larkCreateProfile(base, MH_PROFILE, hooks);
+        if (!c.ok) return { ok: false, message: c.message };
+      }
+      let st = await larkStatus(spec);
+      if (!st.openId) {
+        hooks.onStep?.("正在授权登录飞书…");
+        const r = await loginCli("lark", spec, hooks);
+        if (!r.ok) return { ok: false, message: r.message };
+        st = await larkStatus(spec);
+      }
+      if (!st.openId) return { ok: false, message: "没有读到你的飞书账号，请重试一次" };
+      if (!st.botReady) return { ok: false, message: "机器人还没就绪（应用配置没有完成），请重试一次" };
+
+      hooks.onStep?.("正在保存设置并启动飞书通道…");
+      const bound = this.bindLark(st.openId);
+      if (!bound.ok) return { ok: false, message: bound.error };
+      this.channelStart();
+
+      hooks.onStep?.("正在飞书里给你发一条欢迎消息…");
+      const w = await this.mirror().welcome(
+        ["🤖 **你的 M-Harness 智能体已就绪**", "", "- 在这里给我发消息，就能和软件里的模型对话（默认只读）", "- 你在软件里的对话和运行结果，也会同步到这个聊天里，手机上随时能看"].join("\n"),
+      );
+      if (!w.ok) this.log(`欢迎消息没发出去：${w.error}`);
+      return { ok: true, message: had ? "已连接 M-Harness 专属的飞书机器人" : "已创建 M-Harness 专属的飞书机器人并启动", user: st.user, welcomed: w.ok };
+    } finally {
+      this.loggingIn.delete("lark");
+    }
+  }
+
+  /** 机器人前置检查（不发消息）：绑定 / 登录 / 机器人身份 / 通道 / 最近收到消息 */
+  async feishuBotCheck(): Promise<FeishuBotTestResult> {
+    const steps: FeishuBotTestResult["steps"] = [];
+    const push = (name: string, ok: boolean, detail?: string) => void steps.push({ name, ok, detail });
+    const done = (message: string, lastInboundAt?: number): FeishuBotTestResult => ({ ok: steps.every(s => s.ok), steps, message, lastInboundAt });
+    const cfg = this.config.channels.larkCli;
+    if (!cfg || !isBound(cfg)) {
+      push("机器人已绑定", false, "还没有 M-Harness 专属的飞书机器人：点上面飞书（lark-cli）的「登录」会自动创建并绑定");
+      return done("还没有机器人");
+    }
+    const st = await larkStatus(this.cliSpec("lark"));
+    push("飞书连接就绪", st.authenticated && !!st.botReady, st.authenticated ? (st.botReady ? undefined : "机器人应用还没配置完成，重新点一次「登录」") : st.detail ?? "还没登录飞书");
+    if (!(st.authenticated && st.botReady)) return done("飞书还没连通");
+    const at = this.lark?.lastInboundAt;
+    push("消息通道运行中", !!this.lark, this.lark ? undefined : cfg.allowUsers?.length ? "通道没有运行，查看通道运行日志" : "还没有「允许的用户」，通道不会启动");
+    return done(steps.every(s => s.ok) ? "前置检查全部通过" : "有一项没通过", at);
+  }
+
+  /** 机器人打招呼：往你和机器人的聊天里真发一条消息，用来确认「发消息」是通的 */
+  async feishuBotHello(): Promise<{ ok: boolean; message: string }> {
+    const cfg = this.config.channels.larkCli;
+    if (!cfg || !isBound(cfg)) return { ok: false, message: "还没有机器人，先点飞书（lark-cli）的「登录」" };
+    const w = await this.mirror().welcome(["👋 **我是 M-Harness 机器人**", "", "收到这条消息，说明「发消息」是通的。", "再给我回复一句话，就能测试「收消息」。"].join("\n"));
+    return w.ok ? { ok: true, message: "已发送，去飞书里看看机器人的聊天；再回复它一句话可以测试接收" } : { ok: false, message: w.error ?? "发送失败" };
+  }
+
+  /** 把 M-Harness 绑定到专属机器人：binArgs 指向专属配置，并把登录的本人加进「允许的用户」（保存后按新配置自动启动通道） */
+  private bindLark(openId: string): { ok: true } | { ok: false; error: string } {
+    let cfg: any;
+    try {
+      cfg = JSON.parse(this.configText().replace(/^\uFEFF/, ""));
+    } catch {
+      return { ok: false, error: "配置文件读不了，请先修好配置文件" };
+    }
+    cfg.channels ??= {};
+    const lark = (cfg.channels.larkCli ??= { bin: "lark-cli" });
+    // open_id 是跟着机器人（应用）走的：换了机器人，旧名单里的 id 在新机器人这里没用，要重来
+    const keep = isBound(lark) && Array.isArray(lark.allowUsers) ? lark.allowUsers : [];
+    lark.binArgs = ["--profile", MH_PROFILE];
+    lark.allowUsers = Array.from(new Set([...keep, openId]));
+    const saved = this.saveConfig(JSON.stringify(cfg, null, 2));
+    return saved.ok ? { ok: true } : { ok: false, error: saved.error ?? "保存设置失败" };
+  }
+
+  /** 打开软件时自动启动飞书通道（默认开启，没有手动启停的按钮） */
+  autoStartChannel(): void {
+    if (process.env.HARNESS_NO_SETUP) return;
+    void this.ensureChannel();
+  }
+
+  /**
+   * 打开软件时飞书全自动对接（办公平台是飞书时）：
+   * 已绑定 → 直接启动通道；专属机器人已登录但没绑定 → 补绑定；本机还没有专属机器人 → 自动创建（浏览器里确认一次）并绑定、启动、发欢迎语。
+   * 每次启动只尝试一次；失败只记日志，不弹窗打扰，也不影响其它功能。
+   */
+  async autoConnectFeishu(hooks: LoginHooks): Promise<void> {
+    if (process.env.HARNESS_NO_SETUP) return;
+    const active = this.config.office?.active;
+    if (active && active !== "feishu") return;
+    if (this.config.channels.larkCli?.autoStart === false) return;
+    await this.ensureChannel();
+    if (isBound(this.config.channels.larkCli)) return;
+    this.log("本机还没有 M-Harness 专属的飞书机器人，正在自动创建（需要在浏览器里确认一次）…");
+    const r = await this.feishuSetup(hooks);
+    this.log(r.ok ? `飞书自动对接完成：${r.message}` : `飞书自动对接没有完成：${r.message}（可到「设置 → 办公集成」点飞书的「登录」重试）`);
+  }
+
+  private ensuring = false;
+  /**
+   * 通道默认开启：绑定了 M-Harness 专属机器人就自动启动。
+   * - 没绑定：不借用本机别的软件的机器人。专属机器人已经登录好（比如上次创建到一半退出）就补绑定，否则等用户在「设置 → 办公集成」点飞书的「登录」创建
+   * - 绑定了但没设「允许的用户」：用这个机器人登录的本人补上（只有你自己能驱动它）再启动
+   */
+  private async ensureChannel(): Promise<void> {
+    const cfg = this.config.channels.larkCli;
+    if (this.lark || this.ensuring) return;
+    if (cfg?.autoStart === false) return;
+    if (cfg && autoStartDecision(cfg).start) {
+      this.channelStart();
+      return;
+    }
+    this.ensuring = true;
+    try {
+      const st = await larkStatus(this.cliSpec("lark"));
+      if (!st.openId || !st.botReady) {
+        this.log("飞书通道还没启动：还没有 M-Harness 专属的飞书机器人");
+        return;
+      }
+      const b = this.bindLark(st.openId); // 保存后会按新配置自动启动
+      if (b.ok) this.log("已绑定 M-Harness 专属飞书机器人，并把你自己加进「允许的用户」，飞书通道自动启动");
+    } finally {
+      this.ensuring = false;
+    }
   }
 
   /** 打开软件时：用你自己的飞书机器人给你本人发一条「已上线」。没配飞书 / 关了开关 / 发不出去都只记一行日志，不影响使用 */
   async onlineNotice(version: string): Promise<void> {
     const cfg = this.config.channels.larkCli;
-    if (!cfg) return;
+    if (!cfg || !isBound(cfg)) return; // 没绑定自己的机器人时不发，免得借本机别的软件的机器人
     try {
       const r = await sendOnlineNotice(cfg, { version, host: os.hostname(), at: new Date() }, (a, s) => runOnce(cfg, a, s));
       this.log(r.sent ? `已在飞书里提醒你「M-Harness 已上线」（${r.to}）` : `没有发「已上线」提醒：${r.reason}`);
@@ -1613,6 +1915,7 @@ export class Backend {
     if (!this.lark) return;
     this.lark.stop();
     this.lark = undefined;
+    this.host.keepAwake?.(false);
     this.log("飞书通道已停止");
   }
 

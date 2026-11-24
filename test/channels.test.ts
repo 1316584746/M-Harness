@@ -197,7 +197,8 @@ describe("会话管理（指令 / 模型切换 / 上下文）", () => {
     const order: string[] = [];
     const m = (text: string): IncomingMessage => ({ ...mk([]), text, reply: async t => void order.push(t) });
     await Promise.all([sm.handle(m("一")), sm.handle(m("二")), sm.handle(m("三"))]);
-    expect(order).toEqual(["【echo】一", "【echo】二", "【echo】三"]);
+    expect(order.filter(t => t.startsWith("【echo】"))).toEqual(["【echo】一", "【echo】二", "【echo】三"]); // 排队的两条另有「在排队」提示
+    expect(order.filter(t => t.includes("在排队了")).length).toBe(2);
   });
 });
 

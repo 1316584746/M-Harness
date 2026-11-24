@@ -166,6 +166,15 @@ export function QueryView({ conns, init, active, onSaved }: { conns: Connection[
     onSaved(q);
   };
 
+  /** Ctrl+S（Mac 是 Cmd+S）保存查询：已经保存过的直接更新，第一次保存弹出起名；编辑器、输入框里按都行 */
+  const onSaveKey = (e: React.KeyboardEvent) => {
+    if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "s") return;
+    e.preventDefault();
+    if (!sql.trim()) return;
+    if (naming || savedId) doSave(name);
+    else setNaming(true);
+  };
+
   const splitDrag = (e: React.PointerEvent) => {
     e.preventDefault();
     const el = e.currentTarget as HTMLElement;
@@ -184,7 +193,7 @@ export function QueryView({ conns, init, active, onSaved }: { conns: Connection[
   if (!conn) return <div className="dg-empty" hidden={!active}>没有数据库连接</div>;
 
   return (
-    <div className="qv" data-testid="db-query-view" hidden={!active}>
+    <div className="qv" data-testid="db-query-view" hidden={!active} onKeyDown={onSaveKey}>
       <div className="qv-bar">
         <button className="qv-ib run" data-testid="qv-run" disabled={running} onClick={() => void run()} data-tip="运行光标所在的语句，或选中的部分（Ctrl + Enter）" aria-label="运行">
           <Icon name="play" size={14} />
@@ -225,7 +234,7 @@ export function QueryView({ conns, init, active, onSaved }: { conns: Connection[
             </button>
           </span>
         ) : (
-          <button className="qv-ib" data-testid="qv-save" disabled={!sql.trim()} data-tip={savedId ? `更新已保存的查询「${name}」` : "保存到左边「查询」里"} aria-label="保存" onClick={() => (savedId ? doSave(name) : setNaming(true))}>
+          <button className="qv-ib" data-testid="qv-save" disabled={!sql.trim()} data-tip={savedId ? `更新已保存的查询「${name}」（Ctrl + S）` : "保存到左边「查询」里（Ctrl + S）"} aria-label="保存" onClick={() => (savedId ? doSave(name) : setNaming(true))}>
             <Icon name="save" size={15} />
           </button>
         )}

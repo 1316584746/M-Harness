@@ -303,9 +303,40 @@ export async function repoStatus(dir: string): Promise<RepoStatus> {
   return { exists: true, branch, changed: lines.length - 1, ahead, behind, last };
 }
 
-/** 工作区相对 HEAD 的改动行数（已暂存 + 未暂存；二进制文件只算文件数） */
-export async function diffStat(dir: string): Promise<{ added: number; deleted: number; files: number }> {
-  const r = await runGit(["diff", "HEAD", "--numstat"], dir, undefined, 30);
+/**
+ * 这个仓库「这次需求」的改动行数：一律相对基线分支（不管开发分支提没提交）。
+ * - 基线分支：仓库设置里配的 → 远端默认分支 → main / master / develop / dev（本地或 origin 上有的）→ 当前分支的上游
+ * - 起点 = 当前代码和基线分支的分叉点（优先 origin/<基线>，没有再用本地）：已提交 + 未提交 + 没 git add 的新文件都算，
+ *   所以提交了、甚至直接在基线分支上提交了但还没推送，都不会变成 0
+ * - 实在找不到任何基线才退回只看工作区相对 HEAD 的未提交改动
+ * 新建但还没 git add 的文件也算（只算文本文件的行数，二进制只算个数）；二进制文件的改动只算文件数。
+ */
+export async function diffStat(dir: string, configuredBase?: string): Promise<{ added: number; deleted: number; files: number; base?: string }> {
+  let from = "HEAD";
+  let base: string | undefined;
+  const names: string[] = [];
+  const cfg = configuredBase?.trim();
+  if (cfg) names.push(cfg);
+  const detected = await detectBaseBranch(dir, configuredBase).catch(() => undefined);
+  if (detected) names.push(detected);
+  names.push("main", "master", "develop", "dev");
+  for (const name of [...new Set(names)]) {
+    if (!validBranchName(name)) continue;
+    for (const ref of [`origin/${name}`, name]) {
+      const mb = await runGit(["merge-base", "HEAD", ref], dir, undefined, 15);
+      if (mb.code === 0 && mb.out.trim()) {
+        from = mb.out.trim();
+        base = name;
+        break;
+      }
+    }
+    if (base) break;
+  }
+  if (!base) {
+    const mb = await runGit(["merge-base", "HEAD", "@{upstream}"], dir, undefined, 15);
+    if (mb.code === 0 && mb.out.trim()) from = mb.out.trim();
+  }
+  const r = await runGit(["diff", from, "--numstat"], dir, undefined, 30);
   if (r.code !== 0) return { added: 0, deleted: 0, files: 0 };
   let added = 0;
   let deleted = 0;
@@ -317,7 +348,21 @@ export async function diffStat(dir: string): Promise<{ added: number; deleted: n
     added += m[1] === "-" ? 0 : Number(m[1]);
     deleted += m[2] === "-" ? 0 : Number(m[2]);
   }
-  return { added, deleted, files };
+  const un = await runGit(["ls-files", "--others", "--exclude-standard"], dir, undefined, 30);
+  for (const f of un.out.split(/\r?\n/).filter(Boolean).slice(0, 200)) {
+    files++;
+    try {
+      const p = path.join(dir, f);
+      if (fs.statSync(p).size > 1_000_000) continue;
+      const buf = fs.readFileSync(p);
+      if (buf.includes(0)) continue; // 二进制
+      const s = buf.toString("utf8");
+      added += s ? s.split("\n").length - (s.endsWith("\n") ? 1 : 0) : 0;
+    } catch {
+      /* 读不到就只算个数 */
+    }
+  }
+  return { added, deleted, files, ...(base ? { base } : {}) };
 }
 
 /** 克隆仓库；只允许常见的远程地址形式，拒绝 ext:: 等会执行命令的传输方式 */

@@ -48,12 +48,13 @@ export function FontSettings() {
           ))}
         </div>
       </Row>
-      <Row title="预览" desc={isDefault ? undefined : <a className="link" onClick={() => change({ ...DEFAULT_PREFS })}>恢复默认字体与缩放</a>}>
-        <div className="font-preview">
-          <div>读取 package.json，告诉我这个项目用了哪些依赖 Aa 123</div>
-          <code>git log --oneline -n 20</code>
-        </div>
-      </Row>
+      {!isDefault && (
+        <Row title="恢复默认">
+          <button className="btn sm" data-testid="font-reset" onClick={() => change({ ...DEFAULT_PREFS })}>
+            恢复默认字体与缩放
+          </button>
+        </Row>
+      )}
     </>
   );
 }

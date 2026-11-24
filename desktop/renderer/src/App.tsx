@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import type { AppState, ApprovalRequest, TodoItemDTO } from "../../shared/api";
+import type { AppState, ApprovalRequest, GroupInboundDTO, TodoItemDTO } from "../../shared/api";
 import { api } from "./api";
+import { parseCfg } from "./lib/configEdit";
 import { ApprovalModal } from "./components/ApprovalModal";
 import { Dock, type DockItem } from "./components/Dock";
 import { Icon, type IconName } from "./components/Icon";
@@ -17,7 +18,7 @@ import { Defects } from "./pages/Defects";
 import { useDefects } from "./lib/defects";
 import { ENTRY_NAME } from "../../shared/defects";
 import type { DbFocus, DbRunReq } from "../../shared/db";
-import { SOURCE_TEXT, TaskPage } from "./pages/Task";
+import { SOURCE_TEXT, TaskPage, preamble, sigOf } from "./pages/Task";
 import { updateSkip, useUpdate } from "./lib/update";
 import { Assistant } from "./pages/Assistant";
 import { Chat } from "./pages/Chat";
@@ -77,6 +78,69 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
   /** 任务的对话单独存档，不和普通对话列表混在一起 */
   const taskChat = useChatStore(state, "harness.tasks.chat.v1");
   const tasks = useTaskStore();
+  // 绑定了需求群的任务同步给主进程：飞书群里的提问据此按这个需求答、能查关联仓库的代码
+  useEffect(() => {
+    const repoCfg = (parseCfg(state.configText)?.repos ?? {}) as Record<string, { path?: string }>;
+    const list = tasks.tasks
+      .filter(t => t.groupId && !t.done)
+      .map(t => ({
+        groupId: t.groupId as string,
+        taskId: t.id,
+        title: t.title,
+        briefing: preamble(t, t.repos.filter(n => repoCfg[n]?.path).map(n => ({ name: n, path: String(repoCfg[n].path) })), state.larkBound),
+        repos: t.repos.filter(n => repoCfg[n]?.path),
+        reply: t.groupReply ?? "global",
+      }));
+    void api.syncTaskGroups(list).catch(() => {});
+  }, [tasks.tasks, state.configText, state.larkBound]);
+  // 飞书需求群里群主的消息：进这个任务自己的对话（带任务完整的上下文 / 产物 / 工具），和在任务页里发一条一样；
+  // 跑的时候主进程把过程和结果发回群里。任务的对话正在跑就排队，一个任务一次只处理一条
+  const groupQ = useRef<GroupInboundDTO[]>([]);
+  const [groupTick, setGroupTick] = useState(0);
+  const live = useRef({ tasks: tasks.tasks, sessions: taskChat.sessions, send: taskChat.send, cfg: state.configText, lark: !!state.larkBound });
+  live.current = { tasks: tasks.tasks, sessions: taskChat.sessions, send: taskChat.send, cfg: state.configText, lark: !!state.larkBound };
+  useEffect(
+    () =>
+      api.onGroupInbound(m => {
+        const t = live.current.tasks.find(x => x.id === m.taskId);
+        const s = t && live.current.sessions.find(x => x.id === t.sessionId);
+        if (!t || !s) {
+          void api.groupAck(m.reqId, false);
+          return;
+        }
+        const busy = isRunning(s) || groupQ.current.some(q => q.taskId === m.taskId);
+        // 先确认主进程还在等这一条（它等了 8 秒没回音会自己接手，这时界面再跑就是同一条消息跑两遍）
+        void api.groupAck(m.reqId, true, busy).then(accepted => {
+          if (!accepted) return;
+          groupQ.current.push(m);
+          setGroupTick(n => n + 1);
+        });
+      }),
+    [],
+  );
+  useEffect(() => {
+    if (!groupQ.current.length) return;
+    const handled = new Set<string>();
+    for (const m of [...groupQ.current]) {
+      if (handled.has(m.taskId)) continue;
+      handled.add(m.taskId);
+      const t = live.current.tasks.find(x => x.id === m.taskId);
+      const s = t && live.current.sessions.find(x => x.id === t.sessionId);
+      if (!t || !s) {
+        groupQ.current = groupQ.current.filter(q => q !== m);
+        void api.groupDrop(m.reqId, "这个任务已经不在了，这条消息没能处理。");
+        continue;
+      }
+      if (isRunning(s)) continue;
+      groupQ.current = groupQ.current.filter(q => q !== m);
+      const repoCfg = (parseCfg(live.current.cfg)?.repos ?? {}) as Record<string, { path?: string }>;
+      const repos = t.repos.filter(n => repoCfg[n]?.path).map(n => ({ name: n, path: String(repoCfg[n].path) }));
+      const need = s.turns.length === 0 || t.ctxSent !== sigOf(t);
+      const hint = "（这条消息来自飞书需求群：你的回复会原样发回群里，请直接简短、适合在群里读；写文件 / 执行命令会先在群里问群主确认，不要向用户提问等待。）";
+      void live.current.send(`[群消息] ${m.text}`, undefined, `${need ? preamble(t, repos, live.current.lark) + "\n\n" : ""}${m.text}\n\n${hint}`, { sid: s.id, groupReq: m.reqId, ...(m.images?.length ? { images: m.images } : {}) });
+      tasks.update(t.id, { ctxSent: sigOf(t) });
+    }
+  }, [groupTick, taskChat.sessions, tasks.tasks]);
   const [activeTask, setActiveTask] = useState<string | null>(null);
   /** 刚创建 / 刚点到的任务：侧边栏里高亮闪一下 */
   const [flash, setFlash] = useState<{ id: string; n: number } | null>(null);
@@ -178,6 +242,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const update = useUpdate();
   const [updateOpen, setUpdateOpen] = useState(false);
+  // 首次打开、还没绑飞书：引导创建飞书智能体（点过「不再提示」就不弹）
   const hasUpdate = !!update && (update.state === "available" || update.state === "downloading" || update.state === "downloaded") && !(update.state === "available" && updateSkip.isSkipped(update.latest));
 
   // 发现新版本时自动提示一次（同一版本只弹一次；之后靠右上角的按钮）
@@ -277,7 +342,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
       { id: "plugins", testid: "nav-plugins", label: "插件中心", icon: "plug", hue: 268, on: tab === "plugins", onClick: () => setTab("plugins") },
     ],
     [
-      { id: "settings", testid: "nav-settings", label: "设置", icon: "settings", hue: 218, on: tab === "settings", dot: state.channel.running ? ("ok" as const) : undefined, onClick: () => toggle("settings") },
+      { id: "settings", testid: "nav-settings", label: "设置", icon: "settings", hue: 218, on: tab === "settings", onClick: () => toggle("settings") },
     ],
   ];
 

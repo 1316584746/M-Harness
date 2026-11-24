@@ -85,6 +85,33 @@ describe("workbench 拉取", () => {
     expect(r.items.map(i => [i.id, !!i.overdue])).toEqual([["1", false], ["2", true], ["3", true]]);
   });
 
+  it("飞书：工时排期补上不在待办里的需求，待办里没日期的补日期", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wb2-"));
+    const s = path.join(dir, "fake2.cjs");
+    fs.writeFileSync(
+      s,
+      `const a = process.argv.slice(2);
+const row = (id, n) => ({ work_item_info: { work_item_id: id, work_item_name: n }, project_key: "p1" });
+if (a[0] === "user") console.log(JSON.stringify({ name_cn: "我", user_key: "u1" }));
+else if (a[0] === "workhour") console.log(JSON.stringify({ user_workload_list: [{ tasks: [
+  { work_item_info: { id: 1, name: "A" }, time: { start: "2026-11-04 00:00:00", end: "2026-11-05 23:59:59" }, state: { state_name: "技术排期" } },
+  { work_item_info: { id: 9, name: "企微群" }, time: { start: "2026-11-04 00:00:00", end: "2026-11-04 23:59:59" }, state: { state_name: "技术排期" } },
+] }] }));
+else if (a.includes("--action=todo")) console.log(JSON.stringify({ list: [row(1, "A")] }));
+else if (a.includes("--action=overdue")) console.log(JSON.stringify({ list: [] }));
+else process.exit(2);`,
+    );
+    const r = await fetchFeishuTodos({ bin: process.execPath, binArgs: [s] });
+    expect(r.ok).toBe(true);
+    const a = r.items.find(i => i.id === "1")!;
+    const n = r.items.find(i => i.id === "9")!;
+    expect(a.start).toBe(new Date(2026, 10, 4).getTime());
+    expect(n.title).toBe("企微群");
+    expect(n.node).toBe("技术排期");
+    expect(n.projectKey).toBe("p1");
+    expect(n.start).toBe(new Date(2026, 10, 4).getTime());
+  });
+
   it("钉钉：读取未完成待办", async () => {
     const r = await fetchDingtalkTodos({ bin: process.execPath, binArgs: [script] });
     expect(r.items.map(i => i.title)).toEqual(["钉钉任务"]);

@@ -72,8 +72,9 @@ describe("打开软件时的「已上线」提醒", () => {
     expect(parseUserOpenId(status("bad id"))).toBeUndefined();
   });
 
-  it("配置里 notifyOnline 默认是开；提醒里写明怎么关", () => {
+  it("配置里 notifyOnline 默认是开（界面上没有开关，需要关的人在配置文件里写 false）", () => {
     expect(cfg().notifyOnline).not.toBe(false);
-    expect(noticeText(info)).toContain("关掉「打开软件时提醒我」");
+    expect(noticeText(info)).toContain("M-Harness 已上线");
+    expect(noticeText(info)).not.toContain("关掉");
   });
 });

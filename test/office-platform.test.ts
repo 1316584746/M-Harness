@@ -19,7 +19,7 @@ describe("办公集成：同一时间只启用一个平台", () => {
     setPlatform(c, "feishu");
     expect(c.office.active).toBe("feishu");
     expect(c.channels.larkCli).toEqual({ bin: "lark-cli", allowUsers: [] });
-    expect(c.integrations.feishuProject).toEqual({ bin: "meegle", write: false });
+    expect(c.integrations.feishuProject).toEqual({ bin: "meegle", write: true });
     expect(c.integrations.dingtalkProject).toBeUndefined();
   });
 

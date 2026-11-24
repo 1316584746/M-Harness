@@ -346,6 +346,69 @@ export async function whoAmI(cfg: FeishuProjectConfig): Promise<{ name?: string;
   return meCache;
 }
 
+/** workhour list-schedule 的返回 → 需求（只取需求自己的起止，子任务名只在子任务里有） */
+export function workhourItems(json: unknown, projectKey: string): TodoItem[] {
+  const list = isObj(json) && Array.isArray(json.user_workload_list) ? json.user_workload_list : [];
+  const tasks = isObj(list[0]) && Array.isArray(list[0].tasks) ? (list[0].tasks as unknown[]) : [];
+  const day = (v: unknown): number | undefined => {
+    if (typeof v !== "string" || !v.trim()) return undefined;
+    const t = Date.parse(v.trim().replace(" ", "T"));
+    return Number.isFinite(t) && t > 0 ? t : undefined;
+  };
+  const out: TodoItem[] = [];
+  for (const t of tasks) {
+    const info = pick(t, ["work_item_info"]);
+    const id = pick(info, ["id", "work_item_id"]);
+    const name = pick(info, ["name", "work_item_name"]);
+    if (id === undefined || typeof name !== "string" || !name.trim()) continue;
+    const time = pick(t, ["time"]);
+    const state = pick(t, ["state"]);
+    const label = pick(state, ["state_name"]);
+    const start = day(pick(time, ["start"]));
+    const end = day(pick(time, ["end"]));
+    out.push({ id: String(id), title: name.trim(), source: "feishu", start, end, due: end, node: typeof label === "string" ? label : undefined, projectKey });
+  }
+  return out;
+}
+
+/**
+ * 「我的排期」的补充来源：飞书项目的工时排期（workhour list-schedule）。
+ * mywork todo 只列「现在轮到我、还没做完」的节点；排期在时间段里但还没轮到 / 已经做完 / 只在工时里排了的需求不在里面，
+ * 这里按时间窗口把它们补上（已经在待办里的只补缺的日期，不改它的子任务）。读不到不影响待办。
+ */
+async function addWorkhour(cfg: FeishuProjectConfig, items: TodoItem[], userKey: string | undefined, projectKeys: string[]): Promise<TodoItem[]> {
+  if (!userKey || !projectKeys.length) return items;
+  const ymd = (ms: number) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const now = Date.now();
+  const got = await Promise.all(
+    projectKeys.map(async pk => {
+      try {
+        const text = await runMeegle(cfg, ["workhour", "list-schedule", "--project-key", pk, "--user-keys", JSON.stringify([userKey]), "--start-time", ymd(now - 30 * 86_400_000), "--end-time", ymd(now + 60 * 86_400_000), "--work-item-type-keys", '["_all"]'], sig());
+        return workhourItems(parseJson(text), pk);
+      } catch {
+        return [];
+      }
+    }),
+  );
+  const out = items.map(i => ({ ...i }));
+  const byId = new Map(out.map(i => [i.id, i]));
+  for (const w of got.flat()) {
+    const have = byId.get(w.id);
+    if (!have) {
+      out.push(w);
+      byId.set(w.id, w);
+    } else if (have.start === undefined && have.end === undefined && (w.start !== undefined || w.end !== undefined)) {
+      have.start = w.start;
+      have.end = w.end;
+      have.due = w.end;
+    }
+  }
+  return out;
+}
+
 export async function fetchFeishuTodos(cfg: FeishuProjectConfig): Promise<TodoSource> {
   const c = { ...cfg, timeoutSec: 30 };
   const call = (action: string, page: number, scope?: string) => runMeegle(c, ["mywork", "todo", `--action=${action}`, ...(scope ? [`--todo-scope=${scope}`] : []), `--page-num=${page}`, "--format=json"], sig());
@@ -384,7 +447,9 @@ export async function fetchFeishuTodos(cfg: FeishuProjectConfig): Promise<TodoSo
       }
     }),
   );
-  return { enabled: true, ok: true, items: groupFeishu(all.rows, active.rows, overdue.rows, subs, user), user: user.name };
+  const grouped = groupFeishu(all.rows, active.rows, overdue.rows, subs, user);
+  const projects = [...new Set([...all.rows, ...active.rows, ...overdue.rows].map(r => r.projectKey).concat(cfg.defaultSpace?.key).filter((k): k is string => !!k && /^[\w-]+$/.test(k)))];
+  return { enabled: true, ok: true, items: await addWorkhour(c, grouped, user.key, projects), user: user.name };
 }
 
 /** 在本软件里改飞书项目的一个子任务 */

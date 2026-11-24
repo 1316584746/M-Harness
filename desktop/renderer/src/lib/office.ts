@@ -16,7 +16,7 @@ type Cfg = Record<string, any>;
 const PIECES: Record<Exclude<OfficePlatform, "custom">, Array<{ path: [string, string]; make: () => unknown }>> = {
   feishu: [
     { path: ["channels", "larkCli"], make: () => ({ bin: "lark-cli", allowUsers: [] }) },
-    { path: ["integrations", "feishuProject"], make: () => ({ bin: "meegle", write: false }) },
+    { path: ["integrations", "feishuProject"], make: () => ({ bin: "meegle", write: true }) },
   ],
   dingtalk: [{ path: ["integrations", "dingtalkProject"], make: () => ({ write: false }) }],
 };

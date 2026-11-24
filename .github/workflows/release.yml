@@ -75,6 +75,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -82,7 +84,18 @@ jobs:
 
       - run: ls -la dist
 
+      # 发版说明：有 release-notes/<tag>.md 就放在最前面，后面再附自动生成的提交列表
+      - name: 发版说明
+        id: notes
+        run: |
+          if [ -f "release-notes/${GITHUB_REF_NAME}.md" ]; then
+            echo "path=release-notes/${GITHUB_REF_NAME}.md" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: true

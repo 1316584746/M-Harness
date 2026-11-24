@@ -76,10 +76,17 @@ describe("飞书 CLI 通道（lark-cli 长连接）", () => {
     const ch = new LarkCliChannel(cfg(), () => {});
     ch.start(m => void sessions.handle(m));
     try {
-      await wait(() => replies().length > 0);
-      const r = replies()[0];
+      await wait(() => replies().some(x => x.args.includes("reactions") && x.body.includes("DONE")));
+      const all = replies();
+      const react = all.filter(x => x.args.includes("reactions"));
+      const r = all.find(x => x.args.includes("+messages-reply"))!;
       expect(r.args).toEqual(expect.arrayContaining(["im", "+messages-reply", "--message-id", "om_single", "--as", "bot", "--markdown", "-"]));
       expect(r.body).toBe("【echo】请回复 你好 *粗体*");
+      // 收到先点「Get」，做完回复后再点「DONE」
+      expect(react.map(x => JSON.parse(x.body).reaction_type.emoji_type)).toEqual(["Get", "DONE"]);
+      expect(react[0].args).toEqual(expect.arrayContaining(["im", "reactions", "create", "--message-id", "om_single", "--as", "bot", "--data", "-"]));
+      expect(all.indexOf(react[0])).toBeLessThan(all.indexOf(r));
+      expect(all.indexOf(react[1])).toBeGreaterThan(all.indexOf(r));
     } finally {
       ch.stop();
       await llm.close();
@@ -111,6 +118,68 @@ describe("飞书 CLI 通道（lark-cli 长连接）", () => {
     expect(got).toEqual(["重复", "帮我查一下 @张三"]);
   });
 
+  describe("群里其他人 @ 机器人提问（访客）", () => {
+    const botExec = async (args: string[]) => ({ code: 0, stdout: args.includes("api") ? JSON.stringify({ data: { open_id: "ou_bot" } }) : "", stderr: "" });
+    const atBot = (over: any = {}) =>
+      ev({ chat_type: "group", sender_id: "ou_guest", content: "@小助手 这个接口怎么调", mentions: [{ id: "ou_bot", key: "@_user_1", name: "小助手" }], ...over });
+    const run = async (c: LarkCliCfg, events: any[]) => {
+      const got: Array<{ text: string; guest?: boolean }> = [];
+      const ch = new LarkCliChannel(c, () => {}, botExec);
+      for (const e of events) await ch.handleEvent(e, m => got.push({ text: m.text, guest: m.guest }));
+      return got;
+    };
+
+    it("不在「允许的用户」里的群成员 @ 机器人：能提问，标记为访客", async () => {
+      expect(await run(cfg({ allowUsers: ["ou_owner"] }), [atBot()])).toEqual([{ text: "这个接口怎么调", guest: true }]);
+    });
+    it("主人自己不会被标成访客", async () => {
+      expect(await run(cfg({ allowUsers: ["ou_owner"] }), [atBot({ sender_id: "ou_owner" })])).toEqual([{ text: "这个接口怎么调", guest: undefined }]);
+    });
+    it("访客没 @ 机器人 / 只 @ 了别人 → 不响应（即使关了「群聊需要 @」）", async () => {
+      const c = cfg({ allowUsers: ["ou_owner"], groupRequireMention: false });
+      const other = atBot({ content: "@张三 看下", mentions: [{ id: "ou_zhang", key: "@_user_1", name: "张三" }] });
+      expect(await run(c, [atBot({ content: "闲聊", mentions: [] }), other])).toEqual([]);
+    });
+    it("单聊里的陌生人一律忽略", async () => {
+      expect(await run(cfg({ allowUsers: ["ou_owner"] }), [atBot({ chat_type: "p2p" })])).toEqual([]);
+    });
+    it("groupOpen=false：只有允许的用户能在群里用", async () => {
+      expect(await run(cfg({ allowUsers: ["ou_owner"], groupOpen: false }), [atBot()])).toEqual([]);
+    });
+    it("设了 allowChats：只响应这些群", async () => {
+      const c = cfg({ allowUsers: ["ou_owner"], allowChats: ["oc_ok"] });
+      expect(await run(c, [atBot({ chat_id: "oc_other" }), atBot({ chat_id: "oc_ok" })])).toHaveLength(1);
+    });
+    it("访客限流：每人每分钟超过上限就提示、不派发", async () => {
+      const sent: string[][] = [];
+      const ch = new LarkCliChannel(cfg({ allowUsers: ["ou_owner"], guestRatePerMin: 2 }), () => {}, async (args, stdin) => {
+        sent.push([...args, stdin ?? ""]);
+        return botExec(args);
+      });
+      const got: string[] = [];
+      for (let i = 0; i < 3; i++) await ch.handleEvent(atBot(), m => got.push(m.text));
+      expect(got).toHaveLength(2);
+      expect(sent.at(-1)!.at(-1)).toContain("太频繁");
+    });
+  });
+
+  it("访客在群里提问：强制只读（即使 toolPolicy 放开 / 自动批准）", () => {
+    const rt = new Runtime(parseConfig({ channels: { toolPolicy: "inherit", autoApprove: true } as any }));
+    const deny = (g: any) => (g as any).cfg?.policy ?? (g as any).policy;
+    expect(deny(rt.guardFor("channel", true))?.write).toBe("deny");
+    expect(deny(rt.guardFor("channel", false))?.write).not.toBe("deny");
+  });
+
+  it("访客不能用外部 Agent（它不受只读护栏约束）：退到模型类 provider，没有就返回 undefined", () => {
+    const agent = { type: "cli", preset: "codex" } as const;
+    const model = { type: "openai-compat", baseURL: "http://127.0.0.1:1", apiKey: "k", model: "m" } as const;
+    const both = new Runtime(parseConfig({ defaultProvider: "agent", providers: { agent, model } as any }));
+    expect(both.guestProvider("agent")).toBe("model");
+    expect(both.guestProvider("model")).toBe("model");
+    const only = new Runtime(parseConfig({ defaultProvider: "agent", providers: { agent } as any }));
+    expect(only.guestProvider("agent")).toBeUndefined();
+  });
+
   it("非文本消息给出提示而不派发", async () => {
     const sent: string[][] = [];
     const ch = new LarkCliChannel(cfg(), () => {}, async (args, stdin) => {
@@ -118,9 +187,9 @@ describe("飞书 CLI 通道（lark-cli 长连接）", () => {
       return { code: 0, stdout: JSON.stringify({ data: { open_id: "ou_bot" } }), stderr: "" };
     });
     const got: string[] = [];
-    await ch.handleEvent(ev({ message_type: "image", content: "[图片]" }), m => got.push(m.text));
+    await ch.handleEvent(ev({ message_type: "audio", content: "[语音]" }), m => got.push(m.text));
     expect(got).toEqual([]);
-    expect(sent.at(-1)!.at(-1)).toContain("暂时只支持文本");
+    expect(sent.at(-1)!.at(-1)).toContain("暂时只支持文字");
   });
 
   it("回复失败（非 0 退出码）会抛出，由会话层兜底记录", async () => {

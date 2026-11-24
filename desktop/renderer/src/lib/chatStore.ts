@@ -172,8 +172,9 @@ export function useChatStore(state: AppState, storageKey = KEY) {
   );
 
   const send = useCallback(
-    async (text: string, onFinished?: () => void, runInput?: string, opts?: { fresh?: boolean; images?: string[]; step?: StepRef }) => {
-      const cur = ref.current.find(s => s.id === activeId);
+    async (text: string, onFinished?: () => void, runInput?: string, opts?: { fresh?: boolean; images?: string[]; step?: StepRef; sid?: string; groupReq?: string }) => {
+      // sid：指定发到哪个对话（飞书群里的消息要进任务自己的对话，不管当前打开的是哪个）；groupReq：这一轮是群里问的，结果由主进程回复到群里
+      const cur = ref.current.find(s => s.id === (opts?.sid ?? activeId));
       if (isRunning(cur)) return;
       const key = uid();
       const sid = cur?.id ?? uid();
@@ -197,9 +198,11 @@ export function useChatStore(state: AppState, storageKey = KEY) {
         setActiveId(sid);
       }
 
+      // 同步到飞书智能体用的标题：任务里的对话用任务名 + 步骤，普通对话用对话标题
+      const mirrorTitle = [cur?.title && (cur.turns.length > 0 || cur.fixedTitle) ? cur.title : text.replace(/\s+/g, " ").slice(0, 40), opts?.step?.name].filter(Boolean).join(" · ");
       let r: Awaited<ReturnType<typeof api.run>>;
       try {
-        r = await api.run({ runKey: key, input: runInput ?? text, images: opts?.images?.length ? opts.images : undefined, provider: prov, history, workspace: ws, model: mdl, disabledTools: off.length ? off : undefined, sessionKey: sid, ...(opts?.fresh ? { fresh: true } : {}), ...(toolBudgetFor(opts?.step?.id) ? { toolBudget: toolBudgetFor(opts?.step?.id) } : {}) });
+        r = await api.run({ runKey: key, ...(opts?.groupReq ? { groupReq: opts.groupReq } : { mirror: { title: mirrorTitle, question: text } }), input: runInput ?? text, images: opts?.images?.length ? opts.images : undefined, provider: prov, history, workspace: ws, model: mdl, disabledTools: off.length ? off : undefined, sessionKey: sid, ...(opts?.fresh ? { fresh: true } : {}), ...(toolBudgetFor(opts?.step?.id) ? { toolBudget: toolBudgetFor(opts?.step?.id) } : {}) });
       } catch (e: any) {
         // 主进程那边崩了 / 通道断了：不能让这一轮永远停在「运行中」，按失败处理并给出原因
         r = { reason: "error", text: "", error: `和后台的连接出问题了：${e?.message ?? e}`, steps: 0, tokens: 0, messages: history, traceFile: "", runId: "" } as Awaited<ReturnType<typeof api.run>>;

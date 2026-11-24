@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, screen, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerSaveBlocker, protocol, safeStorage, screen, session, shell } from "electron";
 import { getAutostart, setAutostart } from "./autostart";
 import { ensureDirs, migrateData, readPointer, requestDataDir, resolveLayout, writePointer, type DataDirInfo } from "./datadir";
 import fs from "node:fs";
@@ -42,6 +42,8 @@ process.chdir(home);
 
 let win: BrowserWindow | null = null;
 let backend: Backend;
+/** 飞书通道运行期间的「防睡眠」句柄 */
+let blockerId: number | undefined;
 
 function send(channel: string, payload: unknown) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -297,6 +299,11 @@ function registerIpc() {
       onStep: text => send("integration:login-progress", { kind, text }),
     }),
   );
+  ipcMain.handle("tasks:sync-groups", (_e, list) => backend.syncTaskGroups(Array.isArray(list) ? list : []));
+  ipcMain.handle("group:ack", (_e, reqId: string, ok: boolean, queued?: boolean) => backend.groupAck(String(reqId), !!ok, !!queued));
+  ipcMain.handle("group:drop", (_e, reqId: string, why: string) => backend.groupDrop(String(reqId), String(why)));
+  ipcMain.handle("feishu:bot-check", () => backend.feishuBotCheck());
+  ipcMain.handle("feishu:bot-hello", () => backend.feishuBotHello());
   ipcMain.handle("project:feishu-spaces", () => backend.feishuSpaces());
   ipcMain.handle("secret:get", (_e, name: string) => backend.getSecret(String(name)));
   ipcMain.handle("secret:set", (_e, name: string, value: string) => backend.setSecret(String(name), String(value)));
@@ -347,6 +354,15 @@ if (!lock) {
     session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(permission === "local-fonts" || permission === "clipboard-sanitized-write"));
     backend = new Backend(home, {
       send,
+      // 界面已经加载好：飞书群里的消息才能交给界面里任务的对话去处理
+      ready: () => !!win && !win.isDestroyed() && !win.webContents.isLoading(),
+      keepAwake: on => {
+        if (on && blockerId === undefined) blockerId = powerSaveBlocker.start("prevent-app-suspension");
+        else if (!on && blockerId !== undefined) {
+          powerSaveBlocker.stop(blockerId);
+          blockerId = undefined;
+        }
+      },
       notify: notifyDefects,
       // 连接里的密码用系统的加密存储（Windows 的 DPAPI 等）；系统不支持时才退回明文
       secrets: {
@@ -375,7 +391,17 @@ if (!lock) {
     setTimeout(() => backend.prefetchModels(), 1500);
     backend.startAutomation();
     backend.startDefects();
-    void backend.onlineNotice(app.getVersion());
+    // 飞书全自动对接：已绑定就启动通道；没有专属机器人就自动创建（浏览器里确认一次）
+    void backend
+      .autoConnectFeishu({
+        onUrl: (url, userCode) => {
+          if (/^https:\/\//i.test(url)) void shell.openExternal(url);
+          send("integration:login-progress", { kind: "lark", url, userCode });
+        },
+        onStep: text => send("integration:login-progress", { kind: "lark", text }),
+      })
+      .catch(() => {})
+      .then(() => backend.onlineNotice(app.getVersion()));
     app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
   });
   app.on("before-quit", () => backend?.dispose());

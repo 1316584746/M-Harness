@@ -218,8 +218,8 @@ export const ConfigSchema = z.object({
           bin: z.string().default("meegle"),
           binArgs: z.array(z.string()).default([]),
           timeoutSec: z.number().default(60),
-          /** 允许评论、创建/修改工作项、节点流转（需审批；办公通道里仍默认拒绝） */
-          write: z.boolean().default(false),
+          /** 允许评论、创建/修改工作项、节点流转（每次需审批；办公通道里仍默认拒绝）。默认开，界面上没有开关，要关就在配置文件里写 false */
+          write: z.boolean().default(true),
           /** 默认空间：用户没指明空间时，模型默认查这个空间 */
           defaultSpace: z.object({ key: z.string(), name: z.string().optional() }).optional(),
         })
@@ -258,8 +258,20 @@ export const ConfigSchema = z.object({
           /** 只响应这些 open_id（强烈建议配置，否则任何人都能驱动它） */
           allowUsers: z.array(z.string()).default([]),
           allowChats: z.array(z.string()).default([]),
-          /** 每次打开 M-Harness，由你自己的飞书机器人给你本人发一条「已上线」；不写就是开，写 false 关闭 */
+          /** 每次打开 M-Harness，由你自己的飞书机器人给你本人发一条「已上线」；默认开，界面上没有开关，要关就在配置文件里写 false */
           notifyOnline: z.boolean().optional(),
+          /** 打开 M-Harness 时自动启动飞书通道（开始收消息）；不写就是开，写 false 关闭。没设「允许的用户 / 群」时不会自动启动 */
+          autoStart: z.boolean().optional(),
+          /** 群里任何成员 @ 机器人都能提问（访客只读：不能写文件 / 执行命令 / 联网，也不能切模型或清上下文）；不写就是开，写 false 则只有「允许的用户」能在群里用 */
+          groupOpen: z.boolean().optional(),
+          /** 绑定了需求的群里，AI 默认怎么回：stream = 先发「处理中」再边做边改、做完改成答案；whole = 做完整条发送。任务里单独设置了就按任务的；不写就是 stream */
+          groupReply: z.enum(["stream", "whole"]).optional(),
+          /** 群里的进度 / 结果 / 确认用卡片（蓝色处理中 → 绿色完成、带按钮的确认）；不写就是开，写 false 退回纯文字消息 */
+          card: z.boolean().optional(),
+          /** 群里访客提问时，同时限制每人每分钟最多几条，防刷屏；不写就是 6 */
+          guestRatePerMin: z.number().int().min(1).max(60).optional(),
+          /** 软件里的对话和结果同步发到你的飞书智能体（机器人单聊）里；不写就是开，写 false 关闭 */
+          mirror: z.boolean().optional(),
         })
         .optional(),
       feishu: FeishuCfg.optional(),

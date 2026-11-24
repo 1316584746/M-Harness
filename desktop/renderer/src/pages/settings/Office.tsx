@@ -4,9 +4,9 @@ import { api } from "../../api";
 import { Icon } from "../../components/Icon";
 import { useConfigEditor } from "../../lib/configEdit";
 import { activePlatform, setPlatform, type OfficePlatform } from "../../lib/office";
-import { ChannelLogs, DingTalkPlaceholders, FeishuChannel } from "../Channels";
+import { ChannelLogs, DingTalkPlaceholders } from "../Channels";
 import { DingTalkIntegration, FeishuIntegration } from "./Integrations";
-import { DingtalkProjectSection, FeishuProjectSection, Switch } from "./Projects";
+import { DingtalkProjectSection, Switch } from "./Projects";
 
 const INFO: Record<OfficePlatform, { name: string; desc: string; logo: string; icon: "chat" | "plug" | "settings" }> = {
   feishu: { name: "飞书", desc: "飞书消息通道 + 飞书项目管理（lark-cli / meegle）", logo: "feishu", icon: "chat" },
@@ -58,8 +58,6 @@ export function Office({ state, onChanged }: { state: AppState; onChanged: () =>
       {active === "feishu" && (
         <>
           <FeishuIntegration state={state} onChanged={onChanged} />
-          <FeishuChannel state={state} onChanged={onChanged} />
-          <FeishuProjectSection state={state} onChanged={onChanged} />
         </>
       )}
 

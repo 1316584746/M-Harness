@@ -158,7 +158,7 @@ fs.writeFileSync(
   }),
 );
 
-const child = spawn(electron, [root, `--remote-debugging-port=${DEBUG_PORT}`, `--user-data-dir=${path.join(home, ".ud")}`], { cwd: home, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HARNESS_DATA_DIR: home, HARNESS_OFFICIAL_REPO: "none", HARNESS_DBX_CATALOG: `http://127.0.0.1:${LLM_PORT}/dbx-catalog.json`, HARNESS_DBX_DIR: path.join(home, "dbx-data"), HARNESS_PLUGINS_DIR: path.join(home, "plugins-local"), HARNESS_AUTOMATION_TICK_MS: "400", HARNESS_NO_NOTIFY: "1", HARNESS_PLUGIN_SCRIPT_HOST: "1", HARNESS_DBX_OPEN_LOG: path.join(home, "dbx-open.log"), HARNESS_DBX_MCP: process.execPath, HARNESS_GITHUB_API: `http://127.0.0.1:${LLM_PORT}`, HARNESS_GITHUB_WEB: `http://127.0.0.1:${LLM_PORT}`, HARNESS_HOME_BASE: `http://127.0.0.1:${LLM_PORT}` } });
+const child = spawn(electron, [root, `--remote-debugging-port=${DEBUG_PORT}`, `--user-data-dir=${path.join(home, ".ud")}`], { cwd: home, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HARNESS_DATA_DIR: home, HARNESS_OFFICIAL_REPO: "none", HARNESS_DBX_CATALOG: `http://127.0.0.1:${LLM_PORT}/dbx-catalog.json`, HARNESS_DBX_DIR: path.join(home, "dbx-data"), HARNESS_PLUGINS_DIR: path.join(home, "plugins-local"), HARNESS_AUTOMATION_TICK_MS: "400", HARNESS_NO_NOTIFY: "1", HARNESS_NO_SETUP: "1", HARNESS_PLUGIN_SCRIPT_HOST: "1", HARNESS_DBX_OPEN_LOG: path.join(home, "dbx-open.log"), HARNESS_DBX_MCP: process.execPath, HARNESS_GITHUB_API: `http://127.0.0.1:${LLM_PORT}`, HARNESS_GITHUB_WEB: `http://127.0.0.1:${LLM_PORT}`, HARNESS_HOME_BASE: `http://127.0.0.1:${LLM_PORT}` } });
 let log = "";
 child.stdout.on("data", d => (log += d));
 child.stderr.on("data", d => (log += d));
@@ -745,35 +745,20 @@ try {
   ok("办公集成页有 飞书 / 钉钉 / 自定义 三个启用开关，都关着时不展示各平台的设置", await ev(`['feishu','dingtalk','custom'].every(p => !!document.querySelector('[data-testid="office-switch-' + p + '"]')) && !document.querySelector('[data-testid="feishu-channel-card"]') && !document.querySelector('[data-testid="feishu-integration"]') && !document.querySelector('[data-testid="dingtalk-integration"]') && !document.querySelector('[data-testid="office-custom"]')`));
   await shot("8-office-off");
   await ev(click("office-switch-feishu"));
-  await until("document.querySelector('[data-testid=\"feishu-channel-card\"]')");
-  ok("启用飞书：展示飞书集成 / 消息通道 / 项目管理，其它平台的设置不展示", await ev("!!document.querySelector('[data-testid=\"feishu-project-card\"]') && !!document.querySelector('[data-testid=\"feishu-integration\"]') && !document.querySelector('[data-testid=\"dingtalk-integration\"]') && !document.querySelector('[data-testid=\"office-custom\"]')"));
+  await until("document.querySelector('[data-testid=\"feishu-integration\"]')");
+  ok("启用飞书：只展示飞书集成（消息通道 / 项目管理全自动），其它平台的设置不展示", await ev("!!document.querySelector('[data-testid=\"feishu-integration\"]') && !document.querySelector('[data-testid=\"dingtalk-integration\"]') && !document.querySelector('[data-testid=\"office-custom\"]')"));
   ok("启用飞书后写入配置：office.active=feishu，默认建好消息通道和项目管理", (c => c.office?.active === "feishu" && !!c.channels?.larkCli && !!c.integrations?.feishuProject)(cfgNow()));
   ok("飞书卡片显示已启用，其它两个开关是关的", (await officeIsOn("feishu")) && !(await officeIsOn("dingtalk")) && !(await officeIsOn("custom")));
-  ok("消息通道有启动按钮", await ev("!!document.querySelector('[data-testid=\"channel-toggle\"]')"));
+  ok("消息通道默认开启：没有启动 / 停止按钮和开关，页面上不展示消息通道卡片，全自动", await ev(`!document.querySelector('[data-testid="channel-toggle"]') && !document.querySelector('[data-testid="channel-switch"]') && !document.querySelector('[data-testid="feishu-checks"]') && !document.querySelector('[data-testid="feishu-channel-card"]')`));
   await until("(document.querySelector('[data-testid=\"int-lark\"]')?.innerText ?? '').match(/v\\d|未安装|未登录/)");
   ok("有飞书集成卡片（版本 / 登录状态）", await ev("!!document.querySelector('[data-testid=\"feishu-integration\"]') && !!document.querySelector('[data-testid=\"int-check-update\"]')"));
   await shot("8-office");
-  await ev(setVal('[data-testid="allow-input"]', "ou_abc123", "HTMLInputElement", "input"));
-  await ev(click("allow-add"));
-  await until(`document.querySelector('[data-testid="allow-users"] code')`);
-  ok("允许用户写入配置", JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).channels?.larkCli?.allowUsers?.[0] === "ou_abc123");
-  // 打开软件时的「已上线」飞书提醒：默认开，可在这里关
-  ok("有「打开软件时提醒我」开关，默认是开", await ev(`(() => { const s = document.querySelector('[data-testid="channel-notify-online"]'); return !!s && (s.getAttribute('aria-checked') === 'true' || s.classList.contains('on')); })()`));
-  await ev(click("channel-notify-online"));
-  await sleep(600);
-  ok("关掉后写入配置 notifyOnline=false", JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).channels?.larkCli?.notifyOnline === false);
-  await ev(click("channel-notify-online"));
-  await sleep(600);
-  ok("再打开：notifyOnline=true", JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).channels?.larkCli?.notifyOnline === true);
+  ok("「允许的用户」不用手动设置：界面上没有添加 / 移除控件（登录飞书时自动加上本人）", await ev(`!document.querySelector('[data-testid="allow-input"]') && !document.querySelector('[data-testid="allow-me"]') && !document.querySelector('[data-testid="allow-users"]')`));
+  // 打开软件时的「已上线」飞书提醒和对话同步：默认开，界面上不放开关
+  ok("「已上线」提醒、对话同步、群聊 @ 都默认开启，没有单独开关", await ev(`!document.querySelector('[data-testid="channel-notify-online"]') && !document.querySelector('[data-testid="channel-mirror"]') && !document.querySelector('[data-testid="channel-mention"]')`));
   await shot("8-office-channel");
-  // 飞书项目：默认已启用；可单独关 / 开，配置里 integrations.feishuProject 跟着变
-  await until("document.querySelector('[data-testid=\"feishu-project-write\"]')");
-  await ev(click("feishu-project-switch"));
-  await sleep(900);
-  ok("单独关掉飞书项目：配置里没有 feishuProject，飞书平台仍是启用的", (c => !c.integrations?.feishuProject && c.office?.active === "feishu")(cfgNow()));
-  await ev(click("feishu-project-switch"));
-  await until("document.querySelector('[data-testid=\"feishu-project-write\"]')");
-  ok("再打开飞书项目后写入配置", !!cfgNow().integrations?.feishuProject);
+  // 飞书项目：跟着飞书平台默认启用、默认允许写入（每次需确认），界面上没有开关 / CLI 路径 / 允许写入
+  ok("飞书项目默认启用且允许写入，没有单独的开关、CLI 路径、允许写入", await ev(`!document.querySelector('[data-testid="feishu-project-card"]') && !document.querySelector('[data-testid="feishu-project-switch"]') && !document.querySelector('[data-testid="feishu-project-write"]')`) && cfgNow().integrations?.feishuProject?.write === true);
   await shot("8b-office-project");
   // 飞书集成：meegle 版本 / 登录；已登录时可选默认空间（依赖本机真实 meegle 登录态，未登录则跳过）
   await until("(document.querySelector('[data-testid=\"int-meegle\"]')?.innerText ?? '').match(/v\\d|未安装|未登录/)");
@@ -791,7 +776,7 @@ try {
   await ev(click("office-switch-dingtalk"));
   await until("document.querySelector('[data-testid=\"dingtalk-integration\"]')");
   ok("打开钉钉会自动关掉飞书（开关互斥），飞书的设置不再展示", (await officeIsOn("dingtalk")) && !(await officeIsOn("feishu")) && (await ev("!document.querySelector('[data-testid=\"feishu-channel-card\"]') && !document.querySelector('[data-testid=\"feishu-integration\"]')")));
-  ok("配置里只留钉钉项目管理，飞书的通道 / 项目被收进 stash（允许的用户没丢）", (c => c.office?.active === "dingtalk" && !!c.integrations?.dingtalkProject && !c.channels?.larkCli && !c.integrations?.feishuProject && c.office?.stash?.feishu?.["channels.larkCli"]?.allowUsers?.[0] === "ou_abc123")(cfgNow()));
+  ok("配置里只留钉钉项目管理，飞书的通道 / 项目被收进 stash（通道配置没丢）", (c => c.office?.active === "dingtalk" && !!c.integrations?.dingtalkProject && !c.channels?.larkCli && !c.integrations?.feishuProject && !!c.office?.stash?.feishu?.["channels.larkCli"])(cfgNow()));
   ok("办公集成页有钉钉项目管理卡片", await ev("!!document.querySelector('[data-testid=\"dingtalk-project-card\"]')"));
   await until("(document.querySelector('[data-testid=\"int-dws\"]')?.innerText ?? '').match(/v\\d|未安装|未登录/)");
   await shot("8c-office-dingtalk");
@@ -811,8 +796,8 @@ try {
   ok("自定义的名称和使用说明写入配置", (c => c.office?.custom?.name === "公司 OA" && c.office?.custom?.instructions === "请假走 OA，提交前先让我确认")(cfgNow()));
   await shot("8d-office-custom");
   await ev(click("office-switch-feishu"));
-  await until("document.querySelector('[data-testid=\"feishu-channel-card\"]')");
-  ok("切回飞书：通道里允许的用户原样恢复，自定义的内容也还在", (c => c.office?.active === "feishu" && c.channels?.larkCli?.allowUsers?.[0] === "ou_abc123" && c.office?.custom?.name === "公司 OA" && !c.integrations?.dingtalkProject)(cfgNow()));
+  await until("document.querySelector('[data-testid=\"feishu-integration\"]')");
+  ok("切回飞书：飞书通道配置还在，自定义的内容也还在", (c => c.office?.active === "feishu" && c.office?.custom?.name === "公司 OA" && !c.integrations?.dingtalkProject)(cfgNow()));
   await ev(click("office-switch-feishu"));
   await sleep(900);
   ok("把启用的平台关掉：三个都是关的，配置里没有通道和项目管理", !(await officeIsOn("feishu")) && !(await officeIsOn("dingtalk")) && !(await officeIsOn("custom")) && (c => !c.office?.active && !c.channels?.larkCli && !c.integrations?.feishuProject)(cfgNow()));
@@ -1511,7 +1496,7 @@ else { console.error("unknown"); process.exit(2); }`,
   await ev(click("settings-office"));
   await until(`document.querySelector('[data-testid="office-switch-feishu"]')`);
   await officeOn("feishu");
-  await until(`document.querySelector('[data-testid="feishu-project-switch"]')`);
+  await until(`document.querySelector('[data-testid="feishu-integration"]')`);
   ok("启用飞书平台会关掉钉钉项目管理", (c => !!c.feishuProject && !c.dingtalkProject)(JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations));
   await officeOn("dingtalk");
   ok("启用钉钉平台会关掉飞书项目", (c => !!c.dingtalkProject && !c.feishuProject)(JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations));

@@ -1,3 +1,6 @@
+import type { StreamHandle } from "./stream";
+import type { ApprovalCardIO } from "./group-task";
+
 export interface IncomingMessage {
   channel: string;
   /** 会话标识：同一个群 / 单聊共享一份上下文 */
@@ -5,6 +8,20 @@ export interface IncomingMessage {
   userId: string;
   text: string;
   reply: (text: string) => Promise<void>;
+  /** 群 id（oc_ 开头）；单聊也有，是和机器人的单聊会话 id */
+  chatId?: string;
+  /** 来自群聊 */
+  isGroup?: boolean;
+  /** 访客：不在「允许的用户」里、但在群里 @ 了机器人的人。只能只读提问，不能写 / 执行 / 联网，也不能用管理类指令 */
+  guest?: boolean;
+  /** 群里发来的图片（已下载到本机的绝对路径），发给能看图的模型 / Agent */
+  images?: string[];
+  /** 需要主人确认的动作用「带按钮的卡片」发（点按钮或回复文字都行）；不支持卡片的通道不提供 */
+  approvalCard?: ApprovalCardIO;
+  /** 流式回复：先发一条「处理中」，过程中编辑它，做完改成最终答案；不支持（或发不出）时返回 undefined，调用方退回整条发送 */
+  stream?: () => Promise<StreamHandle | undefined>;
+  /** 给这条消息点表情回应：收到 = Get（收到了、正在处理），做完 = DONE；不支持的通道不提供 */
+  react?: (emoji: "Get" | "DONE") => Promise<void>;
 }
 
 export interface RouteRequest {

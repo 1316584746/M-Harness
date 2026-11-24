@@ -31,6 +31,8 @@ export interface TaskRequest {
   history?: Msg[];
   /** local：本机 CLI/桌面，沿用 guard 配置；channel：办公通道，默认只读 */
   mode?: "local" | "channel";
+  /** 通道里的访客（群成员）：强制只读，且不会自动批准任何操作 */
+  guest?: boolean;
   approve?: Approver;
   /** 能向操作人提问（只有桌面端的对话提供）；有它才给模型 ask_user 工具 */
   ask?: Asker;
@@ -98,10 +100,27 @@ export class Runtime {
     return path.resolve(this.config.workspace);
   }
 
-  guardFor(mode: "local" | "channel"): Guardrails {
+  /**
+   * 群里访客该用哪个模型。外部 Agent（Cursor / CLI）用它自己的文件和终端工具，不受本软件「只读」护栏约束，
+   * 所以访客只能用「模型」类 provider（工具走本软件护栏）：首选的是就用它，否则退到第一个可用的模型类 provider；一个都没有返回 undefined。
+   */
+  guestProvider(preferred: string): string | undefined {
+    const isModel = (n: string) => {
+      try {
+        return this.registry.get(n).kind === "model";
+      } catch {
+        return false;
+      }
+    };
+    if (isModel(preferred)) return preferred;
+    return this.registry.names().find(isModel);
+  }
+
+  guardFor(mode: "local" | "channel", guest = false): Guardrails {
     const g = this.config.guard;
     const cfg = { ...g, policy: { ...g.policy } } as ConstructorParameters<typeof Guardrails>[0];
-    if (mode === "channel" && this.config.channels.toolPolicy === "readonly") {
+    // 群里的访客永远只读，不看 toolPolicy / autoApprove 怎么配
+    if (mode === "channel" && (guest || this.config.channels.toolPolicy === "readonly")) {
       cfg!.policy = { ...cfg!.policy, write: "deny", exec: "deny", network: "deny" };
     }
     return new Guardrails(cfg);
@@ -116,7 +135,7 @@ export class Runtime {
     const emit = fanout(trace.emit, req.emit);
 
     const approve =
-      req.approve ?? (mode === "channel" && this.config.channels.autoApprove ? approveAll : denyAll);
+      req.approve ?? (mode === "channel" && !req.guest && this.config.channels.autoApprove ? approveAll : denyAll);
 
     const root = req.workspace ? path.resolve(req.workspace) : this.workspace;
     await this.prepare();
@@ -133,7 +152,7 @@ export class Runtime {
       history: req.history,
       maxSteps: this.config.limits.maxSteps,
       timeoutMs: (provider.kind === "model" ? this.config.limits.timeoutSec : Math.max(this.config.limits.timeoutSec, this.config.limits.agentTimeoutSec)) * 1000,
-      guard: this.guardFor(mode),
+      guard: this.guardFor(mode, req.guest),
       approve,
       ask: req.ask,
       context: new ContextManager({ maxTokens: this.config.limits.contextTokens }, emit),

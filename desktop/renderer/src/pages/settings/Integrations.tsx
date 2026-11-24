@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AppState, IntegrationKind, IntegrationStatusDTO, IntegrationUpdateDTO } from "../../../../shared/api";
+import type { AppState, FeishuBotTestResult, IntegrationKind, IntegrationStatusDTO, IntegrationUpdateDTO } from "../../../../shared/api";
 import { api } from "../../api";
 import { Icon } from "../../components/Icon";
 import { useConfigEditor } from "../../lib/configEdit";
@@ -237,7 +237,82 @@ export function FeishuIntegration({ state, onChanged }: { state: AppState; onCha
       {rows.map(r => (
         <CliRow key={r.kind} def={r} s={status[r.kind]} u={updates[r.kind]} loading={loading} integ={integ} />
       ))}
+      <BotTest disabled={!status.lark?.installed} />
       <DefaultSpace state={state} onChanged={onChanged} meegle={status.meegle} />
+    </div>
+  );
+}
+
+const ago = (ms: number) => {
+  const m = Math.max(0, Math.round((Date.now() - ms) / 60000));
+  return m < 1 ? "刚刚" : m < 60 ? `${m} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`;
+};
+
+/** 机器人前置检查（连接 / 通道 / 收消息）+ 「重试」「机器人打招呼」 */
+function BotTest({ disabled }: { disabled: boolean }) {
+  const [res, setRes] = useState<FeishuBotTestResult>();
+  const [checking, setChecking] = useState(false);
+  const [hello, setHello] = useState<{ ok: boolean; message: string }>();
+  const [saying, setSaying] = useState(false);
+  const stale = typeof api.feishuBotCheck !== "function"; // 只刷新了界面、没重启软件：主进程里还没有这个功能
+  const check = async () => {
+    if (stale) return;
+    setChecking(true);
+    try {
+      setRes(await api.feishuBotCheck());
+    } catch (e: any) {
+      setRes({ ok: false, steps: [{ name: "检查失败", ok: false, detail: e?.message ?? String(e) }], message: "检查失败" });
+    } finally {
+      setChecking(false);
+    }
+  };
+  useEffect(() => {
+    if (!disabled) void check();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled]);
+  const sayHello = async () => {
+    setSaying(true);
+    setHello(undefined);
+    try {
+      setHello(await api.feishuBotHello());
+    } catch (e: any) {
+      setHello({ ok: false, message: e?.message ?? String(e) });
+    } finally {
+      setSaying(false);
+    }
+  };
+  if (disabled) return null;
+  const row = (ok: boolean, title: string, detail?: string, key?: string) => (
+    <div key={key ?? title} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 12px" }}>
+      <span style={{ color: ok ? "var(--ok)" : "var(--bad)", marginTop: 2 }}>
+        <Icon name={ok ? "check" : "x"} size={15} />
+      </span>
+      <div>
+        <div style={{ fontWeight: 600, fontSize: 13 }}>{title}</div>
+        {detail && <div className="int-note" style={{ marginTop: 2 }}>{detail}</div>}
+      </div>
+    </div>
+  );
+  return (
+    <div data-testid="feishu-bot-test" style={{ borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 12 }}>
+      <div style={{ border: "1px solid var(--border)", borderRadius: 8 }} data-testid="feishu-bot-test-result">
+        {stale
+          ? row(false, "需要完全退出并重新打开软件", "这个功能在软件的主进程里，只刷新界面不会生效")
+          : !res
+            ? row(true, "检查中…")
+            : res.ok
+              ? row(true, res.message, `连接 / 通道 / 收消息（${res.lastInboundAt ? `最近收到：${ago(res.lastInboundAt)}` : "还没收到过消息，回复机器人一句话可测试接收"}）`)
+              : res.steps.map(s => row(s.ok, s.name, s.detail))}
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+        <button className="btn sm" data-testid="feishu-bot-retry" disabled={checking || stale} onClick={() => void check()}>
+          {checking ? <span className="spinner" /> : <Icon name="refresh" size={13} />} 重试
+        </button>
+        <button className="btn sm" data-testid="feishu-bot-hello" disabled={saying || stale || !res?.ok} onClick={() => void sayHello()} title="往你和机器人的飞书聊天里发一条消息，确认发送是通的">
+          {saying ? "发送中…" : "机器人打招呼"}
+        </button>
+        {hello && <span className={`int-note ${hello.ok ? "" : "bad"}`} style={{ marginTop: 0 }}>{hello.message}</span>}
+      </div>
     </div>
   );
 }

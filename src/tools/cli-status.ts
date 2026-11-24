@@ -18,6 +18,8 @@ export interface CliStatus {
   user?: string;
   /** 飞书 open_id（lark-cli） */
   openId?: string;
+  /** 飞书机器人（智能体）身份是否就绪（lark-cli） */
+  botReady?: boolean;
   detail?: string;
 }
 
@@ -305,6 +307,44 @@ export function olderThan(a: string, b: string): boolean {
 
 // ───────────── 飞书 lark-cli ─────────────
 
+/** lark-cli 里有没有这个名字的配置（profile）；`lark-cli profile list` 输出 JSON 数组 */
+export async function larkProfileExists(spec: CliSpec, name: string): Promise<boolean> {
+  const r = await runCli({ bin: spec.bin }, ["profile", "list"], 15_000);
+  const s = r.out || r.err;
+  const a = s.indexOf("[");
+  const b = s.lastIndexOf("]");
+  if (a < 0 || b <= a) return false;
+  try {
+    const list = JSON.parse(s.slice(a, b + 1));
+    return Array.isArray(list) && list.some((p: any) => p?.name === name);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 新建一个专属飞书机器人，存成名为 name 的独立配置（`config init --new --name`，追加而不是替换，不动本机已有的配置）。
+ * 会阻塞到用户在浏览器里确认完成；确认链接通过 hooks.onUrl 交给界面。
+ */
+export async function larkCreateProfile(spec: CliSpec, name: string, hooks: LoginHooks): Promise<LoginResult> {
+  let opened = false;
+  const c = await streamCli(
+    { bin: spec.bin },
+    ["config", "init", "--new", "--name", name],
+    t => {
+      const u = !opened && urlsIn(t)[0];
+      if (u) {
+        opened = true;
+        hooks.onUrl(u);
+      }
+    },
+    LOGIN_TIMEOUT,
+  );
+  if (c.spawnError) return { ok: false, message: `无法运行 ${spec.bin}` };
+  if (c.code !== 0 && !(await larkProfileExists(spec, name))) return { ok: false, message: `机器人创建未完成：${c.out.slice(-200) || "已取消或超时"}` };
+  return { ok: true, message: "机器人已创建" };
+}
+
 export async function larkStatus(spec: CliSpec): Promise<CliStatus> {
   const v = await runCli(spec, ["--version"], 10_000);
   if (v.spawnError) return missing(spec, "请确认已安装 lark-cli 并在 PATH 里，或在配置里填对路径。");
@@ -324,6 +364,7 @@ export async function larkStatus(spec: CliSpec): Promise<CliStatus> {
     authenticated: userOk || botOk,
     user: user?.userName || undefined,
     openId: user?.openId || undefined,
+    botReady: botOk,
     detail: userOk || botOk ? (botOk ? undefined : "只有用户身份可用，机器人身份未就绪（长连接通道需要 bot）") : "未登录，请在终端执行 lark-cli auth login",
   };
 }

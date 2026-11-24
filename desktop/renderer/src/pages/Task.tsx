@@ -59,8 +59,8 @@ function range(t: Task): string {
 }
 
 /** 发给 AI 的任务说明：需求、关联仓库、任务上下文 */
-function preamble(t: Task, repos: RepoInfo[]): string {
-  const rs = t.repos.map(n => repos.find(r => r.name === n)).filter((r): r is RepoInfo => !!r);
+export function preamble(t: Task, repos: Array<{ name: string; path: string; status?: { branch?: string } }>, larkBound = false): string {
+  const rs = t.repos.map(n => repos.find(r => r.name === n)).filter((r): r is NonNullable<typeof r> => !!r);
   const lines = [`【任务】${t.title}`, t.source === "manual" ? `来源：${SOURCE_TEXT.manual}（没有关联项目管理里的工作项）` : `来源：${SOURCE_TEXT[t.source]}，工作项 ID ${t.itemId}${t.node ? `，当前节点 ${t.node}` : ""}`];
   const link = taskUrl(t);
   if (link) lines.push(`需求链接：${link}`);
@@ -70,7 +70,7 @@ function preamble(t: Task, repos: RepoInfo[]): string {
   if (t.source === "feishu" && t.projectKey && /^[\w.-]+$/.test(t.projectKey) && /^\d+$/.test(t.itemId)) {
     lines.push(`读飞书的现成命令（直接用，不要先跑 --help）：\n- 工作项详情：meegle workitem get --project-key ${t.projectKey} --work-item-id ${t.itemId} --fields _all --page-size 200\n- 评论：meegle comment list --project-key ${t.projectKey} --work-item-id ${t.itemId}\n- 飞书文档：lark-cli docs +fetch --doc <文档链接> --doc-format markdown（文档很长时先加 --scope outline 看目录）`);
   }
-  if (rs.length) lines.push(`关联仓库（需要看代码 / 改代码时就用这些）：\n${rs.map(r => `- ${r.name}：${r.path}${r.status.branch ? `（当前分支 ${r.status.branch}）` : ""}`).join("\n")}`);
+  if (rs.length) lines.push(`关联仓库（需要看代码 / 改代码时就用这些）：\n${rs.map(r => `- ${r.name}：${r.path}${r.status?.branch ? `（当前分支 ${r.status.branch}）` : ""}`).join("\n")}`);
   if (t.context.trim()) lines.push(`任务上下文：\n${t.context.trim()}`);
   const docs = t.docs ?? [];
   if (docs.length) {
@@ -84,10 +84,18 @@ function preamble(t: Task, repos: RepoInfo[]): string {
         .join("\n")}`,
     );
   }
+  // 绑定了飞书需求群：给现成的群操作命令（走 M-Harness 自己的机器人），Agent 不用先摸索 --help
+  if (larkBound && t.groupId && /^oc_[\w-]+$/.test(t.groupId)) {
+    const g = t.groupId;
+    const L = "lark-cli --profile m-harness";
+    lines.push(
+      `飞书需求群（群 ID ${g}）：群主在群里 @ 机器人说的话会进这个对话，你这一轮的回复会自动发回群里，不用再手动发。只有用户明确要你「通知 / @某人 / 查群里聊了什么」时，才用下面的命令（都用 M-Harness 自己的机器人，别换 profile；直接用，不要先跑 --help）：\n- 往群里发消息：${L} im +messages-send --chat-id ${g} --as bot --text "内容"（@人写成 <at user_id="ou_xxx">名字</at>，open_id 先查群成员）\n- 群成员：${L} im +chat-members-list --chat-id ${g} --as bot\n- 群里最近的消息：${L} im +chat-messages-list --chat-id ${g} --as user --order desc --page-size 20 --no-reactions --format json`,
+    );
+  }
   lines.push("回复里提到需求、文档、网页时，请用 Markdown 链接写成 [标题](完整网址)，界面里才能直接点开；只有标题没有网址的，请在后面补上网址。");
   return lines.join("\n");
 }
-const sigOf = (t: Task) => JSON.stringify([t.repos, t.reqId ?? "", t.context.trim(), (t.docs ?? []).map(d => [d.title, d.content]), ...(t.prdUrl?.trim() ? [t.prdUrl.trim()] : [])]);
+export const sigOf = (t: Task) => JSON.stringify([t.repos, t.groupId ?? "", t.reqId ?? "", t.context.trim(), (t.docs ?? []).map(d => [d.title, d.content]), ...(t.prdUrl?.trim() ? [t.prdUrl.trim()] : [])]);
 
 type Pop = "info" | "ctx" | "mcp" | "repo" | "group" | null;
 
@@ -201,7 +209,7 @@ export function TaskPage({
 
   // ───── 仓库 / 改动 / MCP ─────
   const [repos, setRepos] = useState<RepoInfo[]>([]);
-  const [diff, setDiff] = useState<{ added: number; deleted: number; files: number } | null>(null);
+  const [diff, setDiff] = useState<{ added: number; deleted: number; files: number; base?: string } | null>(null);
   const [mcp, setMcp] = useState<McpServerDTO[] | null>(null);
   const reposKey = task.repos.join("|");
   const loadRepos = useCallback(() => {
@@ -324,7 +332,7 @@ export function TaskPage({
       pics.clear();
     }
     const need = turns.length === 0 || task.ctxSent !== sigOf(task) || !!opts.fresh;
-    const base = need ? `${preamble(task, repos)}\n\n${text}` : undefined;
+    const base = need ? `${preamble(task, repos, state.larkBound)}\n\n${text}` : undefined;
     // extra：只发给 AI、不存进对话记录的附加内容（比如这一步已有的产物）
     const runInput = extra ? `${base ?? text}\n\n${extra}` : base;
     // AI 还在运行：先排队，这一轮结束后自动发
@@ -374,7 +382,7 @@ export function TaskPage({
       digest || "（上次没有留下可用的进度，只能重新开始，但请更快地定位，不要整仓遍历。）",
     ].join("\n");
     const up = r.user.step ? upstreamBlock(rounds, r.user.step.id, r.user.step.name) : undefined;
-    void chat.send(r.user.text, onChanged, `${preamble(task, repos)}\n\n${r.user.text}${up ? `\n\n${up}` : ""}\n\n${note}`, { ...(r.user.images?.length ? { images: r.user.images } : {}), ...(r.user.step ? { step: r.user.step } : {}) });
+    void chat.send(r.user.text, onChanged, `${preamble(task, repos, state.larkBound)}\n\n${r.user.text}${up ? `\n\n${up}` : ""}\n\n${note}`, { ...(r.user.images?.length ? { images: r.user.images } : {}), ...(r.user.step ? { step: r.user.step } : {}) });
     tasks.update(task.id, { ctxSent: sigOf(task) });
   };
   const attach = async (kind: "file" | "folder") => {
@@ -523,7 +531,7 @@ export function TaskPage({
               </div>
             )}
           </div>
-          <span className="act-chip static" data-testid="task-diff" title={diff ? `${diff.files} 个文件有改动（相对 HEAD）` : "关联仓库后统计改动"}>
+          <span className="act-chip static" data-testid="task-diff" title={diff ? `${diff.files} 个文件有改动（${diff.base ? `相对基线分支 ${diff.base}，含已提交的` : "未提交的改动，相对 HEAD"}）` : "关联仓库后统计改动"}>
             <Icon name="edit" size={13} /> 改动
             {diff && diff.files > 0 ? (
               <>

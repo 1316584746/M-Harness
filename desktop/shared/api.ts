@@ -284,6 +284,8 @@ export interface AppState {
   traceDir: string;
   providers: ProviderInfo[];
   larkConfigured: boolean;
+  /** 已绑定 M-Harness 自己的飞书机器人（专属配置），而不是借用本机别的软件的 */
+  larkBound: boolean;
   channel: ChannelStatus;
 }
 
@@ -292,8 +294,42 @@ export interface ChannelStatus {
   logs: string[];
 }
 
+/** 机器人前置检查（不发消息） */
+export interface FeishuBotTestResult {
+  ok: boolean;
+  steps: Array<{ name: string; ok: boolean; detail?: string }>;
+  /** 一句话结论 */
+  message: string;
+  /** 最近一次收到你消息的时间（毫秒时间戳） */
+  lastInboundAt?: number;
+}
+
+/** 一个已绑定需求群的任务：桌面端把任务和群的关系同步给主进程，飞书群里的提问才知道该按哪个需求答 */
+export interface TaskGroupBindingDTO {
+  groupId: string;
+  taskId: string;
+  title: string;
+  /** 发给 AI 的任务说明（需求、链接、关联仓库、上下文） */
+  briefing: string;
+  /** 关联的仓库名，第一个作为工作区 */
+  repos: string[];
+  /** 群里 AI 的回复方式（global = 跟随全局） */
+  reply?: "global" | "stream" | "whole";
+}
+
+export interface FeishuSetupResult {
+  ok: boolean;
+  message: string;
+  /** 你的飞书账号名 */
+  user?: string;
+  /** 欢迎语有没有成功发到飞书里 */
+  welcomed?: boolean;
+}
+
 export interface RunRequest {
   runKey: string;
+  /** 同步到飞书智能体：标题（对话 / 任务名）和你问的原话；不传就不同步 */
+  mirror?: { title: string; question: string };
   input: string;
   provider: string;
   history: Msg[];
@@ -310,6 +346,17 @@ export interface RunRequest {
   fresh?: boolean;
   /** 探索预算（只读步骤用）：外部 Agent 工具调用达到这个数就让它直接写结论 */
   toolBudget?: number;
+  /** 这一轮是飞书需求群里问的（见 GroupInboundDTO.reqId）：过程和结果由主进程发回群里，写 / 执行的确认也在群里问 */
+  groupReq?: string;
+}
+
+/** 飞书需求群里群主的一条消息：交给对应任务的对话处理（带任务完整上下文），结果由主进程回复到群里 */
+export interface GroupInboundDTO {
+  reqId: string;
+  taskId: string;
+  text: string;
+  /** 群里发来的图片（已下载到本机） */
+  images?: string[];
 }
 
 export interface ToolInfo {
@@ -436,7 +483,8 @@ export interface HarnessApi {
   repoSync(name: string): Promise<RepoSyncDTO>;
   /** 「进行开发」开始前：给每个仓库基于基线分支新建 feature-需求名称-日期 分支并切过去 */
   repoStartBranch(names: string[], title: string): Promise<StartBranchDTO[]>;
-  repoDiffStat(names: string[]): Promise<{ added: number; deleted: number; files: number }>;
+  /** 任务关联仓库的改动：在功能分支上是相对基线分支（base），否则是未提交的改动 */
+  repoDiffStat(names: string[]): Promise<{ added: number; deleted: number; files: number; base?: string }>;
   /** 任务的专属文件夹；open=true 时同时在资源管理器里打开，返回路径 */
   taskFolder(id: string, open?: boolean): Promise<string>;
   /** 插件商店数据；refresh=true 时忽略缓存重新拉远程插件源 */
@@ -560,7 +608,15 @@ export interface HarnessApi {
   /** 一键安装 / 升级 CLI（npm install -g <包>@latest），耗时可能几十秒 */
   integrationInstall(kind: IntegrationKind): Promise<{ ok: boolean; output: string; error?: string }>;
   /** 一键登录：自动在浏览器打开授权页，等用户授权完成后返回（最长约 10 分钟） */
+  syncTaskGroups(list: TaskGroupBindingDTO[]): Promise<void>;
+  /** 回复主进程：这条群消息我接了（ok）并且前面有任务在跑所以要排队（queued）；没接（任务不在了等）就 ok=false，主进程自己处理 */
+  groupAck(reqId: string, ok: boolean, queued?: boolean): Promise<boolean>;
+  /** 接了的群消息后来没法处理了（任务被删了等）：让主进程在群里说一声 */
+  groupDrop(reqId: string, why: string): Promise<void>;
+  feishuBotCheck(): Promise<FeishuBotTestResult>;
+  feishuBotHello(): Promise<{ ok: boolean; message: string }>;
   integrationLogin(kind: IntegrationKind): Promise<{ ok: boolean; message: string }>;
+  /** 一键创建飞书智能体：建机器人（首次要在浏览器里确认）→ 登录 → 把你加进允许名单 → 启动通道 → 在飞书里发欢迎语。进度走 onIntegrationLoginProgress（kind=lark） */
   /** 登录过程中的进度：授权链接（可复制）、验证码、阶段提示 */
   onIntegrationLoginProgress(cb: (p: { kind: IntegrationKind; url?: string; userCode?: string; text?: string }) => void): () => void;
   /** 飞书项目里当前账号的空间列表（给「默认空间」下拉用） */
@@ -611,6 +667,7 @@ export interface HarnessApi {
   channelStop(): Promise<void>;
 
   onRunEvent(cb: (runKey: string, event: HarnessEvent) => void): () => void;
+  onGroupInbound(cb: (m: GroupInboundDTO) => void): () => void;
   onApproval(cb: (req: ApprovalRequest) => void): () => void;
   onAsk(cb: (req: AskRequest) => void): () => void;
   onChannelLog(cb: (line: string) => void): () => void;
