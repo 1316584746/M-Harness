@@ -244,7 +244,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
   const [updateOpen, setUpdateOpen] = useState(false);
   // 首次打开、还没绑飞书：引导创建飞书智能体（点过「不再提示」就不弹）
   // 有新版本：标题栏最左边（工具区最外面）出现一个醒目的「新版本」胶囊，所有平台一样；点开是不挡操作的浮层。
-  // 能应用内安装的（Windows 安装版）会同时在后台自动下载、空闲时自动装好重启；其它平台点开后去下载页。
+  // 检测到新版本只提示，不会自己下载：点胶囊看更新说明，用户确认后才开始下载（进度显示在胶囊上），下完空闲时自动安装并重启。
   const updPct = update?.state === "downloading" ? (update.percent ?? 0) : undefined;
   const hasUpdate = !!update && !!update.latest && (update.state === "available" || update.state === "downloading" || update.state === "downloaded" || (update.state === "error" && !!update.latest)) && !(update.state === "available" && updateSkip.isSkipped(update.latest));
   const updLabel = !update
@@ -392,20 +392,19 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
               style={updPct !== undefined ? ({ "--p": `${updPct}%` } as CSSProperties) : undefined}
               title={
                 update!.state === "downloading"
-                  ? `正在下载 v${update!.latest}（${updPct ?? 0}%），下载完会自动安装并重新打开`
+                  ? `正在下载 v${update!.latest}（${updPct ?? 0}%），下载完会自动安装并重新打开；点一下查看`
                   : update!.state === "downloaded"
                     ? update!.canAutoInstall
                       ? `v${update!.latest} 已下载，没有任务在跑时会自动安装并重新打开；点一下立即安装`
                       : `v${update!.latest} 已下载，点一下重启并安装`
                     : update!.state === "error"
                       ? `更新失败：${update!.error ?? ""}，点一下重试`
-                      : `当前 v${update!.current} → v${update!.latest}${update!.canAutoInstall ? "，正在后台下载" : "，点一下查看"}`
+                      : `当前 v${update!.current} → v${update!.latest}，点一下查看更新内容，确认后才会下载`
               }
               onClick={() => {
-                // 不弹窗：能自动装的直接后台处理，点胶囊只是「立刻装 / 重试」；不能自动装的（macOS / Linux）才展开说明
+                // 已下载好的：点一下立即安装；其它（有新版本 / 下载中 / 失败）展开说明，由用户确认后才下载
                 if (update!.state === "downloaded") void api.updateInstall();
-                else if (update!.state === "error" || (update!.state === "available" && update!.canAutoInstall)) void api.updateDownload();
-                else if (update!.state === "available") setUpdateOpen(true);
+                else setUpdateOpen(o => !o);
               }}
             >
               <Icon name="updateUp" size={15} />

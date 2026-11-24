@@ -381,7 +381,6 @@ if (!lock) {
       send: s => send("update:state", s),
       openExternal: url => /^https:\/\/github\.com\//i.test(url) && void shell.openExternal(url),
       canAutoInstall: app.isPackaged && process.platform === "win32",
-      autoApply: true,
       busy: () => backend.busy,
       loadAutoUpdater,
       apiBase: process.env["HARNESS_GITHUB_API"],

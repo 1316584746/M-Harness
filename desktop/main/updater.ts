@@ -38,9 +38,7 @@ export interface UpdaterDeps {
   webBase?: string;
   /** 设置里没填时用的默认仓库；缺省为 DEFAULT_UPDATE_REPO（测试可传 "" 模拟未配置） */
   defaultRepo?: string;
-  /** 发现新版本后自动下载、下载完自动安装并重启（不询问用户）；只在 canAutoInstall 时生效 */
-  autoApply?: boolean;
-  /** 还有任务在跑时先不重启，等空闲再装 */
+  /** 还有任务在跑时先不重启，等空闲再装（用户确认更新、下载完之后） */
   busy?: () => boolean;
   /** 测试用：等空闲时的重试间隔，缺省 30 秒 */
   retryMs?: number;
@@ -129,9 +127,8 @@ export class Updater {
       const common = { checkedAt: Date.now(), error: undefined, percent: undefined };
       if (compareVersions(latest, this.d.version) > 0) {
         const j = await this.releaseNotes(repo, tag);
-        const s = this.set({ ...common, state: "available", latest, notes: String(j?.body ?? "").slice(0, 6000), url: String(j?.html_url ?? `https://github.com/${repo.owner}/${repo.repo}/releases/tag/${encodeURIComponent(tag)}`) });
-        if (this.d.autoApply && this.d.canAutoInstall) void this.autoApply();
-        return s;
+        // 只提示，不自动下载：等用户在界面上确认（download）才开始
+        return this.set({ ...common, state: "available", latest, notes: String(j?.body ?? "").slice(0, 6000), url: String(j?.html_url ?? `https://github.com/${repo.owner}/${repo.repo}/releases/tag/${encodeURIComponent(tag)}`) });
       }
       return this.set({ ...common, state: "none", latest, notes: undefined, url: undefined });
     } catch (e: any) {
@@ -178,12 +175,11 @@ export class Updater {
     }
   }
 
-  /** 自动更新：下载 → 下载完直接安装重启。失败不打扰（不弹页面），下次检查再试 */
-  private async autoApply(): Promise<void> {
+  /** 用户确认更新、下载完成之后：没有任务在跑就直接静默安装并重启，有任务就等它跑完（不再询问） */
+  private async installWhenIdle(): Promise<void> {
     if (this.applying) return;
     this.applying = true;
     try {
-      if (this.st.state === "available") await this.download({ quiet: true });
       if (this.st.state !== "downloaded") return;
       const wait = this.d.retryMs ?? 30_000;
       while (this.d.busy?.()) await new Promise(r => setTimeout(r, wait).unref?.()); // 有任务在跑：等它跑完再重启
@@ -193,13 +189,13 @@ export class Updater {
     }
   }
 
-  /** 应用内下载；做不到（或失败）就打开 Release 页面（quiet：不打开） */
-  async download(opts: { quiet?: boolean } = {}): Promise<UpdateStateDTO> {
+  /** 用户确认更新后调用：应用内下载（下完自动安装）；做不到（或失败）就打开 Release 页面 */
+  async download(): Promise<UpdateStateDTO> {
     const url = this.st.url;
     if (this.st.state !== "available" && this.st.state !== "error") return this.state;
     const repo = parseRepo(this.d.repo() || (this.d.defaultRepo ?? DEFAULT_UPDATE_REPO));
     if (!this.d.canAutoInstall || !repo || !this.d.loadAutoUpdater) {
-      if (url && !opts.quiet) this.d.openExternal(url);
+      if (url) this.d.openExternal(url);
       return this.state;
     }
     try {
@@ -215,10 +211,11 @@ export class Updater {
       await au.checkForUpdates();
       await au.downloadUpdate();
       if ((this.st.state as string) === "downloading") this.set({ state: "downloaded", percent: 100 });
+      void this.installWhenIdle();
     } catch (e: any) {
       // 例如 Release 里没有 latest.yml / 安装包：让用户去页面手动下载
       this.set({ state: "error", error: `自动下载失败：${e?.message ?? e}`, percent: undefined });
-      if (url && !opts.quiet) this.d.openExternal(url);
+      if (url) this.d.openExternal(url);
     }
     return this.state;
   }

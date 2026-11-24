@@ -89,6 +89,7 @@ export function UpdateDialog({ s, onClose }: { s: UpdateStateDTO; onClose: () =>
           </div>
         )}
         {!plain && !downloading && !downloaded && !s.canAutoInstall && !failed && <p className="muted">当前环境不支持应用内安装，点击更新将打开下载页面。</p>}
+        {!plain && !downloading && !downloaded && s.canAutoInstall && !failed && <p className="muted" data-testid="update-confirm-hint">确认后才开始下载；下载完成且没有任务在运行时，会自动安装并重新打开，不会再询问。</p>}
 
         <div className="modal-actions">
           {!plain && !downloading && !downloaded && s.latest && !failed && (
