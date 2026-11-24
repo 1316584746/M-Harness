@@ -132,6 +132,10 @@ export class Backend {
   private mcp = new McpManager();
   private configError?: string;
   private runs = new Map<string, AbortController>();
+  /** 还有对话 / 任务在运行（自动更新要等它们跑完再重启） */
+  get busy(): boolean {
+    return this.runs.size > 0;
+  }
   /** 飞书需求群里群主的消息：已派给界面里任务的对话、等着它开跑（reqId → 这条消息） */
   private groupPending = new Map<string, { msg: IncomingMessage; mode: "stream" | "whole"; ack: (ok: boolean) => void; at: number }>();
   /** 正在跑的群消息（runKey → 这条消息），/stop 和收尾用 */

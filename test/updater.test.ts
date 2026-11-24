@@ -155,6 +155,42 @@ describe("Updater", () => {
     expect(installed).toBe(true);
   });
 
+  it("自动更新：发现新版本自动下载并安装，任务在跑时等空闲再装，不弹页面", async () => {
+    release = { status: 200, body: { tag_name: "v0.2.0", html_url: "https://github.com/acme/app/releases/tag/v0.2.0" } };
+    const handlers: Record<string, (...a: any[]) => void> = {};
+    let installed: unknown[] | undefined;
+    const au: AutoUpdaterLike = {
+      autoDownload: true,
+      autoInstallOnAppQuit: true,
+      setFeedURL() {},
+      checkForUpdates: async () => ({}),
+      downloadUpdate: async () => void handlers["update-downloaded"]?.({}),
+      quitAndInstall: (...a) => (installed = a),
+      on: (e, cb) => void (handlers[e] = cb),
+      removeAllListeners: () => undefined,
+    };
+    let busy = true;
+    const { u, opened } = make({ canAutoInstall: true, autoApply: true, busy: () => busy, retryMs: 20, loadAutoUpdater: async () => au });
+    await u.check();
+    await new Promise(r => setTimeout(r, 80));
+    expect(u.state.state).toBe("downloaded");
+    expect(installed).toBeUndefined(); // 还有任务在跑
+    busy = false;
+    await new Promise(r => setTimeout(r, 80));
+    expect(installed).toEqual([true, true]);
+    expect(opened).toEqual([]);
+  });
+
+  it("自动更新下载失败：不打开网页，不打扰", async () => {
+    release = { status: 200, body: { tag_name: "v0.2.0", html_url: "https://github.com/acme/app/releases/tag/v0.2.0" } };
+    const au = { autoDownload: true, autoInstallOnAppQuit: true, setFeedURL() {}, checkForUpdates: async () => Promise.reject(new Error("latest.yml 404")), downloadUpdate: async () => ({}), quitAndInstall() {}, on() {} } as AutoUpdaterLike;
+    const { u, opened } = make({ canAutoInstall: true, autoApply: true, loadAutoUpdater: async () => au });
+    await u.check();
+    await new Promise(r => setTimeout(r, 50));
+    expect(u.state.state).toBe("error");
+    expect(opened).toEqual([]);
+  });
+
   it("应用内下载失败：报错并打开下载页兜底", async () => {
     release = { status: 200, body: { tag_name: "v0.2.0", html_url: "https://github.com/acme/app/releases/tag/v0.2.0" } };
     const au = { autoDownload: true, autoInstallOnAppQuit: true, setFeedURL() {}, checkForUpdates: async () => Promise.reject(new Error("latest.yml 404")), downloadUpdate: async () => ({}), quitAndInstall() {}, on() {} } as AutoUpdaterLike;

@@ -1,10 +1,14 @@
+import { useEffect } from "react";
 import type { UpdateStateDTO } from "../../../shared/api";
 import { api } from "../api";
 import { updateSkip } from "../lib/update";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
 
-/** 更新弹窗：有新版本时是更新说明 + 立即更新 / 稍后 / 跳过此版本；没有新版本时（点标题栏的云朵按钮进来）显示检查结果 */
+/**
+ * 更新面板：挂在标题栏云朵按钮下面的小浮层，不遮挡页面、不拦截操作（点别处自动收起）。
+ * 有新版本时是更新说明 + 立即更新 / 稍后 / 跳过此版本；没有新版本时显示检查结果；下载进度同时显示在云朵按钮上。
+ */
 export function UpdateDialog({ s, onClose }: { s: UpdateStateDTO; onClose: () => void }) {
   const downloading = s.state === "downloading";
   const downloaded = s.state === "downloaded";
@@ -16,8 +20,24 @@ export function UpdateDialog({ s, onClose }: { s: UpdateStateDTO; onClose: () =>
   const failed = s.state === "error" && !!s.latest;
   const plain = checking || upToDate || unconfigured || checkFailed;
 
+  // 点面板外面就收起（不用遮罩，所以不会挡住别的操作）
+  useEffect(() => {
+    const down = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el?.closest('[data-testid="update-dialog"], [data-testid="nav-update"], [data-testid="update-pill"]')) return;
+      onClose();
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    document.addEventListener("mousedown", down);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("mousedown", down);
+      document.removeEventListener("keydown", key);
+    };
+  }, [onClose]);
+
   return (
-    <div className="modal-mask" data-testid="update-dialog" role="dialog" aria-modal onMouseDown={e => e.target === e.currentTarget && !downloading && onClose()}>
+    <div className="update-pop" data-testid="update-dialog" role="dialog">
       <div className="modal">
         <div className="modal-head">
           <span className="modal-icon update">
@@ -95,11 +115,9 @@ export function UpdateDialog({ s, onClose }: { s: UpdateStateDTO; onClose: () =>
               重新检查
             </button>
           )}
-          {!downloading && (
-            <button className="btn" data-testid="update-later" onClick={onClose}>
-              {plain ? "关闭" : "稍后"}
-            </button>
-          )}
+          <button className="btn" data-testid="update-later" onClick={onClose}>
+            {plain ? "关闭" : downloading ? "收起（后台继续）" : "稍后"}
+          </button>
           {downloaded ? (
             <button className="btn primary" data-testid="update-install" onClick={() => void api.updateInstall()} autoFocus>
               重启并安装

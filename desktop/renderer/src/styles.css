@@ -8624,3 +8624,65 @@ button.ft-row.tool:not(.can):hover{background:none}
 
 .sch-sub.link { background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit; color: var(--text-2); }
 .sch-sub.link:hover { color: var(--text); }
+
+/* 更新面板：挂在标题栏云朵按钮下面的浮层，没有遮罩，不挡别的操作 */
+.update-pop {
+  position: fixed;
+  top: 44px;
+  right: 10px;
+  z-index: 120;
+  width: min(400px, 92vw);
+  animation: fade 0.12s;
+}
+.update-pop .modal {
+  width: 100%;
+  padding: 16px;
+  border-radius: 12px;
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+}
+.tb-btn .tb-pct {
+  margin-left: 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+.tb-btn:has(.tb-pct) {
+  width: auto;
+  padding: 0 8px;
+}
+
+/* 新版本胶囊：标题栏工具区最外面，有新版本才出现；下载时底色按进度填充 */
+.upd-pill {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px;
+  margin-right: 6px;
+  border: 1px solid var(--accent);
+  border-radius: 13px;
+  background: linear-gradient(90deg, var(--accent-soft) var(--p, 100%), transparent var(--p, 100%));
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.upd-pill:hover {
+  background-color: var(--accent-soft);
+}
+.upd-pill.available {
+  animation: upd-pulse 2.4s ease-in-out infinite;
+}
+.upd-pill.error {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+@keyframes upd-pulse {
+  50% {
+    box-shadow: 0 0 0 4px var(--accent-soft);
+  }
+}
+

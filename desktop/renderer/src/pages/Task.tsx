@@ -17,6 +17,7 @@ import { AskForm } from "../components/AskCard";
 import { QueuedList } from "../components/QueuedList";
 import { ImageStrip, MsgImages } from "../components/ImageStrip";
 import { useImageAttach } from "../lib/useImageAttach";
+import { useStickBottom } from "../lib/useStickBottom";
 import { isRunning, type ChatStore, type StepRef, type Turn } from "../lib/chatStore";
 import { blockedSteps, branchNote, visibleSteps } from "../lib/actionSteps";
 import { parseCfg } from "../lib/configEdit";
@@ -392,6 +393,7 @@ export function TaskPage({
   };
 
   const flow = useRef<HTMLDivElement>(null);
+  useStickBottom(flow);
   const last = turns.at(-1);
   useEffect(() => {
     flow.current?.scrollTo({ top: flow.current.scrollHeight });
@@ -743,7 +745,7 @@ export function TaskPage({
                 ref={area}
                 data-testid="task-input"
                 rows={2}
-                style={{ height: taH }}
+                style={{ height: taH, maxHeight: "45vh" }}
                 value={input}
                 placeholder={running ? "运行中…回车排队，这一轮结束后自动发送；也可点右下角停止" : "想改、想问、拖入文件引用路径，也可以直接粘贴图片（Enter 发送，Shift+Enter 换行）"}
                 onChange={e => setInput(e.target.value)}

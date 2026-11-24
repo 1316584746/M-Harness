@@ -17,6 +17,10 @@ import { isImageFile, useImageAttach } from "../lib/useImageAttach";
 import { RunSteps, ToolCard } from "../components/Steps";
 import { isRunning, type ChatStore, type Turn } from "../lib/chatStore";
 import { buildRunView, fmtMs } from "../lib/steps";
+import { useStickBottom } from "../lib/useStickBottom";
+
+/** 输入框最高多少：不超过 420，也不超过窗口高度的 45%（窗口矮时给上面的对话留出地方） */
+const maxInputH = () => Math.max(96, Math.min(420, Math.round(window.innerHeight * 0.45)));
 
 const SUGGESTIONS = [
   { icon: "list", text: "列出工作区根目录的文件，并简要说明每个的用途" },
@@ -30,6 +34,8 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
   const [input, setInput] = useState("");
   const [minH, setMinH] = useState(96);
   const bottom = useRef<HTMLDivElement>(null);
+  const thread = useRef<HTMLDivElement>(null);
+  useStickBottom(thread);
   const area = useRef<HTMLTextAreaElement>(null);
   const pics = useImageAttach();
 
@@ -70,7 +76,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
     const el = area.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = Math.min(Math.max(el.scrollHeight, minH), 420) + "px";
+    el.style.height = Math.min(Math.max(el.scrollHeight, minH), maxInputH()) + "px";
   }, [input, minH]);
 
   // 每个对话各自保留还没发出去的输入：切走时存起来，切回来时还原（新对话是空的）
@@ -134,7 +140,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
     e.preventDefault();
     const y0 = e.clientY;
     const h0 = area.current?.offsetHeight ?? minH;
-    const move = (ev: MouseEvent) => setMinH(Math.max(60, Math.min(420, h0 + (y0 - ev.clientY))));
+    const move = (ev: MouseEvent) => setMinH(Math.max(60, Math.min(maxInputH(), h0 + (y0 - ev.clientY))));
     const up = () => {
       document.removeEventListener("mousemove", move);
       document.removeEventListener("mouseup", up);
@@ -161,7 +167,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
         )}
       </header>
 
-      <div className="thread">
+      <div className="thread" ref={thread}>
         <div className="thread-inner">
           {!turns.length ? (
             <div className="hero">

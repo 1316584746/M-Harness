@@ -38,6 +38,12 @@ export interface UpdaterDeps {
   webBase?: string;
   /** 设置里没填时用的默认仓库；缺省为 DEFAULT_UPDATE_REPO（测试可传 "" 模拟未配置） */
   defaultRepo?: string;
+  /** 发现新版本后自动下载、下载完自动安装并重启（不询问用户）；只在 canAutoInstall 时生效 */
+  autoApply?: boolean;
+  /** 还有任务在跑时先不重启，等空闲再装 */
+  busy?: () => boolean;
+  /** 测试用：等空闲时的重试间隔，缺省 30 秒 */
+  retryMs?: number;
 }
 
 /** 接受 owner/repo、https://github.com/owner/repo(.git)、git@github.com:owner/repo.git */
@@ -70,6 +76,7 @@ export class Updater {
   private au?: AutoUpdaterLike;
   private timer?: NodeJS.Timeout;
   private checking?: Promise<UpdateStateDTO>;
+  private applying = false;
 
   constructor(private d: UpdaterDeps) {
     this.st = { state: "idle", current: d.version, canAutoInstall: d.canAutoInstall };
@@ -122,7 +129,9 @@ export class Updater {
       const common = { checkedAt: Date.now(), error: undefined, percent: undefined };
       if (compareVersions(latest, this.d.version) > 0) {
         const j = await this.releaseNotes(repo, tag);
-        return this.set({ ...common, state: "available", latest, notes: String(j?.body ?? "").slice(0, 6000), url: String(j?.html_url ?? `https://github.com/${repo.owner}/${repo.repo}/releases/tag/${encodeURIComponent(tag)}`) });
+        const s = this.set({ ...common, state: "available", latest, notes: String(j?.body ?? "").slice(0, 6000), url: String(j?.html_url ?? `https://github.com/${repo.owner}/${repo.repo}/releases/tag/${encodeURIComponent(tag)}`) });
+        if (this.d.autoApply && this.d.canAutoInstall) void this.autoApply();
+        return s;
       }
       return this.set({ ...common, state: "none", latest, notes: undefined, url: undefined });
     } catch (e: any) {
@@ -169,13 +178,28 @@ export class Updater {
     }
   }
 
-  /** 应用内下载；做不到（或失败）就打开 Release 页面 */
-  async download(): Promise<UpdateStateDTO> {
+  /** 自动更新：下载 → 下载完直接安装重启。失败不打扰（不弹页面），下次检查再试 */
+  private async autoApply(): Promise<void> {
+    if (this.applying) return;
+    this.applying = true;
+    try {
+      if (this.st.state === "available") await this.download({ quiet: true });
+      if (this.st.state !== "downloaded") return;
+      const wait = this.d.retryMs ?? 30_000;
+      while (this.d.busy?.()) await new Promise(r => setTimeout(r, wait).unref?.()); // 有任务在跑：等它跑完再重启
+      this.install(true);
+    } finally {
+      this.applying = false;
+    }
+  }
+
+  /** 应用内下载；做不到（或失败）就打开 Release 页面（quiet：不打开） */
+  async download(opts: { quiet?: boolean } = {}): Promise<UpdateStateDTO> {
     const url = this.st.url;
     if (this.st.state !== "available" && this.st.state !== "error") return this.state;
     const repo = parseRepo(this.d.repo() || (this.d.defaultRepo ?? DEFAULT_UPDATE_REPO));
     if (!this.d.canAutoInstall || !repo || !this.d.loadAutoUpdater) {
-      if (url) this.d.openExternal(url);
+      if (url && !opts.quiet) this.d.openExternal(url);
       return this.state;
     }
     try {
@@ -194,13 +218,13 @@ export class Updater {
     } catch (e: any) {
       // 例如 Release 里没有 latest.yml / 安装包：让用户去页面手动下载
       this.set({ state: "error", error: `自动下载失败：${e?.message ?? e}`, percent: undefined });
-      if (url) this.d.openExternal(url);
+      if (url && !opts.quiet) this.d.openExternal(url);
     }
     return this.state;
   }
 
-  /** 退出并安装已下载的更新 */
-  install(): void {
-    if (this.st.state === "downloaded") this.au?.quitAndInstall(false, true);
+  /** 退出并安装已下载的更新（silent：不显示安装界面） */
+  install(silent = false): void {
+    if (this.st.state === "downloaded") this.au?.quitAndInstall(silent, true);
   }
 }

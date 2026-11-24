@@ -243,15 +243,21 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
   const update = useUpdate();
   const [updateOpen, setUpdateOpen] = useState(false);
   // 首次打开、还没绑飞书：引导创建飞书智能体（点过「不再提示」就不弹）
-  const hasUpdate = !!update && (update.state === "available" || update.state === "downloading" || update.state === "downloaded") && !(update.state === "available" && updateSkip.isSkipped(update.latest));
-
-  // 发现新版本时自动提示一次（同一版本只弹一次；之后靠右上角的按钮）
-  useEffect(() => {
-    if (update?.state === "available" && update.latest && !updateSkip.isSkipped(update.latest) && !updateSkip.wasPrompted(update.latest)) {
-      updateSkip.markPrompted(update.latest);
-      setUpdateOpen(true);
-    }
-  }, [update?.state, update?.latest]);
+  // 有新版本：标题栏最左边（工具区最外面）出现一个醒目的「新版本」胶囊，所有平台一样；点开是不挡操作的浮层。
+  // 能应用内安装的（Windows 安装版）会同时在后台自动下载、空闲时自动装好重启；其它平台点开后去下载页。
+  const updPct = update?.state === "downloading" ? (update.percent ?? 0) : undefined;
+  const hasUpdate = !!update && !!update.latest && (update.state === "available" || update.state === "downloading" || update.state === "downloaded" || (update.state === "error" && !!update.latest)) && !(update.state === "available" && updateSkip.isSkipped(update.latest));
+  const updLabel = !update
+    ? ""
+    : update.state === "downloading"
+      ? `正在更新 ${updPct ?? 0}%`
+      : update.state === "downloaded"
+        ? update.canAutoInstall
+          ? "已下载 · 空闲时自动安装"
+          : "重启更新"
+        : update.state === "error"
+          ? "更新失败 · 查看"
+          : `新版本 v${update.latest}`;
 
   useEffect(() => api.onApproval(r => setApprovals(a => [...a, r])), []);
   useEffect(() => {
@@ -379,6 +385,33 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
         <span className="spacer" />
         {/* 小工具：助手 / 缺陷 / 自动化 / 回放 / 主题（底部状态栏已取消，放回标题栏右侧） */}
         <div className="titlebar-tools">
+          {hasUpdate && (
+            <button
+              className={`upd-pill ${update!.state}`}
+              data-testid="update-pill"
+              style={updPct !== undefined ? ({ "--p": `${updPct}%` } as CSSProperties) : undefined}
+              title={`当前 v${update!.current} → v${update!.latest}，点击查看`}
+              onClick={() => setUpdateOpen(true)}
+            >
+              <Icon name="cloud" size={14} />
+              <span>{updLabel}</span>
+            </button>
+          )}
+          <button
+            className={`tb-btn ${hasUpdate ? "update" : ""} ${updateOpen ? "on" : ""}`}
+            data-testid="nav-update"
+            data-has-update={hasUpdate ? "1" : "0"}
+            title={hasUpdate ? `发现新版本 v${update!.latest}，点击查看` : "检查更新"}
+            aria-label={hasUpdate ? `发现新版本 v${update!.latest}` : "检查更新"}
+            onClick={() => {
+              // 有新版本直接看；没有就顺手检查一次，弹窗里显示结果
+              if (!hasUpdate && update?.state !== "checking" && update?.state !== "available" && update?.state !== "downloaded") void api.updateCheck();
+              setUpdateOpen(true);
+            }}
+          >
+            <Icon name="cloud" size={16} />
+            {hasUpdate && <span className="tb-dot update" />}
+          </button>
           <button className={`tb-btn ${assistantOpen ? "on" : ""}`} data-testid="nav-assistant" title="AI 助手 (Ctrl + Alt + I)" aria-label="AI 助手" onClick={() => setAssistantOpen(o => !o)}>
             <Icon name="bot" size={16} />
             {assistantRunning && !assistantOpen && <span className="tb-dot" />}
@@ -404,21 +437,6 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
               <Icon name={t.icon} size={16} />
             </button>
           ))}
-          <button
-            className={`tb-btn ${hasUpdate ? "update" : ""} ${updateOpen ? "on" : ""}`}
-            data-testid="nav-update"
-            data-has-update={hasUpdate ? "1" : "0"}
-            title={hasUpdate ? `发现新版本 v${update!.latest}，点击查看` : "检查更新"}
-            aria-label={hasUpdate ? `发现新版本 v${update!.latest}` : "检查更新"}
-            onClick={() => {
-              // 有新版本直接看；没有就顺手检查一次，弹窗里显示结果
-              if (!hasUpdate && update?.state !== "checking" && update?.state !== "available" && update?.state !== "downloaded") void api.updateCheck();
-              setUpdateOpen(true);
-            }}
-          >
-            <Icon name="cloud" size={16} />
-            {hasUpdate && <span className="tb-dot update" />}
-          </button>
           <button className="tb-btn" data-testid="theme-toggle" title={theme === "dark" ? "切换到浅色" : "切换到深色"} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             <Icon name={theme === "dark" ? "moon" : "sun"} size={16} />
           </button>
