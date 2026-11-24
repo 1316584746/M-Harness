@@ -81,7 +81,7 @@ export function LiveLog({ view, startedAt, lastAt }: { view: RunView; startedAt?
 }
 
 /** 失败 / 中断：说清楚出了什么事、怎么办，并附上失败前最后的输出 */
-export function RunFailure({ text, aborted, log }: { text: string; aborted?: boolean; log?: LogEntry[] }) {
+export function RunFailure({ text, aborted, log, onRetry }: { text: string; aborted?: boolean; log?: LogEntry[]; onRetry?: () => void }) {
   const ex = explainRunError(text, aborted);
   const lastLog = (log ?? []).slice(-6);
   return (
@@ -102,6 +102,14 @@ export function RunFailure({ text, aborted, log }: { text: string; aborted?: boo
         <div className="runfail-last">
           <div className="runfail-sub">失败前最后的输出</div>
           <LogList log={lastLog} />
+        </div>
+      )}
+      {onRetry && (
+        <div className="runfail-actions">
+          <button type="button" className="btn sm primary" data-testid="run-retry" onClick={onRetry} title="沿用刚才的问题，并带上已经做过的进度，接着往下做">
+            <Icon name="refresh" size={13} /> 继续
+          </button>
+          <span className="muted">沿用刚才的问题，带上已读过的文件和进度接着做</span>
         </div>
       )}
       {ex.raw && !ex.userAborted && (

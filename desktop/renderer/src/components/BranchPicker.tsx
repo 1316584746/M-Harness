@@ -8,7 +8,7 @@ import { Icon } from "./Icon";
  * 不是仓库就不显示；切换失败（比如未提交的改动和目标分支冲突）把 git 的原因原样显示出来，不会强切。
  * refreshKey 变化时重新读（一轮对话结束后，AI 可能自己切过分支）。
  */
-export function BranchPicker({ dir, disabled, refreshKey }: { dir: string; disabled?: boolean; refreshKey?: unknown }) {
+export function BranchPicker({ dir, disabled, refreshKey, compact, down, initial, onSwitched }: { dir: string; disabled?: boolean; refreshKey?: unknown; /** compact 时，信息读到之前先显示的分支名 */ initial?: string; /** 做成小标签的样子（放在仓库标签里） */ compact?: boolean; /** 菜单向下展开（放在页面上方时用） */ down?: boolean; /** 切换成功后通知外面刷新 */ onSwitched?: (branch: string) => void }) {
   const [info, setInfo] = useState<BranchInfoDTO | null>(null);
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -21,8 +21,8 @@ export function BranchPicker({ dir, disabled, refreshKey }: { dir: string; disab
     setInfo(r);
   }, [dir]);
 
+  useEffect(() => setInfo(null), [dir]); // 换了仓库才清空；只是刷新时保留旧信息，免得标签闪一下
   useEffect(() => {
-    setInfo(null);
     setOpen(false);
     setErr("");
     void load();
@@ -41,6 +41,8 @@ export function BranchPicker({ dir, disabled, refreshKey }: { dir: string; disab
     };
   }, [open, load]);
 
+  // 还没读到信息时，小标签先用外面给的分支名占位，免得标签里的分支名晚一拍才冒出来
+  if (!info && compact && initial) return <span className="repo-branch-btn static" data-testid="task-repo-branch"><span>{initial}</span></span>;
   if (!info?.isRepo) return null;
 
   const pick = async (b: string) => {
@@ -53,6 +55,7 @@ export function BranchPicker({ dir, disabled, refreshKey }: { dir: string; disab
     setOpen(false);
     setQ("");
     await load();
+    onSwitched?.(b);
   };
 
   const k = q.trim().toLowerCase();
@@ -64,19 +67,19 @@ export function BranchPicker({ dir, disabled, refreshKey }: { dir: string; disab
     <div className="picker" ref={box}>
       <button
         type="button"
-        className={`chipbtn ${open ? "on" : ""}`}
-        data-testid="branch-trigger"
+        className={compact ? `repo-branch-btn${open ? " on" : ""}` : `chipbtn ${open ? "on" : ""}`}
+        data-testid={compact ? "task-repo-branch" : "branch-trigger"}
         disabled={disabled || busy}
         onClick={() => (setOpen(!open), setErr(""))}
         title={`当前分支${info.dirty ? "（有未提交的改动）" : ""}；点开切换分支`}
       >
-        <Icon name="branch" size={14} />
+        {!compact && <Icon name="branch" size={14} />}
         <span>{info.current ?? "游离 HEAD"}</span>
-        {info.dirty && <span className="branch-dirty" title="有未提交的改动" />}
-        <Icon name="down" size={13} />
+        {info.dirty && !compact && <span className="branch-dirty" title="有未提交的改动" />}
+        <Icon name="down" size={compact ? 10 : 13} />
       </button>
       {open && (
-        <div className="menu branch-menu" data-testid="branch-menu">
+        <div className={`menu branch-menu${down ? " down" : ""}`} data-testid="branch-menu">
           <input className="input branch-search" autoFocus placeholder="搜索分支…" value={q} onChange={e => setQ(e.target.value)} data-testid="branch-search" />
           {err && (
             <div className="inline-warn branch-err" data-testid="branch-error">

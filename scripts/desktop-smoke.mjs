@@ -93,7 +93,13 @@ const llm = http.createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     return res.end(JSON.stringify({ id: "pkg/hello", name: "包里的动作", kind: "action", description: "从链接安装的插件包", version: "0.1.0", install: { prompt: "打招呼：{{input}}" } }));
   }
-  if (req.method === "GET" && req.url === "/repos/acme/app/releases/latest") {
+  // 假的 GitHub 网页：/releases/latest 跳转到 /releases/tag/<tag>（版本号靠它读，不占 API 额度）
+  if (req.method === "GET" && req.url === "/acme/app/releases/latest") {
+    res.statusCode = 302;
+    res.setHeader("location", "/acme/app/releases/tag/v9.9.9");
+    return res.end();
+  }
+  if (req.method === "GET" && req.url === "/repos/acme/app/releases/tags/v9.9.9") {
     res.setHeader("content-type", "application/json");
     return res.end(JSON.stringify({ tag_name: "v9.9.9", body: "## 更新内容\n- 修复了若干问题", html_url: "https://github.com/acme/app/releases/tag/v9.9.9" }));
   }
@@ -152,7 +158,7 @@ fs.writeFileSync(
   }),
 );
 
-const child = spawn(electron, [root, `--remote-debugging-port=${DEBUG_PORT}`, `--user-data-dir=${path.join(home, ".ud")}`], { cwd: home, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HARNESS_DATA_DIR: home, HARNESS_OFFICIAL_REPO: "none", HARNESS_DBX_CATALOG: `http://127.0.0.1:${LLM_PORT}/dbx-catalog.json`, HARNESS_DBX_DIR: path.join(home, "dbx-data"), HARNESS_PLUGINS_DIR: path.join(home, "plugins-local"), HARNESS_AUTOMATION_TICK_MS: "400", HARNESS_NO_NOTIFY: "1", HARNESS_PLUGIN_SCRIPT_HOST: "1", HARNESS_DBX_OPEN_LOG: path.join(home, "dbx-open.log"), HARNESS_DBX_MCP: process.execPath, HARNESS_GITHUB_API: `http://127.0.0.1:${LLM_PORT}`, HARNESS_HOME_BASE: `http://127.0.0.1:${LLM_PORT}` } });
+const child = spawn(electron, [root, `--remote-debugging-port=${DEBUG_PORT}`, `--user-data-dir=${path.join(home, ".ud")}`], { cwd: home, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HARNESS_DATA_DIR: home, HARNESS_OFFICIAL_REPO: "none", HARNESS_DBX_CATALOG: `http://127.0.0.1:${LLM_PORT}/dbx-catalog.json`, HARNESS_DBX_DIR: path.join(home, "dbx-data"), HARNESS_PLUGINS_DIR: path.join(home, "plugins-local"), HARNESS_AUTOMATION_TICK_MS: "400", HARNESS_NO_NOTIFY: "1", HARNESS_PLUGIN_SCRIPT_HOST: "1", HARNESS_DBX_OPEN_LOG: path.join(home, "dbx-open.log"), HARNESS_DBX_MCP: process.execPath, HARNESS_GITHUB_API: `http://127.0.0.1:${LLM_PORT}`, HARNESS_GITHUB_WEB: `http://127.0.0.1:${LLM_PORT}`, HARNESS_HOME_BASE: `http://127.0.0.1:${LLM_PORT}` } });
 let log = "";
 child.stdout.on("data", d => (log += d));
 child.stderr.on("data", d => (log += d));
@@ -211,6 +217,13 @@ try {
     `(() => { const b = [...document.querySelectorAll(${JSON.stringify(sel)})].find(x => x.textContent.includes(${JSON.stringify(text)})); if (!b) return false; b.click(); return true; })()`;
 
   const click = tid => `(() => { const b = document.querySelector('[data-testid="${tid}"]'); if (!b || b.disabled) return false; b.click(); return true; })()`;
+  // 可筛选下拉框（SearchSelect）：点开、选某个值
+  const pickSS = async (tid, value) => {
+    await ev(`document.querySelector('[data-testid="${tid}"]').click(); true`);
+    await until(`document.querySelector('[data-testid="${tid}-pop"]')`);
+    await ev(`[...document.querySelectorAll('[data-testid="${tid}-opt"]')].find(o => o.dataset.value === ${JSON.stringify(value)}).click(); true`);
+    await until(`!document.querySelector('[data-testid="${tid}-pop"]')`);
+  };
   const shot = async name => {
     try {
       const r = await cdp("Page.captureScreenshot", { format: "png" });
@@ -244,6 +257,30 @@ try {
   await until(`document.querySelector('[data-testid="weather-city"]')`);
   ok("按 IP 定位显示城市与温度", await ev(`(() => { const s = document.querySelector('[data-testid="home-weather"]').innerText; return s.includes('北京') && s.includes('12°') && s.includes('1.2.3.4'); })()`));
   ok("天气在右上角、只展示今天", await ev(`(() => { const w = document.querySelector('[data-testid="home-weather"]').getBoundingClientRect(); const h = document.querySelector('[data-testid="home"]').getBoundingClientRect(); return document.querySelectorAll('.weather-day').length === 0 && w.right > h.right - 120 && w.top < h.top + 140 && /15° ~ 6°|6° ~ 15°/.test(document.querySelector('[data-testid="home-weather"]').innerText); })()`));
+  await until(`document.querySelector('[data-testid="home-calendar"]')`);
+  ok("日历一直显示，日期那一行只是文字、不用点", await ev(`!!document.querySelector('[data-testid="home-calendar"]') && document.querySelector('[data-testid="home-date"]').tagName !== 'BUTTON'`));
+  // Dock：首页浮在图片底部居中；鼠标划过图标按距离放大（水波），邻居被挤开
+  ok("Dock 在窗口底部居中，里面有对话 / 工作台 / 数据库 / 插件中心 / 设置", await ev(`(() => { const d = document.querySelector('.dock').getBoundingClientRect(); return Math.abs((d.left + d.right) / 2 - innerWidth / 2) < 40 && d.bottom > innerHeight - 60 && ['nav-chat','nav-workbench','nav-database','nav-plugins','nav-settings'].every(i => !!document.querySelector('.dock [data-testid="' + i + '"]')); })()`));
+  ok("标题栏上不再放页面入口", await ev(`!document.querySelector('.titlebar [data-testid="nav-chat"], .titlebar [data-testid="nav-workbench"], .titlebar [data-testid="nav-database"], .titlebar [data-testid="nav-plugins"]')`));
+  const dockPt = await ev(`(() => { const r = document.querySelector('[data-testid="nav-database"]').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await ev(`(() => { const b = document.querySelector('[data-testid="nav-database"]'); const o = { bubbles: true, clientX: ${dockPt.x}, clientY: ${dockPt.y} }; b.dispatchEvent(new MouseEvent('mouseover', { ...o, relatedTarget: document.body })); b.dispatchEvent(new MouseEvent('mousemove', o)); return true; })()`);
+  await new Promise(r => setTimeout(r, 400));
+  let dockS = [];
+  for (let k = 0; k < 15; k++) {
+    dockS = await ev(`['nav-workbench','nav-database','nav-plugins','nav-settings'].map(i => new DOMMatrix(getComputedStyle(document.querySelector('[data-testid="' + i + '"]')).transform).a)`);
+    if (dockS[1] > 1.6) break;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  ok("鼠标划过 Dock 图标：正下方的最大，旁边的次之，远处的不放大", dockS[1] > 1.5 && dockS[1] > dockS[0] && dockS[1] > dockS[2] && dockS[0] > dockS[3] && dockS[3] < 1.1);
+  ok("划过时有水波、有名字提示", await ev(`!!document.querySelector('.dock-ripple') && document.querySelector('.dock-tip')?.innerText === '数据库'`));
+  await shot("dock-hover");
+  await ev(`(() => { const row = document.querySelector('.dock-row'); row.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })); return true; })()`);
+  await ev(click("nav-workbench"));
+  await new Promise(r => setTimeout(r, 500));
+  ok("Dock 只在首页；其它页面 Dock 不存在，页面入口放在标题栏中间，并显示「› 页面名」", await ev(`!document.querySelector('.dock-slot') && !document.querySelector('.dock') && document.querySelector('[data-testid="crumb"]')?.innerText.trim() === '工作台' && ['nav-chat','nav-workbench','nav-database','nav-plugins','nav-settings'].every(i => !!document.querySelector('.titlebar .title-nav [data-testid="' + i + '"]'))`));
+  await shot("dock-workbench");
+  await ev(`document.querySelector('.titlebar .brand').click(); true`);
+  await new Promise(r => setTimeout(r, 300));
   ok("日历在右下角且不大、没有不透明底板", await ev(`(() => { const c = document.querySelector('[data-testid="home-calendar"]'); const r = c.getBoundingClientRect(); const h = document.querySelector('[data-testid="home"]').getBoundingClientRect(); return r.width < 320 && r.height < 300 && r.bottom > h.bottom - 120 && r.right > h.right - 120 && getComputedStyle(c).backgroundColor === 'rgba(0, 0, 0, 0)'; })()`));
   await until(`document.querySelector('[data-testid="home-quote"]')`);
   ok("显示每日一句", (await ev(`document.querySelector('[data-testid="home-quote"]').innerText.length`)) > 6);
@@ -293,7 +330,7 @@ try {
   // 侧边栏宽度可拖动，范围受限，双击恢复，并记住
   const navW = () => ev(`document.querySelector('.nav').getBoundingClientRect().width`);
   const dragNav = async toX => {
-    const r = await ev(`(() => { const b = document.querySelector('[data-testid="nav-resizer"]').getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + 100 }; })()`);
+    const r = await ev(`(() => { const b = document.querySelector('[data-testid="nav-resizer"]').getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + 100, left: document.querySelector(".nav").getBoundingClientRect().left }; })()`);
     await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: r.x, y: r.y });
     await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: r.x, y: r.y, button: "left", clickCount: 1 });
     await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: toX, y: r.y, button: "left" });
@@ -346,6 +383,24 @@ try {
   await until(`document.querySelector('[data-testid="wb-off"]')`);
   ok("没接入飞书项目 / 钉钉时只提示一次去设置，不展示排期", await ev(`document.querySelectorAll('[data-testid="wb-off"]').length === 1 && !document.querySelector('[data-testid="gantt"]')`));
   ok("工作台有统计和我的排期，没有最近对话 / 代码仓库 / 快捷动作这几块", await ev(`['wb-stat-todo','wb-stat-running','wb-stat-repo','wb-schedule'].every(i => !!document.querySelector('[data-testid="' + i + '"]')) && ['wb-recent','wb-repos','wb-actions'].every(i => !document.querySelector('[data-testid="' + i + '"]'))`));
+  // 没接飞书项目也能直接新建任务
+  await ev(click("wb-new-task"));
+  await until(`document.querySelector('[data-testid="newtask-dialog"]')`);
+  ok("标题没填时「创建并打开」是灰的", await ev(`document.querySelector('[data-testid="newtask-ok"]').disabled`));
+  await ev(setVal('[data-testid="newtask-title"]', "手动任务甲", "HTMLInputElement", "input"));
+  await ev(setVal('[data-testid="newtask-prd"]', "不是链接", "HTMLInputElement", "input"));
+  await until(`document.querySelector('[data-testid="newtask-prd-err"]')`);
+  ok("PRD 链接选填，填了不是链接会提示并且不能创建", await ev(`document.querySelector('[data-testid="newtask-ok"]').disabled`));
+  await ev(setVal('[data-testid="newtask-prd"]', "https://example.feishu.cn/wiki/PRD123", "HTMLInputElement", "input"));
+  await until(`!document.querySelector('[data-testid="newtask-prd-err"]') && !document.querySelector('[data-testid="newtask-ok"]').disabled`);
+  await ev(click("newtask-ok"));
+  await until(`document.querySelector('[data-testid="task-title"]')?.innerText === '手动任务甲'`);
+  await sleep(700); // 任务存储有 300ms 防抖
+  ok("新建任务时填的 PRD 链接存进了任务", await ev(`JSON.parse(localStorage.getItem('harness.tasks.v1') || '[]').some(t => t.title === '手动任务甲' && t.prdUrl === 'https://example.feishu.cn/wiki/PRD123')`));
+  ok("工作台上点「新建任务」：建出来并直接打开，来源是手动新建", await ev(`document.querySelector('[data-testid="task-page"]').innerText.includes('手动新建') && document.querySelectorAll('[data-testid="task-item"]').length === 1`));
+  await ev(`document.querySelector('[data-testid="task-item"] .session-del').click()`);
+  await until(`document.querySelectorAll('[data-testid="task-item"]').length === 0 && document.querySelector('[data-testid="workbench"]') && !document.querySelector('[data-testid="workbench"]').closest('[hidden]')`);
+  ok("放弃这个手动任务后回到工作台", true);
   await shot("0c-workbench");
   const nItems = `document.querySelectorAll('[data-testid="session-item"]').length`;
   ok("还没点新建对话时，没有任何对话", (await ev(nItems)) === 0);
@@ -423,6 +478,12 @@ try {
   await until("document.querySelector('[data-testid=\"provider-nokey\"]')");
   ok("缺 Key 的 provider 不可选", await ev("document.querySelector('[data-testid=\"provider-nokey\"]').disabled === true"));
   await shot("3-picker");
+  const provBtns = `[...document.querySelectorAll('[data-testid^="provider-"][role="option"]')].map(b => b.dataset.testid.slice(9))`;
+  await ev(setVal('[data-testid="provider-search"]', "NOK", "HTMLInputElement", "input"));
+  await sleep(150);
+  ok("提供方选择器有搜索框：输入 NOK（不分大小写）只剩 nokey", JSON.stringify(await ev(provBtns)) === JSON.stringify(["nokey"]));
+  await ev(setVal('[data-testid="provider-search"]', "", "HTMLInputElement", "input"));
+  await sleep(150);
   await ev(click("provider-fake"));
 
   // 2) 工具审批流（顺带验证输入框：顶部工作区 / 工具、底部模型；对话级模型与工具开关）
@@ -464,6 +525,48 @@ try {
   await waitDone("已写入");
   ok("拒绝审批后文件不会生成", !fs.existsSync(path.join(home, "hello.txt")));
 
+  // 3b) 输入框粘贴图片：出缩略图、可移除，发送后模型收到 image_url，消息里显示图片
+  await newChat();
+  const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  const pasteImg = (withText = false) =>
+    ev(`(() => {
+      const ta = document.querySelector('[data-testid="composer-input"]');
+      const dt = new DataTransfer();
+      dt.items.add(new File([Uint8Array.from(atob(${JSON.stringify(PNG_B64)}), c => c.charCodeAt(0))], "shot.png", { type: "image/png" }));
+      ${withText ? `dt.setData("text/plain", "文字");` : ""}
+      const e = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+      ta.dispatchEvent(e);
+      return e.defaultPrevented;
+    })()`);
+  ok("粘贴图片：接管粘贴（不往输入框塞内容）", (await pasteImg()) === true);
+  await until(`document.querySelectorAll('[data-testid="image-item"]').length === 1`);
+  ok("粘贴图片：出现一张缩略图", true);
+  await until(`document.querySelector('[data-testid="image-item"] img.img-thumb')?.naturalWidth > 0`);
+  ok("粘贴图片：缩略图能正常显示", true);
+  ok("粘贴图片：图片存进数据目录的 pasted-images", fs.existsSync(path.join(home, "pasted-images")) && fs.readdirSync(path.join(home, "pasted-images")).some(f => f.endsWith(".png")));
+  ok("粘贴同时带文字时不接管（照常粘贴文字）", (await pasteImg(true)) === false);
+  await ev(click("image-remove"));
+  await until(`document.querySelectorAll('[data-testid="image-item"]').length === 0`);
+  ok("可以移除图片；只有图片没有文字时发送按钮也可点", true);
+  await pasteImg();
+  await until(`document.querySelectorAll('[data-testid="image-item"]').length === 1`);
+  await shot("4a-paste-image");
+  await ev(setVal('[data-testid="composer-input"]', "这是什么图", "HTMLTextAreaElement", "input"));
+  await until(`document.querySelector('[data-testid="send"]') && !document.querySelector('[data-testid="send"]').disabled`);
+  await ev(click("send"));
+  // 这个对话沿用了上面选的 alpha-1（会要求写文件）：拒绝审批即可，重点是看模型收到的请求
+  await until("document.querySelector('[data-testid=\"approval-modal\"]')");
+  await ev(click("approval-deny"));
+  await until(`['done','error','aborted'].includes(${lastAnswer}?.dataset.status)`);
+  await shot("4b-image-sent");
+  const imgDone = (await ev(`${lastAnswer}.dataset.status`)) === "done";
+  ok("带图片的这一轮正常完成", imgDone);
+  if (!imgDone) out.push("INFO 失败原因：" + (await ev(`${lastAnswer}.textContent.slice(0, 300)`)));
+  const sentContent = lastChat.users?.at(-1);
+  ok("模型收到 text + image_url（data URL）", Array.isArray(sentContent) && sentContent[0]?.text === "这是什么图" && /^data:image\/png;base64,/.test(sentContent[1]?.image_url?.url ?? ""));
+  ok("发送后输入框里的图片清空，消息里显示图片", (await ev(`document.querySelectorAll('[data-testid="image-item"]').length`)) === 0 && (await ev(`document.querySelectorAll('.msg-u [data-testid="msg-images"] img').length`)) === 1);
+  await shot("4b-image-sent");
+
   // 4) 回放页
   await ev(click("nav-replay"));
   await until("document.querySelectorAll('[data-testid=\"trace-item\"]').length >= 3");
@@ -477,10 +580,24 @@ try {
   await until("document.querySelector('[data-testid=\"settings-office\"]')");
   ok("设置里没有配置文件入口，办公通道/项目管理合并为办公集成", await ev("!document.querySelector('[data-testid=\"settings-config\"]') && !document.querySelector('[data-testid=\"settings-channels\"]') && !document.querySelector('[data-testid=\"settings-projects\"]')"));
   await until("document.querySelector('[data-testid=\"model-select\"]')");
-  ok("模型是下拉框，默认选中全局使用的提供方", (await ev("document.querySelector('[data-testid=\"model-select\"]').value")) === "echo");
+  ok("模型是下拉框，默认选中全局使用的提供方", (await ev("document.querySelector('[data-testid=\"model-select\"]').dataset.value")) === "echo");
+  // 下拉框可以筛选：输入关键字只剩匹配的，没有匹配有提示，Esc 关闭
+  await ev(click("model-select"));
+  await until(`document.querySelector('[data-testid="model-select-search"]')`);
+  const ssOpts = `[...document.querySelectorAll('[data-testid="model-select-opt"]')].map(o => o.dataset.value)`;
+  const allProv = await ev(ssOpts);
+  await ev(setVal('[data-testid="model-select-search"]', "nokey", "HTMLInputElement", "input"));
+  await sleep(150);
+  ok("提供方下拉框里输入关键字：只剩匹配的", JSON.stringify(await ev(ssOpts)) === JSON.stringify(["nokey"]) && allProv.length > 1);
+  await ev(setVal('[data-testid="model-select-search"]', "zzz-没有这个", "HTMLInputElement", "input"));
+  await sleep(150);
+  ok("没有匹配时给出提示", await ev(`document.querySelector('[data-testid="model-select-pop"] .ss-empty')?.innerText.includes('没有匹配')`));
+  await ev(`document.querySelector('[data-testid="model-select-search"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+  await until(`!document.querySelector('[data-testid="model-select-pop"]')`);
+  ok("Esc 关闭下拉框", true);
   ok("选中后只展示该提供方的卡片", (await ev("document.querySelectorAll('.pcard[data-testid^=\"provider-card-\"]').length")) === 1);
   ok("自定义提供方有独立的新增入口", await ev("!!document.querySelector('[data-testid=\"provider-add\"]')"));
-  await ev(setVal('[data-testid="model-select"]', "nokey", "HTMLSelectElement", "change"));
+  await pickSS("model-select", "nokey");
   await until("document.querySelector('[data-testid=\"provider-card-nokey\"]')");
   await shot("7a-settings-models");
   ok(
@@ -489,25 +606,38 @@ try {
   );
   await ev("document.querySelector('.settings-body').scrollTop = 0");
   // 填写 Key 后自动校验：加载模型下拉框 + 显示账号信息（不需要点任何按钮）
-  await ev(setVal('[data-testid="model-select"]', "fake", "HTMLSelectElement", "change"));
+  await pickSS("model-select", "fake");
   await until("document.querySelector('[data-testid=\"provider-card-fake\"]')");
   await ev(setVal('[data-testid="provider-card-fake"] input[type="password"]', "sk-bad-key-000", "HTMLInputElement", "input"));
   await until(`document.querySelector('[data-testid="provider-card-fake"] .keyinfo.bad')`);
   ok("Key 无效时给出提示", (await ev(`document.querySelector('[data-testid="provider-card-fake"] .keyinfo.bad').textContent`)).includes("无效"));
   await ev(setVal('[data-testid="provider-card-fake"] input[type="password"]', "sk-fake-12345", "HTMLInputElement", "input"));
-  await until(`document.querySelector('[data-testid="provider-card-fake"] select[data-testid^="model-pick-"]')`);
+  const mpTrig = `document.querySelector('[data-testid="provider-card-fake"] [data-testid^="model-pick-"]')`;
+  await until(mpTrig);
+  await ev(`${mpTrig}.click(); true`);
+  await until(`document.querySelector('[data-testid="model-pick-fake-pop"]')`);
   ok(
-    "填写 Key 后自动加载模型并变为下拉框",
-    JSON.stringify(await ev(`[...document.querySelectorAll('[data-testid="provider-card-fake"] select[data-testid^="model-pick-"] option')].map(o => o.value)`)) === JSON.stringify(["m", "alpha-1", "beta-2"]),
+    "填写 Key 后自动加载模型并变为可筛选的下拉框",
+    JSON.stringify(await ev(`[...document.querySelectorAll('[data-testid="model-pick-fake-opt"]')].map(o => o.dataset.value)`)) === JSON.stringify(["m", "alpha-1", "beta-2"]),
   );
+  await ev(setVal('[data-testid="model-pick-fake-search"]', "ALP", "HTMLInputElement", "input"));
+  await sleep(150);
+  ok("模型下拉框输入关键字（不分大小写）：列表里只剩 alpha-1（后面跟着「使用 ALP」）", JSON.stringify(await ev(`[...document.querySelectorAll('[data-testid="model-pick-fake-opt"]')].map(o => o.dataset.value)`)) === JSON.stringify(["alpha-1", "ALP"]));
+  await ev(setVal('[data-testid="model-pick-fake-search"]', "my-own-model", "HTMLInputElement", "input"));
+  await sleep(150);
+  ok("输入列表里没有的名字：可以直接「使用」它", await ev(`(() => { const o = [...document.querySelectorAll('[data-testid="model-pick-fake-opt"]')]; return o.length === 1 && o[0].dataset.value === 'my-own-model' && o[0].innerText.includes('使用'); })()`));
+  await ev(setVal('[data-testid="model-pick-fake-search"]', "", "HTMLInputElement", "input"));
+  await sleep(150);
+  await shot("7a1-settings-model-filter");
+  await ev(`[...document.querySelectorAll('[data-testid="model-pick-fake-opt"]')].find(o => o.dataset.value === 'beta-2').click(); true`);
+  await until(`!document.querySelector('[data-testid="model-pick-fake-pop"]')`);
   ok("自动显示 Key 校验/账号信息", (await ev(`document.querySelector('[data-testid="provider-card-fake"] .keyinfo').textContent`)).includes("Key 有效"));
   await shot("7a2-settings-keyinfo");
-  await ev(setVal('[data-testid="provider-card-fake"] select[data-testid^="model-pick-"]', "beta-2", "HTMLSelectElement", "change"));
   await until(`!document.querySelector('[data-testid="provider-save-fake"]').disabled`);
   await ev(click("provider-save-fake"));
   await until(`document.querySelector('[data-testid="provider-card-fake"] .chip.run')`);
   ok("选中的模型写入配置", JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).providers.fake.model === "beta-2");
-  await ev(setVal('[data-testid="model-select"]', "nokey", "HTMLSelectElement", "change"));
+  await pickSS("model-select", "nokey");
   await until("document.querySelector('[data-testid=\"provider-card-nokey\"]')");
   // 在界面里给 nokey 填 Key：写进 .env，provider 变为可用
   await ev(setVal('[data-testid="provider-card-nokey"] input[type="password"]', "sk-smoke-123", "HTMLInputElement", "input"));
@@ -569,8 +699,15 @@ try {
   ok("令牌写入 .env 且不进配置文件", fs.readFileSync(path.join(home, ".env"), "utf8").includes("GITLAB_TOKEN=glpat-smoke-token-1") && !fs.readFileSync(path.join(home, "harness.config.json"), "utf8").includes("glpat-smoke"));
   ok("实例地址写入配置", JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).gitHosts?.gitlab?.baseURL === `http://127.0.0.1:${LLM_PORT}`);
   // 分支约定：基线 / 提测 / 联调，带清空按钮，候选来自仓库已有分支
-  ok("仓库卡片有三个分支输入框", (await ev("document.querySelectorAll('[data-testid=\"repo-branches-demo\"] input[list]').length")) === 3);
-  ok("分支候选来自仓库", (await ev("[...document.querySelectorAll('#branches-demo option')].map(o => o.value).join(',')")) === "main");
+  ok("仓库卡片有三个分支输入框", (await ev("document.querySelectorAll('[data-testid=\"repo-branches-demo\"] input[data-branch-input]').length")) === 3);
+  await ev(`document.querySelector('[data-testid="branch-test-demo"]').focus()`);
+  await until(`document.querySelector('[data-testid="bi-pop"]')`);
+  ok("分支候选来自仓库", (await ev("[...document.querySelectorAll('[data-testid=\"bi-opt\"]')].map(o => o.dataset.value).join(',')")) === "main");
+  ok("候选多的时候下拉框限高并能滚动", await ev(`(() => { const p = document.querySelector('[data-testid="bi-pop"]'); return getComputedStyle(p).overflowY === 'auto' && parseInt(p.style.maxHeight) > 0; })()`));
+  await ev(`document.querySelector('[data-testid="bi-opt"]').click()`);
+  ok("点候选就填进输入框", (await ev(`document.querySelector('[data-testid="branch-test-demo"]').value`)) === "main");
+  await ev(setVal('[data-testid="branch-test-demo"]', "", "HTMLInputElement", "input"));
+  await ev(`document.activeElement && document.activeElement.blur()`);
   await ev(setVal('[data-testid="branch-test-demo"]', "test/1.30.1", "HTMLInputElement", "input"));
   await ev(setVal('[data-testid="branch-integration-demo"]', "master", "HTMLInputElement", "input"));
   await until(`document.querySelector('[data-testid="branch-save-demo"]')`);
@@ -595,32 +732,48 @@ try {
   // 6) 办公集成：飞书（集成 + 消息通道 + 项目管理）与钉钉合在一页
   await ev(click("settings-office"));
   await until("document.querySelector('[data-testid=\"office-page\"]')");
-  ok("办公集成页有飞书消息通道卡片", await ev("!!document.querySelector('[data-testid=\"feishu-channel-card\"]')"));
-  ok("办公集成页有飞书项目卡片", await ev("!!document.querySelector('[data-testid=\"feishu-project-card\"]')"));
-  ok("未启用消息通道时没有启动按钮", await ev("!document.querySelector('[data-testid=\"channel-toggle\"]')"));
+  const cfgNow = () => JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8"));
+  const officeIsOn = p => ev(`document.querySelector('[data-testid="office-switch-${p}"]').getAttribute('aria-checked') === 'true'`);
+  const officeOn = async p => {
+    if (!(await officeIsOn(p))) {
+      await ev(click("office-switch-" + p));
+      await sleep(900);
+    }
+  };
+  // 三选一：开始时先全部关掉，保证起点一致
+  for (const p of ["feishu", "dingtalk", "custom"]) if (await officeIsOn(p)) (await ev(click("office-switch-" + p)), await sleep(900));
+  ok("办公集成页有 飞书 / 钉钉 / 自定义 三个启用开关，都关着时不展示各平台的设置", await ev(`['feishu','dingtalk','custom'].every(p => !!document.querySelector('[data-testid="office-switch-' + p + '"]')) && !document.querySelector('[data-testid="feishu-channel-card"]') && !document.querySelector('[data-testid="feishu-integration"]') && !document.querySelector('[data-testid="dingtalk-integration"]') && !document.querySelector('[data-testid="office-custom"]')`));
+  await shot("8-office-off");
+  await ev(click("office-switch-feishu"));
+  await until("document.querySelector('[data-testid=\"feishu-channel-card\"]')");
+  ok("启用飞书：展示飞书集成 / 消息通道 / 项目管理，其它平台的设置不展示", await ev("!!document.querySelector('[data-testid=\"feishu-project-card\"]') && !!document.querySelector('[data-testid=\"feishu-integration\"]') && !document.querySelector('[data-testid=\"dingtalk-integration\"]') && !document.querySelector('[data-testid=\"office-custom\"]')"));
+  ok("启用飞书后写入配置：office.active=feishu，默认建好消息通道和项目管理", (c => c.office?.active === "feishu" && !!c.channels?.larkCli && !!c.integrations?.feishuProject)(cfgNow()));
+  ok("飞书卡片显示已启用，其它两个开关是关的", (await officeIsOn("feishu")) && !(await officeIsOn("dingtalk")) && !(await officeIsOn("custom")));
+  ok("消息通道有启动按钮", await ev("!!document.querySelector('[data-testid=\"channel-toggle\"]')"));
   await until("(document.querySelector('[data-testid=\"int-lark\"]')?.innerText ?? '').match(/v\\d|未安装|未登录/)");
   ok("有飞书集成卡片（版本 / 登录状态）", await ev("!!document.querySelector('[data-testid=\"feishu-integration\"]') && !!document.querySelector('[data-testid=\"int-check-update\"]')"));
-  ok("有钉钉集成卡片", await ev("!!document.querySelector('[data-testid=\"dingtalk-integration\"]')"));
-  await until("(document.querySelector('[data-testid=\"int-dws\"]')?.innerText ?? '').match(/v\\d|未安装|未登录/)");
   await shot("8-office");
-  // 消息通道：在界面里打开开关，配置里出现 channels.larkCli，不再需要手写 JSON
-  await ev(click("channel-switch"));
-  await until("document.querySelector('[data-testid=\"channel-toggle\"]')");
-  ok("界面里启用消息通道后写入配置", !!JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).channels?.larkCli);
   await ev(setVal('[data-testid="allow-input"]', "ou_abc123", "HTMLInputElement", "input"));
   await ev(click("allow-add"));
   await until(`document.querySelector('[data-testid="allow-users"] code')`);
   ok("允许用户写入配置", JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).channels?.larkCli?.allowUsers?.[0] === "ou_abc123");
+  // 打开软件时的「已上线」飞书提醒：默认开，可在这里关
+  ok("有「打开软件时提醒我」开关，默认是开", await ev(`(() => { const s = document.querySelector('[data-testid="channel-notify-online"]'); return !!s && (s.getAttribute('aria-checked') === 'true' || s.classList.contains('on')); })()`));
+  await ev(click("channel-notify-online"));
+  await sleep(600);
+  ok("关掉后写入配置 notifyOnline=false", JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).channels?.larkCli?.notifyOnline === false);
+  await ev(click("channel-notify-online"));
+  await sleep(600);
+  ok("再打开：notifyOnline=true", JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).channels?.larkCli?.notifyOnline === true);
   await shot("8-office-channel");
-  ok("办公集成页有钉钉项目管理卡片", await ev("!!document.querySelector('[data-testid=\"dingtalk-project-card\"]')"));
-  await ev(click("dingtalk-project-switch"));
-  await until("document.querySelector('[data-testid=\"dingtalk-project-write\"]')");
-  ok("启用钉钉项目管理后写入配置", !!JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations?.dingtalkProject);
-  await ev(click("dingtalk-project-switch"));
-  // 飞书项目：打开开关，配置里出现 integrations.feishuProject
+  // 飞书项目：默认已启用；可单独关 / 开，配置里 integrations.feishuProject 跟着变
+  await until("document.querySelector('[data-testid=\"feishu-project-write\"]')");
+  await ev(click("feishu-project-switch"));
+  await sleep(900);
+  ok("单独关掉飞书项目：配置里没有 feishuProject，飞书平台仍是启用的", (c => !c.integrations?.feishuProject && c.office?.active === "feishu")(cfgNow()));
   await ev(click("feishu-project-switch"));
   await until("document.querySelector('[data-testid=\"feishu-project-write\"]')");
-  ok("启用飞书项目后写入配置", !!JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations?.feishuProject);
+  ok("再打开飞书项目后写入配置", !!cfgNow().integrations?.feishuProject);
   await shot("8b-office-project");
   // 飞书集成：meegle 版本 / 登录；已登录时可选默认空间（依赖本机真实 meegle 登录态，未登录则跳过）
   await until("(document.querySelector('[data-testid=\"int-meegle\"]')?.innerText ?? '').match(/v\\d|未安装|未登录/)");
@@ -633,6 +786,37 @@ try {
     await sleep(600);
     ok("默认空间写入配置", JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations?.feishuProject?.defaultSpace?.key === firstKey);
   }
+
+  // 6b) 三选一：切到钉钉 → 飞书的设置暂存、钉钉出现；切到自定义；再切回飞书时原样恢复
+  await ev(click("office-switch-dingtalk"));
+  await until("document.querySelector('[data-testid=\"dingtalk-integration\"]')");
+  ok("打开钉钉会自动关掉飞书（开关互斥），飞书的设置不再展示", (await officeIsOn("dingtalk")) && !(await officeIsOn("feishu")) && (await ev("!document.querySelector('[data-testid=\"feishu-channel-card\"]') && !document.querySelector('[data-testid=\"feishu-integration\"]')")));
+  ok("配置里只留钉钉项目管理，飞书的通道 / 项目被收进 stash（允许的用户没丢）", (c => c.office?.active === "dingtalk" && !!c.integrations?.dingtalkProject && !c.channels?.larkCli && !c.integrations?.feishuProject && c.office?.stash?.feishu?.["channels.larkCli"]?.allowUsers?.[0] === "ou_abc123")(cfgNow()));
+  ok("办公集成页有钉钉项目管理卡片", await ev("!!document.querySelector('[data-testid=\"dingtalk-project-card\"]')"));
+  await until("(document.querySelector('[data-testid=\"int-dws\"]')?.innerText ?? '').match(/v\\d|未安装|未登录/)");
+  await shot("8c-office-dingtalk");
+  await ev(click("dingtalk-project-switch"));
+  await sleep(900);
+  ok("单独关掉钉钉项目管理：配置里没有 dingtalkProject", !cfgNow().integrations?.dingtalkProject);
+  await ev(click("dingtalk-project-switch"));
+  await until("document.querySelector('[data-testid=\"dingtalk-project-write\"]')");
+  ok("再打开钉钉项目管理后写入配置", !!cfgNow().integrations?.dingtalkProject);
+  await ev(click("office-switch-custom"));
+  await until("document.querySelector('[data-testid=\"office-custom\"]')");
+  ok("打开自定义会关掉钉钉，展示名称和使用说明", (await officeIsOn("custom")) && !(await officeIsOn("dingtalk")) && (await ev("!document.querySelector('[data-testid=\"dingtalk-integration\"]')")) && (c => c.office?.active === "custom" && !c.integrations?.dingtalkProject)(cfgNow()));
+  await ev(setVal('[data-testid="office-custom-name"]', "公司 OA", "HTMLInputElement", "input"));
+  await ev(setVal('[data-testid="office-custom-instructions"]', "请假走 OA，提交前先让我确认", "HTMLTextAreaElement", "input"));
+  await ev(click("office-custom-save"));
+  await sleep(900);
+  ok("自定义的名称和使用说明写入配置", (c => c.office?.custom?.name === "公司 OA" && c.office?.custom?.instructions === "请假走 OA，提交前先让我确认")(cfgNow()));
+  await shot("8d-office-custom");
+  await ev(click("office-switch-feishu"));
+  await until("document.querySelector('[data-testid=\"feishu-channel-card\"]')");
+  ok("切回飞书：通道里允许的用户原样恢复，自定义的内容也还在", (c => c.office?.active === "feishu" && c.channels?.larkCli?.allowUsers?.[0] === "ou_abc123" && c.office?.custom?.name === "公司 OA" && !c.integrations?.dingtalkProject)(cfgNow()));
+  await ev(click("office-switch-feishu"));
+  await sleep(900);
+  ok("把启用的平台关掉：三个都是关的，配置里没有通道和项目管理", !(await officeIsOn("feishu")) && !(await officeIsOn("dingtalk")) && !(await officeIsOn("custom")) && (c => !c.office?.active && !c.channels?.larkCli && !c.integrations?.feishuProject)(cfgNow()));
+  await officeOn("feishu");
 
   // 7) 规则 / 技能 / MCP / 动作
   const readCfg = () => JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8"));
@@ -649,7 +833,7 @@ try {
   };
   await ev(click("nav-plugins"));
   await until(`document.querySelector('[data-testid="plugins-page"]')`);
-  ok("标题栏有对话 / 工作台 / 插件中心；插件中心有 插件商店 / 已安装 / 设置", await ev(`['nav-chat','nav-workbench','nav-plugins'].every(i => !!document.querySelector('.titlebar [data-testid="' + i + '"]')) && ['store','installed','settings'].every(k => !!document.querySelector('[data-testid="plugin-tab-' + k + '"]'))`));
+  ok("标题栏有对话 / 工作台 / 插件中心；插件中心有 插件商店 / 已安装 / 设置", await ev(`['nav-chat','nav-workbench','nav-plugins'].every(i => !!document.querySelector('.title-nav [data-testid="' + i + '"]')) && ['store','installed','settings'].every(k => !!document.querySelector('[data-testid="plugin-tab-' + k + '"]'))`));
   await until(`document.querySelectorAll('[data-testid="plugin-card"]').length === 2`, 20000);
   ok("插件商店只有 DBX 插件（含名称、作者、标签、安装按钮），没有技能 / MCP / 规则 / 动作", await ev(`(() => { const cs = [...document.querySelectorAll('[data-testid="plugin-card"]')]; return cs.every(c => c.dataset.key.startsWith('DBX 插件中心:') && !!c.querySelector('.px-name') && !!c.querySelector('.px-by') && !!c.querySelector('[data-testid="plugin-install"], [data-testid="plugin-nopkg"]')) && !document.querySelector('[data-testid="plugin-kind"]') && !document.querySelector('[data-testid="plugin-batch"]'); })()`));
   await ev(click("plugin-tab-settings"));
@@ -757,13 +941,47 @@ try {
   await ev(click("action-add"));
   await until(`document.querySelector('[data-testid="action-name"]')`);
   await typeInto("action-name", "写周报", "HTMLInputElement");
-  await ev(setVal('[data-testid="action-skill"]', "__prompt__", "HTMLSelectElement", "change"));
+  // 主 skill 下拉有搜索框：输入关键字过滤，没有匹配时有提示
+  await ev(click("action-skill"));
+  await until(`document.querySelector('[data-testid="action-skill-search"]')`);
+  await typeInto("action-skill-search", "自己写", "HTMLInputElement");
+  ok("主 skill 下拉里搜索：按关键字过滤", await ev(`[...document.querySelectorAll('[data-testid="action-skill-opt"]')].map(o => o.dataset.value).join() === '__prompt__'`));
+  await typeInto("action-skill-search", "zzzz-no-such-skill", "HTMLInputElement");
+  ok("搜不到时提示没有匹配的 skill", await ev(`document.querySelectorAll('[data-testid="action-skill-opt"]').length === 0 && document.querySelector('[data-testid="action-skill-pop"]').innerText.includes('没有匹配')`));
+  await ev(`document.querySelector('[data-testid="action-skill-search"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+  await until(`!document.querySelector('[data-testid="action-skill-pop"]')`);
+  ok("Esc 只收起下拉，不会把整个对话框关掉", await ev(`!!document.querySelector('[data-testid="action-dialog"]')`));
+  await pickSS("action-skill", "__prompt__");
   await until(`document.querySelector('[data-testid="action-prompt"]')`);
   await typeInto("action-prompt", "请根据以下内容写周报：{{input}}（用中文）");
   await ev(click("action-create"));
   await sleep(600);
   ok("动作写入配置", readCfg().actions?.[0]?.name === "写周报" && readCfg().actions[0].prompt.includes("{{input}}"));
   await shot("9d-actions");
+  // 内置动作的「编辑」：直接改这一条的提示词（只存动作自己的那份），可以恢复默认，也可以另存为自定义
+  const openBuiltin = async () => {
+    await ev("[...document.querySelectorAll('[data-testid=\"action-builtin-edit\"]')][1].click()");
+    await until(`document.querySelector('[data-testid="builtin-dialog"]')`);
+  };
+  await openBuiltin();
+  ok("内置动作「编辑」打开的是原地编辑，带出方案设计的提示词（按模板分章）", await ev(`(() => { const v = document.querySelector('[data-testid="builtin-body"]').value; return v.length > 500 && v.includes('一. 需求背景') && v.includes('八. 增加配置') && !!document.querySelector('[data-testid="builtin-save"]').disabled; })()`));
+  await typeInto("builtin-body", (await ev(`document.querySelector('[data-testid="builtin-body"]').value`)) + "\n\n（冒烟：我加的一句）");
+  await ev(click("builtin-save"));
+  await sleep(600);
+  ok("改了保存：写进配置的 actionPrefs.overrides，不新增自定义动作", !!readCfg().actionPrefs?.overrides?.plan?.body?.includes("冒烟：我加的一句") && readCfg().actions.length === 1);
+  ok("内置那一行标成「已修改」", await ev(`[...document.querySelectorAll('[data-testid="action-row"]')].some(r => r.innerText.includes('方案设计') && r.innerText.includes('已修改'))`));
+  await openBuiltin();
+  await ev(click("builtin-reset"));
+  await sleep(600);
+  ok("恢复默认：覆盖被清掉", readCfg().actionPrefs?.overrides?.plan === undefined);
+  await openBuiltin();
+  await ev(click("builtin-saveas"));
+  await until(`document.querySelector('[data-testid="action-dialog"]')`);
+  await until(`document.querySelector('[data-testid="action-prompt"]')`);
+  ok("「另存为自定义」带出名称和完整提示词", (await ev(`document.querySelector('[data-testid="action-name"]').value`)) === "方案设计（我的版本）" && (await ev(`document.querySelector('[data-testid="action-prompt"]').value.length`)) > 500);
+  await ev(click("action-create"));
+  await sleep(600);
+  ok("内置动作另存为自定义", readCfg().actions?.some(a => a.name === "方案设计（我的版本）" && a.prompt.includes("{{input}}")) && readCfg().actions.length === 2);
 
   // 回到对话：输入 / 出现动作菜单，选中后填入模板；规则 / 技能 / MCP 工具进入下一次请求
   await newChat();
@@ -808,7 +1026,13 @@ try {
   await ev(click("settings-general"));
   await until(`document.querySelector('[data-testid="update-repo"]')`);
   ok("偏好里显示当前版本", /^v\d/.test(await ev(`document.querySelector('[data-testid="update-current"]').innerText`)));
-  ok("没配仓库时标题栏没有更新按钮", await ev(`!document.querySelector('[data-testid="nav-update"]')`));
+  ok("标题栏右侧一直有更新按钮（云朵），没新版本时没有蓝点", await ev(`document.querySelector('.titlebar-tools [data-testid="nav-update"]')?.dataset.hasUpdate === '0' && !document.querySelector('[data-testid="nav-update"] .tb-dot')`));
+  await ev(click("nav-update"));
+  await until(`document.querySelector('[data-testid="update-dialog"]')`);
+  // 没新版本时：弹窗显示检查结果（检查中 / 已是最新 / 检查失败…），有「关闭」，不是空白（有默认更新仓库，真去查，结果看网络）
+  ok("没有新版本时点它：弹出检查结果，有标题和关闭按钮", await ev(`(() => { const d = document.querySelector('[data-testid="update-dialog"]'); return !!d.querySelector('h3')?.innerText.trim() && d.querySelector('[data-testid="update-later"]')?.innerText.trim() === '关闭'; })()`));
+  await ev(click("update-later"));
+  await until(`!document.querySelector('[data-testid="update-dialog"]')`);
   await ev(setVal('[data-testid="update-repo"]', "acme/app", "HTMLInputElement", "input"));
   await ev(`(() => { const el = document.querySelector('[data-testid="update-repo"]'); el.focus(); el.blur(); })()`);
   await until(`document.querySelector('[data-testid="update-dialog"]')`);
@@ -817,15 +1041,15 @@ try {
   await shot("12a-update-dialog");
   await ev(click("update-later"));
   await until(`!document.querySelector('[data-testid="update-dialog"]')`);
-  ok("稍后：标题栏出现更新按钮", await ev(`!!document.querySelector('[data-testid="nav-update"]')`));
+  ok("稍后：标题栏的更新按钮出现蓝点", await ev(`document.querySelector('[data-testid="nav-update"]').dataset.hasUpdate === '1' && !!document.querySelector('[data-testid="nav-update"] .tb-dot')`));
   await shot("12b-update-button");
   await ev(click("nav-update"));
   await until(`document.querySelector('[data-testid="update-dialog"]')`);
   await ev(click("update-skip"));
   await until(`!document.querySelector('[data-testid="update-dialog"]')`);
-  ok("跳过此版本：按钮消失", await ev(`!document.querySelector('[data-testid="nav-update"]')`));
+  ok("跳过此版本：蓝点消失（按钮还在）", await ev(`document.querySelector('[data-testid="nav-update"]').dataset.hasUpdate === '0'`));
   await ev(click("update-check"));
-  await until(`document.querySelector('[data-testid="nav-update"]')`);
+  await until(`document.querySelector('[data-testid="nav-update"]')?.dataset.hasUpdate === '1'`);
   ok("手动检查会重新显示被跳过的版本", true);
   ok("设置里显示状态", (await ev(`document.querySelector('[data-testid="update-status"]').innerText`)).includes("9.9.9"));
   await shot("12c-update-settings");
@@ -942,7 +1166,7 @@ else { console.error("unknown"); process.exit(2); }`,
   ok("飞书排期按天画成条，带节点，未排期的单独列出", await ev(`(() => { const t = [...document.querySelectorAll('[data-testid="gantt-bar"]')].map(b => b.innerText); return t.length === 2 && t[0].includes('飞书排期A') && t[0].includes('技术排期') && t[1].includes('飞书排期B') && document.querySelector('[data-testid="wb-unscheduled"]').innerText.includes('飞书未排期'); })()`));
   ok("排期条跨越多天（A 比 B 宽）", await ev(`(() => { const b = [...document.querySelectorAll('[data-testid="gantt-bar"]')].map(x => x.getBoundingClientRect().width); return b[0] > b[1] * 2; })()`));
   await ev(click("gantt-bar"));
-  await until(`document.querySelector('[data-testid="gantt-detail"]')`);
+  await until(`document.querySelector('[data-testid="task-item"]')`);
   ok("排期标题旁显示当前登录账号", (await ev(`document.querySelector('[data-testid="wb-user"]')?.innerText ?? ''`)).includes("测试用户"));
   ok("「进行中的需求」按需求列出（不管有没有排期），每个需求下是我负责的节点 / 子任务", await ev(`(() => { const a = [...document.querySelectorAll('[data-testid="wb-active-item"]')]; const t = a.map(x => x.innerText); return a.length === 2 && t[0].includes('飞书排期A') && t[0].includes('后端开发') && t[0].includes('技术排期') && t[1].includes('飞书进行中无排期') && t[1].includes('技术开发联调'); })()`));
   ok("节点是需求上的小标签，下面的列表只放子任务", await ev(`(() => { const it = document.querySelector('[data-testid="wb-active-item"]'); return !!it.querySelector('[data-testid="wb-node"]') && [...it.querySelectorAll('[data-testid="wb-child"]')].every(x => x.dataset.kind === 'subtask'); })()`));
@@ -990,7 +1214,7 @@ else { console.error("unknown"); process.exit(2); }`,
   await ev(click("wb-sub-toggle"));
   await until(`document.querySelector('[data-testid="wb-unscheduled"] [data-testid="wb-child"]')`);
   ok("未排期的需求可以展开看我的子任务", await ev(`document.querySelector('[data-testid="wb-unscheduled"]').innerText.includes('写接口文档')`));
-  ok("点排期条展开详情，可以打开任务", await ev(`!!document.querySelector('[data-testid="gantt-detail"] [data-testid="wb-todo-ai"]')`));
+  ok("点排期条只建任务，不在排期下面展开详情", await ev(`!document.querySelector('[data-testid="gantt-detail"]')`));
 
   // 点需求：左侧创建任务；点任务：打开任务详情（需求信息 / 关联仓库 / 改动 / MCP / 事件流）
   ok("点排期条后，左侧「进行中的任务」里多了一个以需求命名的任务，状态待确认", await ev(`(() => { const it = document.querySelectorAll('[data-testid="task-item"]'); const nav = document.querySelector('[data-testid="task-nav"]'); return it.length === 1 && it[0].innerText.includes('飞书排期A') && it[0].innerText.includes('待确认') && !!nav && nav.innerText.includes('进行中的任务') && nav.innerText.includes('今天'); })()`));
@@ -1026,6 +1250,7 @@ else { console.error("unknown"); process.exit(2); }`,
   await sleep(150);
   const f2 = await ev(flowInfo);
   ok("向右拖到底停在最小宽度 300，按钮仍完整显示", f2.w === 300 && f2.ok);
+  ok("最窄时 Agent / 模型选择和发送按钮仍在同一行，选择框没被挤出输入框", await ev(`(() => { const c = document.querySelector('[data-testid="task-composer"]').getBoundingClientRect(); const rs = ['provider-trigger', 'model-trigger', 'task-send'].map(i => document.querySelector('[data-testid="' + i + '"]').getBoundingClientRect()); const mid = rs.map(r => r.top + r.height / 2); return Math.max(...mid) - Math.min(...mid) < 14 && rs.every(r => r.width > 0 && r.left >= c.left && r.right <= c.right + 0.5) && rs[0].right <= rs[1].left + 0.5 && rs[1].right <= rs[2].left + 0.5; })()`));
   await shot("task-composer-narrow");
   await ev(`document.querySelector('[data-testid="task-resizer"]').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
   await sleep(150);
@@ -1092,11 +1317,34 @@ else { console.error("unknown"); process.exit(2); }`,
   await shot("0p-repo-pop");
   await ev(click("pop-repo-item"));
   await until(`document.querySelector('[data-testid="task-repo"]')`);
-  await until(`document.querySelector('[data-testid="task-repo-notes"]')`, 20000);
+  await until(`!document.querySelector('[data-testid="task-repo-syncing"]')`, 20000);
+  await sleep(500);
   ok("可以关联代码仓库，显示仓库名和当前分支", await ev(`(() => { const t = document.querySelector('[data-testid="task-repo"]').innerText; return t.includes('demo') && t.includes('main'); })()`));
-  ok("刚关联仓库会自动同步到基线分支（没有远端的只用本地分支，并说明）", await ev(`(() => { const t = document.querySelector('[data-testid="task-repo-notes"]').innerText; return t.includes('基线分支 main') && t.includes('没有远端') && !document.querySelector('[data-testid="task-repo-syncing"]'); })()`));
+  ok("同步成功不再弹提示文案（分支名就在标签上），同步结束后也没有转圈", await ev(`!document.querySelector('[data-testid="task-repo-notes"]') && !document.querySelector('[data-testid="task-repo-syncing"]')`));
   ok("仓库标签是一行：仓库名不换行，分支名是小标签", await ev(`(() => { const c = document.querySelector('[data-testid="task-repo"]'); return c.getBoundingClientRect().height < 34 && c.querySelector('b').getBoundingClientRect().height < 22 && !!c.querySelector('[data-testid="task-repo-branch"]'); })()`));
   await shot("0m-task-repo-chip");
+  // 事件流一栏很窄、模型名又长时：Agent 和模型两个选择框仍在同一行（换行的是右边的操作按钮）
+  ok("输入框下方的 Agent / 模型选择在同一行，名字再长也不换行", await ev(`(() => { const ps = [...document.querySelectorAll('.flow-row .row-pickers .picker')]; if (ps.length < 2) return false; const sp = ps[1].querySelector('.chipbtn span'); const old = sp.textContent; sp.textContent = 'Claude Sonnet 5.5 (very long model name)'; const a = ps[0].getBoundingClientRect(), b = ps[1].getBoundingClientRect(); const same = Math.abs(a.top - b.top) < 4 && b.right <= ps[0].parentElement.getBoundingClientRect().right + 1; sp.textContent = old; return same; })()`));
+  // 仓库标签上的分支名可以点开直接切换分支（菜单向下展开，不会跑出页面顶部）
+  g("branch", "side-x");
+  await ev(click("task-repo-branch"));
+  await until(`document.querySelector('[data-testid="branch-side-x"]')`);
+  ok("点分支名弹出分支列表，向下展开、完整在窗口里", await ev(`(() => { const m = document.querySelector('[data-testid="branch-menu"]').getBoundingClientRect(); const t = document.querySelector('[data-testid="task-repo-branch"]').getBoundingClientRect(); return m.top >= t.bottom && m.top >= 0 && !!document.querySelector('[data-testid="branch-side-x"]'); })()`));
+  await shot("0m-task-repo-branch-menu");
+  await ev(click("branch-side-x"));
+  await until(`document.querySelector('[data-testid="task-repo-branch"]').innerText.includes('side-x')`);
+  ok("选中别的分支后真的切过去了", g("branch", "--show-current").stdout.toString().trim() === "side-x");
+  await ev(click("task-repo-branch"));
+  await until(`document.querySelector('[data-testid="branch-main"]')`);
+  await ev(click("branch-main"));
+  await until(`document.querySelector('[data-testid="task-repo-branch"]').innerText.includes('main')`);
+  ok("切回 main", g("branch", "--show-current").stdout.toString().trim() === "main");
+  // 「进行开发」前：基于基线分支新建 feature-需求名称-日期（这里直接调同一个接口，避免多发一轮对话影响后面的检查）
+  const sb = await ev(`window.harness.repoStartBranch(['demo'], '飞书排期A')`);
+  const feat = g("branch", "--show-current").stdout.toString().trim();
+  ok("进行开发前基于基线分支新建 feature-需求名称-日期 并切过去", sb?.[0]?.ok === true && sb[0].created === true && sb[0].base === "main" && /^feature-飞书排期A-\d{8}$/.test(feat) && sb[0].branch === feat);
+  g("switch", "main");
+  g("branch", "-D", feat);
   await until(`document.querySelector('[data-testid="task-diff"]').innerText.includes('+2')`);
   ok("改动统计的是关联仓库相对 HEAD 的新增 / 删除行数", await ev(`document.querySelector('[data-testid="task-diff"]').innerText.includes('+2')`));
   await ev(click("task-ctx-btn"));
@@ -1111,17 +1359,39 @@ else { console.error("unknown"); process.exit(2); }`,
   await ev(click("task-send"));
   await until(`document.querySelectorAll('[data-testid="flow-round"]').length === 1`);
   await until(`document.querySelector('[data-testid="task-phase"]').innerText.includes('等待回复')`, 20000);
-  ok("发出指令后出现 #1 轮次，状态变成等待回复，产物里是 AI 的回复", await ev(`document.querySelector('[data-testid="flow-round"]').innerText.includes('#1') && document.querySelector('[data-testid="out-body"]').innerText.includes('【echo】')`));
-  ok("第一次发送会带上任务说明：需求名、关联仓库、任务上下文", await ev(`(() => { const t = document.querySelector('[data-testid="out-body"]').innerText; return t.includes('【任务】飞书排期A') && t.includes('demo') && t.includes('接口文档：见群公告'); })()`));
-  ok("事件流里记录了这一轮", await ev(`(() => { const r = document.querySelectorAll('[data-testid="flow-round"]'); return r.length === 1 && r[0].innerText.includes('已完成'); })()`));
+  ok("发出指令后出现 #1 轮次，状态变成等待回复，AI 的回复在右侧事件流里", await ev(`document.querySelector('[data-testid="flow-round"]').innerText.includes('#1') && document.querySelector('[data-testid="flow-round"]').innerText.includes('【echo】')`));
+  ok("自由对话没有产物：左边没有产物区，只有提示", await ev(`!document.querySelector('[data-testid="out-body"]') && !!document.querySelector('[data-testid="task-empty"]')`));
+  ok("第一次发送会带上任务说明：需求名、关联仓库、任务上下文", await ev(`(() => { const t = document.querySelector('[data-testid="flow-round"]').innerText; return t.includes('【任务】飞书排期A') && t.includes('demo') && t.includes('接口文档：见群公告'); })()`));
+  ok("事件流里记录了这一轮", await ev(`(() => { const r = document.querySelectorAll('[data-testid="flow-round"]'); return r.length === 1 && r[0].innerText.includes('已回复'); })()`));
   await ev(setVal('[data-testid="task-input"]', "第二条", "HTMLTextAreaElement", "input"));
   await ev(click("task-send"));
   await until(`document.querySelectorAll('[data-testid="flow-round"]').length === 2`);
-  await until(`document.querySelector('[data-testid="task-phase"]').innerText.includes('等待回复') && document.querySelector('[data-testid="out-body"]').innerText.includes('【echo】第二条')`, 20000);
-  ok("第二轮不再重复带任务说明，轮次切换到 #2", await ev(`!document.querySelector('[data-testid="out-body"]').innerText.includes('【任务】') && document.querySelectorAll('[data-testid="flow-round"]').length === 2`));
+  await until(`document.querySelector('[data-testid="task-phase"]').innerText.includes('等待回复') && document.querySelectorAll('[data-testid="flow-round"]')[1]?.innerText.includes('【echo】第二条')`, 20000);
+  ok("第二轮不再重复带任务说明，回复也只在事件流里", await ev(`!document.querySelectorAll('[data-testid="flow-round"]')[1].innerText.includes('【任务】') && document.querySelectorAll('[data-testid="flow-round"]').length === 2 && !document.querySelector('[data-testid="out-body"]')`));
   await ev(`document.querySelectorAll('[data-testid="flow-round"]')[0].querySelector('.flow-user').click()`);
-  await until(`document.querySelector('[data-testid="out-body"]').innerText.includes('【任务】飞书排期A')`);
-  ok("点 #1 能看回第一轮的产物", true);
+  await sleep(200);
+  ok("点自由对话那一条，左边也不会出现产物", await ev(`!document.querySelector('[data-testid="out-body"]') && !document.querySelector('.flow-user.cur')`));
+  // 推进任务：每一步（业务分析 / 方案设计 / 自定义…）的产物各留一份，点了方案设计，业务分析的产物也还在
+  const advanceTo = async id => {
+    await ev(click("task-advance-top"));
+    await until(`document.querySelector('[data-testid="advance-dialog"]')`);
+    await ev(`document.querySelector('[data-testid="adv-card"][data-id="${id}"]').click()`);
+    await ev(click("adv-go"));
+  };
+  const roundsDone = n => until(`document.querySelectorAll('[data-testid="flow-round"]').length === ${n} && document.querySelector('[data-testid="task-phase"]').innerText.includes('等待回复')`, 20000);
+  await advanceTo("analysis");
+  await roundsDone(3);
+  await advanceTo("plan");
+  await roundsDone(4);
+  ok("产物区只按动作分标签：业务分析 / 方案设计（没有「对话」标签），默认停在最新的", await ev(`[...document.querySelectorAll('[data-testid="out-step"]')].map(b => b.innerText.replace(/\\s+/g, '')).join('|') === '业务分析|方案设计' && document.querySelector('[data-testid="out-step"].on').innerText.includes('方案设计') && document.querySelector('.out-title em').innerText === '#4'`));
+  await ev(`document.querySelector('[data-testid="out-step"][data-step="analysis"]').click()`);
+  ok("点「业务分析」标签，看到的是业务分析那一轮的产物（#3），没有被方案设计顶掉", await ev(`document.querySelector('.out-title em').innerText === '#3' && document.querySelector('[data-testid="out-step"].on').innerText.includes('业务分析')`));
+  // 跑过动作之后随口问一句：产物不被顶掉，仍停在最新动作（方案设计 #4）上
+  await ev(setVal('[data-testid="task-input"]', "随口问一句", "HTMLTextAreaElement", "input"));
+  await ev(click("task-send"));
+  await roundsDone(5);
+  ok("动作之后再自由对话，产物区不被覆盖，还停在方案设计（#4）", await ev(`document.querySelector('.out-title em').innerText === '#4' && document.querySelector('[data-testid="out-step"].on').innerText.includes('方案设计')`));
+  await shot("0e-task-steps");
   await shot("0e-task-rounds");
   await sleep(700);
   await ev(`location.reload()`);
@@ -1132,7 +1402,7 @@ else { console.error("unknown"); process.exit(2); }`,
   ok("重启后任务还在，状态是等待回复", await ev(`(() => { const t = document.querySelector('[data-testid="task-item"]'); return t.innerText.includes('飞书排期A') && t.innerText.includes('等待回复'); })()`));
   await ev(`document.querySelector('[data-testid="task-item"]').click()`);
   await until(`document.querySelector('[data-testid="task-page"]') && !document.querySelector('[data-testid="task-page"]').closest('[hidden]')`);
-  ok("重启后任务的轮次和关联仓库都保留", (await ev(`document.querySelectorAll('[data-testid="flow-round"]').length`)) === 2 && (await ev(`document.querySelector('[data-testid="task-repo"]')?.innerText.includes('demo')`)));
+  ok("重启后任务的轮次和关联仓库都保留", (await ev(`document.querySelectorAll('[data-testid="flow-round"]').length`)) === 5 && (await ev(`document.querySelector('[data-testid="task-repo"]')?.innerText.includes('demo')`)) && (await ev(`document.querySelectorAll('[data-testid="out-step"]').length`)) === 2);
   await ev(click("task-back"));
   await until(`document.querySelector('[data-testid="workbench"]') && !document.querySelector('[data-testid="workbench"]').closest('[hidden]')`);
   ok("点返回回到工作台", true);
@@ -1157,7 +1427,7 @@ else { console.error("unknown"); process.exit(2); }`,
   // 缺陷提醒：右上角按用户用的项目管理工具出现入口，图标上显示待处理数量，列表里能流转状态
   await ev(`window.harness.defectsRefresh().then(() => true)`);
   await until(`document.querySelector('[data-testid="defect-badge"]')?.innerText === '2'`, 30000);
-  ok("接了飞书项目后右上角出现缺陷入口，图标上显示 2 个待处理", await ev(`document.querySelector('[data-testid="nav-defects"]').closest('.titlebar-tools') !== null && document.querySelector('[data-testid="nav-defects"]').title.includes('飞书缺陷')`));
+  ok("接了飞书项目后右上角出现缺陷入口，图标上显示 2 个待处理", await ev(`document.querySelector('[data-testid="nav-defects"]').closest('.titlebar-tools') !== null && document.querySelector('[data-testid="nav-defects"]').getAttribute('aria-label').includes('飞书缺陷')`));
   ok("还没看过的缺陷，数字是红色的", await ev(`document.querySelector('[data-testid="defect-badge"]').classList.contains('new')`));
   await ev(click("nav-defects"));
   await until(`document.querySelectorAll('[data-testid="defect-item"]').length === 2`, 20000);
@@ -1167,7 +1437,7 @@ else { console.error("unknown"); process.exit(2); }`,
   fs.writeFileSync(dfile, JSON.stringify([D1, D2, D3])); // 有人又提了一个缺陷
   await ev(`window.harness.defectsRefresh().then(() => true)`);
   await until(`document.querySelector('[data-testid="defect-badge"]')?.innerText === '3'`, 30000);
-  ok("有人新提了缺陷：数字变成 3 并变红，提示里写明有新的", await ev(`document.querySelector('[data-testid="defect-badge"]').classList.contains('new') && document.querySelector('[data-testid="nav-defects"]').title.includes('1 个新的')`));
+  ok("有人新提了缺陷：数字变成 3 并变红，提示里写明有新的", await ev(`document.querySelector('[data-testid="defect-badge"]').classList.contains('new') && document.querySelector('[data-testid="nav-defects"]').getAttribute('aria-label').includes('1 个新的')`));
   await shot("0o-defect-badge");
   await ev(click("nav-defects"));
   await until(`document.querySelectorAll('[data-testid="defect-item"]').length === 3`, 20000);
@@ -1239,13 +1509,12 @@ else { console.error("unknown"); process.exit(2); }`,
   await ev(click("nav-settings"));
   await until(`document.querySelector('[data-testid="settings-office"]')`);
   await ev(click("settings-office"));
+  await until(`document.querySelector('[data-testid="office-switch-feishu"]')`);
+  await officeOn("feishu");
   await until(`document.querySelector('[data-testid="feishu-project-switch"]')`);
-  await ev(click("feishu-project-switch"));
-  await sleep(900);
-  ok("开启飞书项目会关掉钉钉项目管理", (c => !!c.feishuProject && !c.dingtalkProject)(JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations));
-  await ev(click("dingtalk-project-switch"));
-  await sleep(900);
-  ok("开启钉钉项目管理会关掉飞书项目", (c => !!c.dingtalkProject && !c.feishuProject)(JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations));
+  ok("启用飞书平台会关掉钉钉项目管理", (c => !!c.feishuProject && !c.dingtalkProject)(JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations));
+  await officeOn("dingtalk");
+  ok("启用钉钉平台会关掉飞书项目", (c => !!c.dingtalkProject && !c.feishuProject)(JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations));
   await shot("0h-project-exclusive");
 
   // DBX 插件中心：目录来自 DBX，直接装进本软件（不需要 DBX）；本机有 DBX 时还能识别 DBX 里的插件并桥接 AI
@@ -1598,7 +1867,12 @@ else { console.error("unknown"); process.exit(2); }`,
   {
     await ev(click("nav-database"));
     await until(`document.querySelector('[data-testid="database-page"]')`);
-    ok("标题栏有「数据库」入口；没有数据库连接时提示去添加", await ev(`!!document.querySelector('.titlebar [data-testid="nav-database"]') && (!!document.querySelector('[data-testid="db-empty"]') || !!document.querySelector('[data-testid="db-tree"]'))`));
+    ok("标题栏有「数据库」入口；没有数据库连接时提示去添加", await ev(`!!document.querySelector('.title-nav [data-testid="nav-database"]') && (!!document.querySelector('[data-testid="db-empty"]') || !!document.querySelector('[data-testid="db-tree"]'))`));
+    if (await ev(`!!document.querySelector('[data-testid="db-empty"]')`)) {
+      await ev(`document.querySelector('[data-testid="db-empty"] button').click(); true`);
+      await until(`document.querySelector('[data-testid="connections-page"]')`);
+      ok("数据库页的「去添加连接」直接停在连接页的「数据库」类别，不是默认的 XXL-JOB", await ev(`document.querySelector('[data-testid="conn-kind-database"]').classList.contains('on')`));
+    }
     await ev(click("nav-workbench"));
   }
 
@@ -2129,6 +2403,30 @@ else { console.error("unknown"); process.exit(2); }`,
   ok("选每周会出现星期几，并预告下次运行时间", await ev(`document.querySelectorAll('[data-testid="auto-f-days"] button').length === 7 && document.querySelector('[data-testid="auto-f-preview"]').innerText.startsWith('下次运行')`));
   await ev(setVal('[data-testid="auto-f-kind"]', "daily", "HTMLSelectElement", "change"));
   await ev(setVal('[data-testid="auto-f-time"]', "09:30", "HTMLInputElement", "input"));
+  // Agent / 模型都是可筛选的下拉框：模型取所选 Agent 的列表，也能直接输入列表里没有的
+  await ev(click("auto-f-provider"));
+  await until(`document.querySelector('[data-testid="auto-f-provider-search"]')`);
+  const autoOpts = tid => `[...document.querySelectorAll('[data-testid="${tid}-opt"]')].map(o => o.dataset.value)`;
+  const allAgents = await ev(autoOpts("auto-f-provider"));
+  await ev(setVal('[data-testid="auto-f-provider-search"]', "echo", "HTMLInputElement", "input"));
+  await sleep(150);
+  // 「默认（echo）」那一项的名字里也有 echo，所以会和 echo 一起留下
+  ok("自动化：Agent 下拉框可筛选，输入 echo 只剩「默认（echo）」和 echo", JSON.stringify(await ev(autoOpts("auto-f-provider"))) === JSON.stringify(["", "echo"]) && allAgents.length > 2 && allAgents[0] === "");
+  await ev(`document.querySelectorAll('[data-testid="auto-f-provider-opt"]')[1].click(); true`);
+  await until(`!document.querySelector('[data-testid="auto-f-provider-pop"]')`);
+  await ev(click("auto-f-model"));
+  await until(`document.querySelector('[data-testid="auto-f-model-search"]')`);
+  await ev(setVal('[data-testid="auto-f-model-search"]', "my-model-x", "HTMLInputElement", "input"));
+  await sleep(150);
+  await ev(`document.querySelector('[data-testid="auto-f-model-opt"]').click(); true`);
+  await until(`!document.querySelector('[data-testid="auto-f-model-pop"]')`);
+  ok("自动化：模型下拉框可以直接输入列表里没有的名字", (await ev(`document.querySelector('[data-testid="auto-f-model"]').dataset.value`)) === "my-model-x");
+  await ev(click("auto-f-model"));
+  await until(`document.querySelector('[data-testid="auto-f-model-pop"]')`);
+  await shot("0n-automation-model-filter");
+  await ev(`document.querySelector('[data-testid="auto-f-model-search"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+  await until(`!document.querySelector('[data-testid="auto-f-model-pop"]')`);
+  await pickSS("auto-f-provider", "");
   await shot("0n-automation-editor");
   await ev(click("auto-f-save"));
   await until(`document.querySelector('[data-testid="auto-item"]')`);
@@ -2251,7 +2549,8 @@ else { console.error("unknown"); process.exit(2); }`,
     ok("连接配置文件和密码文件里都没有明文密码，都在本软件数据目录", !connFile.includes("s3cret-pw-123") && !secFile.includes("s3cret-pw-123"));
     await ev(`document.querySelector('[data-testid="conn-card"][data-env="生产"] [data-testid="conn-edit"]').click()`);
     await until(`document.querySelector('[data-testid="conn-editor"]')`);
-    ok("编辑时密码框不回显，提示已设置", await ev(`(() => { const p = document.querySelector('[data-testid="conn-f-password"]'); return p.value === '' && p.placeholder.includes('已设置'); })()`));
+    await until(`document.querySelector('[data-testid="conn-f-password"]').value !== ''`);
+    ok("编辑时已保存的密码会回显（默认是圆点，点眼睛才看得见）", await ev(`(() => { const p = document.querySelector('[data-testid="conn-f-password"]'); return p.value === 's3cret-pw-123' && p.type === 'password'; })()`));
     await f("password", "eye-test-1");
     ok("密码框默认隐藏，点眼睛能显示，再点又隐藏", (await ev(`document.querySelector('[data-testid="conn-f-password"]').type`)) === "password" && (await ev(`(document.querySelector('[data-testid="conn-f-password-eye"]').click(), 0)`), await ev(`document.querySelector('[data-testid="conn-f-password"]').type`)) === "text" && (await ev(`(document.querySelector('[data-testid="conn-f-password-eye"]').click(), 0)`), await ev(`document.querySelector('[data-testid="conn-f-password"]').type`)) === "password");
     await f("password", "");

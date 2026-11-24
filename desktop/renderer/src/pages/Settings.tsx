@@ -9,6 +9,7 @@ import { Actions } from "./settings/Actions";
 import { Mcp } from "./settings/Mcp";
 import { Office } from "./settings/Office";
 import { Connections } from "./settings/Connections";
+import type { ConnKind } from "../../../shared/connections";
 import { Rules } from "./settings/Rules";
 import { Skills } from "./settings/Skills";
 import { AutostartRow } from "./settings/AutostartSettings";
@@ -62,6 +63,7 @@ const POLICY_ROWS: Array<[string, string, string]> = [
 
 export function Settings({
   initial,
+  initialConnKind,
   state,
   onChanged,
   theme,
@@ -70,6 +72,8 @@ export function Settings({
   onUseRepo,
 }: {
   initial?: string;
+  /** 打开「连接」页时默认选中的类别（从插件 / 数据库页的「管理连接」进来） */
+  initialConnKind?: ConnKind;
   state: AppState;
   onChanged: () => void;
   theme: Theme;
@@ -220,7 +224,7 @@ export function Settings({
 
             {sec === "repos" && <Repos state={state} onChanged={onChanged} onUse={onUseRepo} />}
             {sec === "office" && <Office state={state} onChanged={onChanged} />}
-            {sec === "connections" && <Connections />}
+            {sec === "connections" && <Connections initialKind={initialConnKind} />}
             {sec === "skills" && <Skills state={state} onChanged={onChanged} />}
             {sec === "mcp" && <Mcp state={state} onChanged={onChanged} />}
             {sec === "rules" && <Rules state={state} onChanged={onChanged} />}

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { PluginConn, PluginDbAccess, UiPlugin } from "../../../shared/pluginhost";
 import { pluginUrl } from "../../../shared/pluginhost";
-import { connKindOf } from "../../../shared/connections";
+import { connKindOf, type ConnKind } from "../../../shared/connections";
 import { api } from "../api";
+import { isBenignPluginError } from "../lib/pluginErr";
 import { GitlabFromHosts } from "./GitlabFromHosts";
 import { Icon } from "./Icon";
 
@@ -52,7 +53,7 @@ function DbPicker({ access, picked, onToggle }: { access: PluginDbAccess; picked
  * 它需要的一切都通过 postMessage 找这里，再转给主进程。
  * 带本机程序的插件，第一次运行前先让用户确认。
  */
-export function PluginView({ plugin, theme, active, onManageConnections }: { plugin: UiPlugin; theme: string; active: boolean; onManageConnections?: () => void }) {
+export function PluginView({ plugin, theme, active, onManageConnections }: { plugin: UiPlugin; theme: string; active: boolean; onManageConnections?: (kind?: ConnKind) => void }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [trusted, setTrusted] = useState(plugin.trusted);
   const [err, setErr] = useState("");
@@ -138,12 +139,17 @@ export function PluginView({ plugin, theme, active, onManageConnections }: { plu
   useEffect(() => {
     if (!kind || kind === "database" || !loaded || !sel || sel === sentSel.current) return;
     sentSel.current = sel;
-    post({ kind: "context", context: { ...baseCtx.current, connectionId: sel } });
+    post({ kind: "context", context: { ...baseCtx.current, ...connCtx(sel) } });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sel, loaded]);
 
   useEffect(() => setTrusted(plugin.trusted), [plugin.trusted, plugin.version]);
 
+  /** 连接类插件的上下文：连接 id；SSH 终端另带连接名（它的标题 / 标签靠这个显示名字，不然只能显示一串 id） */
+  const connCtx = (id: string) => {
+    const c = connsRef.current.find(x => x.id === id);
+    return { connectionId: id, ...(c && kind === "server" ? { connection: { id, name: c.name } } : {}) };
+  };
   const post = (m: Record<string, unknown>) => frame.current?.contentWindow?.postMessage({ __dbx: 1, ...m }, "*");
 
   useEffect(() => {
@@ -157,11 +163,11 @@ export function PluginView({ plugin, theme, active, onManageConnections }: { plu
         sentSel.current = selRef.current;
         const caps = ((await api.pluginRequest(plugin.id, "host.getCapabilities", {})).result ?? {}) as Record<string, boolean>;
         const dc = connsRef.current.find(c => c.id === selRef.current);
-        const ctx = kind && selRef.current ? { ...baseCtx.current, connectionId: selRef.current, ...(kind === "database" && dc ? { id: dc.id, name: dc.name, dbType: dc.dbType, database: dc.database ?? "" } : {}) } : baseCtx.current;
+        const ctx = kind && selRef.current ? { ...baseCtx.current, ...(kind === "database" ? { connectionId: selRef.current } : connCtx(selRef.current)), ...(kind === "database" && dc ? { id: dc.id, name: dc.name, dbType: dc.dbType, database: dc.database ?? "" } : {}) } : baseCtx.current;
         post({ kind: "init", context: ctx, locale: "zh-CN", theme: { appearance: theme, tokens: themeTokens() }, capabilities: caps });
       } else if (m.kind === "request" && typeof m.id === "number" && typeof m.method === "string") {
         const r = await api.pluginRequest(plugin.id, m.method, m.params);
-        if (!r.ok && m.method === "backend.invoke") setErr(r.error ?? "");
+        if (!r.ok && m.method === "backend.invoke") setErr(isBenignPluginError(r.error ?? "") ? "" : (r.error ?? ""));
         else if (r.ok && m.method === "backend.invoke") setErr("");
         post({ kind: "response", id: m.id, ...(r.ok ? { result: r.result ?? null } : { error: r.error ?? "失败" }) });
       } else if (m.kind === "notify" && typeof m.method === "string") {
@@ -170,9 +176,11 @@ export function PluginView({ plugin, theme, active, onManageConnections }: { plu
     };
     window.addEventListener("message", onMsg);
     const off = api.onPluginEvent(ev => ev.id === plugin.id && post({ kind: "event", method: ev.method, params: ev.params }));
+    const offBin = api.onPluginBinary(ev => ev.id === plugin.id && post({ kind: "binary", channel: ev.channel, data: ev.data }));
     return () => {
       window.removeEventListener("message", onMsg);
       off();
+      offBin();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trusted, plugin.id, theme]);
@@ -247,7 +255,10 @@ export function PluginView({ plugin, theme, active, onManageConnections }: { plu
     <div className="plug-view" data-testid="plugin-view" data-plugin={plugin.id} hidden={!active}>
       {err && (
         <div className="plug-err" data-testid="plugin-error">
-          插件后台出错：{err}
+          <span>插件后台出错：{err}</span>
+          <button className="plug-err-x" data-testid="plugin-error-close" title="关闭" aria-label="关闭" onClick={() => setErr("")}>
+            ×
+          </button>
         </div>
       )}
       {kind && conns && conns.length > 0 && (
@@ -277,7 +288,7 @@ export function PluginView({ plugin, theme, active, onManageConnections }: { plu
               数据库访问
             </button>
           ) : (
-            <button className="btn sm" data-testid="plugin-conn-manage" onClick={onManageConnections}>
+            <button className="btn sm" data-testid="plugin-conn-manage" onClick={() => onManageConnections?.(kind)}>
               管理连接
             </button>
           )}
@@ -288,7 +299,7 @@ export function PluginView({ plugin, theme, active, onManageConnections }: { plu
           <div className="plug-db-title">这个插件可以使用的数据库（测试 / 开发的库可读写，其他只读；查询有超时和行数上限）</div>
           <DbPicker access={access} picked={picked} onToggle={id => void toggleGrant(id)} />
           <div className="plug-db-foot">
-            <button className="btn sm" onClick={onManageConnections}>
+            <button className="btn sm" onClick={() => onManageConnections?.(kind)}>
               管理连接
             </button>
             <button className="btn sm" onClick={() => setShowAccess(false)}>
@@ -308,7 +319,7 @@ export function PluginView({ plugin, theme, active, onManageConnections }: { plu
               选择数据库
             </button>
           )}
-          <button className={`btn${kind === "database" ? "" : " primary"}`} data-testid="plugin-noconn-add" onClick={onManageConnections}>
+          <button className={`btn${kind === "database" ? "" : " primary"}`} data-testid="plugin-noconn-add" onClick={() => onManageConnections?.(kind)}>
             去添加连接
           </button>
         </div>

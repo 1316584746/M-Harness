@@ -16,6 +16,7 @@ describe("每日一句", () => {
   it("没有匹配时从全部里取；每句都有内容", () => {
     expect(QUOTES).toContain(pickQuote("2026-01-01", "xyz"));
     expect(QUOTES.every(x => x.text.length > 4)).toBe(true);
+    expect(QUOTES.filter(x => !x.author?.trim()).map(x => x.text)).toEqual([]); // 每一句都要有出处（人名 / 书名）
     expect(new Set(QUOTES.map(x => x.text)).size).toBe(QUOTES.length); // 句库里不能有重复的句子
   });
   it("已用过的句子不会再选，相配的用完了就从剩下的里选", () => {

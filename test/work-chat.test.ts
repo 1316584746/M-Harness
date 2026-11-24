@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseGroupField, spaceOf } from "../src/tools/work-chat";
+import { fetchWorkItemChat, parseGroupField, spaceOf } from "../src/tools/work-chat";
 
 describe("需求群", () => {
   it("自动拉群：读出群 id 和拉群方式", () => {
@@ -24,6 +24,14 @@ describe("需求群", () => {
     expect(spaceOf(undefined, "https://example.com/a/b")).toBeUndefined();
     expect(spaceOf("bad key;", undefined)).toBeUndefined();
   });
+
+  it("任务上没记空间：用设置里的默认空间去查，没有默认空间才报错", async () => {
+    // 假的 meegle（用 node 代替）：不管收到什么都回一个空对象，只看有没有走到查询这一步
+    const fp = { bin: process.execPath, binArgs: ["-e", "console.log('{}')", "--"], timeoutSec: 10, write: false } as never;
+    const none = await fetchWorkItemChat(fp, undefined, { wid: "123" });
+    expect(none).toMatchObject({ ok: false });
+    expect((none as { error?: string }).error).toContain("默认空间");
+    const withDefault = await fetchWorkItemChat({ ...(fp as object), defaultSpace: { key: "67bd99b84b71ca10c5256428" } } as never, undefined, { wid: "123" });
+    expect((withDefault as { error?: string }).error ?? "").not.toContain("不知道需求在哪个飞书项目空间");
+  });
 });
-
-

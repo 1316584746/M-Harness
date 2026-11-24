@@ -173,10 +173,23 @@ export async function fetchFeishuDefects(cfg: FeishuProjectConfig, now = Date.no
   return { ...base, ok: true, items: open, warnings: warnings.length ? warnings : undefined, user: who.name };
 }
 
-const failed = (text: string): string | undefined => {
-  if (/^启动 .* 失败|^meegle 退出码|^dws 退出码|^\[超时已终止\]/.test(text)) return text.replace(/^(meegle|dws) 退出码 \d+\n?/, "").slice(0, 200) || text.slice(0, 200);
-  const j = parseJson(text);
-  if (isObj(j) && isObj(j.error)) return String(j.error.message ?? "操作失败").replace(/^error=\w+,message=/, "").slice(0, 200);
+/** 把命令行报的错翻成人话：常见的几种单独说明，其余去掉 error=…,message= 的包装 */
+export function friendlyError(raw: string): string {
+  const msg = raw.replace(/^error=\w+,message=/, "");
+  if (/WorkItemNotFound|work item \d+ was not found|ErrnoFailedToGetWorkItemInfo/i.test(raw)) return "这个缺陷在飞书项目里已经不存在了（可能被删除或移走了），列表已刷新";
+  if (/NoPermission/i.test(raw)) return "没有权限做这个状态流转，请到飞书项目里确认你是不是负责人";
+  return msg.replace(/,retriable=\w+.*$/s, "").slice(0, 200);
+}
+
+/** 命令失败时的错误说明（没失败返回 undefined）。命令行出错时会把 JSON 错误体跟在「退出码」后面，要先解析出来，别把整坨 JSON 丢给用户 */
+export const failed = (text: string): string | undefined => {
+  const body = text.replace(/^(meegle|dws) 退出码 \d+\n?/, "");
+  const j = parseJson(body) ?? parseJson(text);
+  if (isObj(j) && isObj(j.error)) return friendlyError(String(j.error.message ?? "操作失败"));
+  if (/^启动 .* 失败|^meegle 退出码|^dws 退出码|^\[超时已终止\]/.test(text)) {
+    const m = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(body);
+    return m ? friendlyError(m[1]) : body.slice(0, 200) || text.slice(0, 200);
+  }
   return undefined;
 };
 

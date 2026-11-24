@@ -24,11 +24,40 @@ export function toolArgLine(name: string, arg: string): string {
   if (!s) return "";
   const grab = (k: string) => new RegExp(`"${k}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`).exec(s)?.[1];
   const un = (v: string) => v.replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-  const cmd = grab("command");
+  const cmd = grab("command") ?? grab("cmd");
   if (cmd) return `$ ${un(cmd)}`;
-  const other = grab("path") ?? grab("url") ?? grab("pattern") ?? grab("query");
+  // 搜索类：「模式  在哪搜」；读 / 写 / 改文件类：文件路径
+  const pat = grab("pattern") ?? grab("regex") ?? grab("query") ?? grab("glob_pattern") ?? grab("globPattern") ?? grab("searchTerm");
+  const where = grab("path") ?? grab("file_path") ?? grab("filePath") ?? grab("target_file") ?? grab("targetFile") ?? grab("target_directory") ?? grab("directory") ?? grab("file");
+  if (pat && where) return `${un(pat)}  ·  ${un(where)}`;
+  const other = pat ?? where ?? grab("url");
   if (other) return un(other);
   return s.startsWith("{") || s.startsWith("[") ? s : name === "shell" ? `$ ${s}` : s;
+}
+
+export type ToolKind = "read" | "search" | "edit" | "run" | "other";
+
+/** 工具大类（给图标和「读取了几个文件 · 搜索了几次」的小结用）：按名字认，认不出的算 other */
+export function toolKind(name: string): ToolKind {
+  const n = name.toLowerCase();
+  if (/(^|[_-])(grep|glob|search|find|rg|ls|list|semsearch|codebase)/.test(n) || /search|grep|glob/.test(n)) return "search";
+  if (/(^|[_-])(read|cat|view)/.test(n)) return "read";
+  if (/(edit|write|patch|apply|replace|create|delete|remove|mv|rename)/.test(n)) return "edit";
+  if (/(shell|bash|exec|command|run|terminal|powershell|cmd)/.test(n)) return "run";
+  return "other";
+}
+
+/** 一段工作过程的小结：「读取 3 个文件 · 搜索 2 次 · 执行 1 条命令 · 修改 1 个文件」，没有可归类的就返回空 */
+export function itemsSummary(items: FlowItem[]): string {
+  const c: Record<ToolKind, number> = { read: 0, search: 0, edit: 0, run: 0, other: 0 };
+  for (const it of items) if (it.kind === "tool") c[toolKind(it.name)]++;
+  const parts: string[] = [];
+  if (c.read) parts.push(`读取 ${c.read} 个文件`);
+  if (c.search) parts.push(`搜索 ${c.search} 次`);
+  if (c.edit) parts.push(`修改 ${c.edit} 处`);
+  if (c.run) parts.push(`执行 ${c.run} 条命令`);
+  if (c.other) parts.push(`其他 ${c.other} 个操作`);
+  return parts.join(" · ");
 }
 
 /** 把一轮的事件按时间整理成「说明 + 工作过程」的段落；times 与 events 一一对应（缺失时用 fallback 时间） */
@@ -116,4 +145,49 @@ export function buildFlow(events: HarnessEvent[], times: number[] | undefined, f
 export function segStats(seg: FlowSeg, endAt: number): { steps: number; ms: number } {
   const first = seg.items[0]?.at ?? seg.at;
   return { steps: seg.items.length, ms: Math.max(0, endAt - first) };
+}
+
+/**
+ * 一轮中途失败（超时 / 中断 / 出错）后，给「继续」用的进度摘要：已经说过的话、读过的文件、搜过的内容、跑过的命令。
+ * 重试是新开一个 Agent，它看不到上一轮的上下文，靠这份摘要接着做，不用从头再读一遍。总长度有上限。
+ */
+export function progressDigest(events: HarnessEvent[], times?: number[], maxChars = 6000): string {
+  const segs = buildFlow(events, times, 0);
+  const says = segs.map(s => s.say?.replace(/\s+/g, " ").trim()).filter((x): x is string => !!x);
+  const uniq = (xs: string[]) => [...new Set(xs.filter(Boolean))];
+  const items = segs.flatMap(s => s.items).filter((x): x is Extract<FlowItem, { kind: "tool" }> => x.kind === "tool" && x.status !== "fail");
+  const line = (it: Extract<FlowItem, { kind: "tool" }>) => toolArgLine(it.name, it.arg).replace(/\s+/g, " ").slice(0, 160);
+  const reads = uniq(items.filter(it => toolKind(it.name) === "read").map(line));
+  const searches = uniq(items.filter(it => toolKind(it.name) === "search").map(line));
+  const runs = uniq(items.filter(it => toolKind(it.name) === "run").map(line));
+  const edits = uniq(items.filter(it => toolKind(it.name) === "edit").map(line));
+  const part = (title: string, xs: string[], n: number) => (xs.length ? `${title}（${xs.length}）：\n${xs.slice(0, n).map(x => `- ${x}`).join("\n")}${xs.length > n ? `\n- …另有 ${xs.length - n} 条` : ""}` : "");
+  const out = [
+    says.length ? `上次过程中说过的话（按时间）：\n${says.slice(-12).map(x => `- ${x.slice(0, 200)}`).join("\n")}` : "",
+    part("已读过的文件", reads, 80),
+    part("已搜索过", searches, 40),
+    part("已执行过的命令", runs, 20),
+    part("已修改 / 写入过", edits, 20),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return out.length > maxChars ? out.slice(0, maxChars) + "\n…（已截断）" : out;
+}
+
+/**
+ * 「推进动作」的事件流只留简短进度：AI 最后写出来的整份产物会显示在左边，这里不再重复贴一遍。
+ * - 跑完后：最后那段只有说明、没有后续步骤的文字就是产物本身，去掉；
+ * - 太长的说明（多半是在写产物）：运行中写成「正在撰写产物」，其余的截成一行。
+ */
+export function briefSegs(segs: FlowSeg[], running: boolean, max = 160): FlowSeg[] {
+  const out: FlowSeg[] = [];
+  segs.forEach((s, k) => {
+    if (!s.say) return void out.push(s);
+    const trailing = k === segs.length - 1 && !s.items.length;
+    if (trailing && !running) return;
+    if (s.say.length <= max) return void out.push(s);
+    const say = trailing ? "正在撰写产物…（完成后显示在左侧）" : s.say.replace(/\s+/g, " ").trim().slice(0, 60) + "…";
+    out.push({ ...s, say });
+  });
+  return out;
 }

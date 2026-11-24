@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ProviderInfo } from "../../../shared/api";
 import { Icon } from "./Icon";
+import { matchOption } from "./SearchSelect";
 
 export function ProviderPicker({
   providers,
@@ -16,6 +17,8 @@ export function ProviderPicker({
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const cur = providers.find(p => p.name === value);
+  const [q, setQ] = useState("");
+  const shown = providers.filter(p => matchOption({ value: p.name, label: p.name, hint: p.desc }, q));
 
   useEffect(() => {
     if (!open) return;
@@ -36,17 +39,19 @@ export function ProviderPicker({
         className={`chipbtn ${open ? "on" : ""}`}
         data-testid="provider-trigger"
         disabled={disabled}
-        onClick={() => setOpen(!open)}
-        title={cur?.desc}
+        onClick={() => (setQ(""), setOpen(!open))}
+        title={cur?.desc ? `${value} · ${cur.desc}` : value}
       >
         <Icon name={cur?.kind === "agent" ? "bot" : "spark"} size={14} />
-        <span>{value}</span>
+        <span className="pk-label">{value}</span>
         <Icon name="down" size={13} />
       </button>
       {open && (
         <div className="menu" role="listbox">
           <div className="menu-title">选择模型 / Agent</div>
-          {providers.map(p => (
+          <input className="input menu-search" data-testid="provider-search" placeholder="搜索" value={q} onChange={e => setQ(e.target.value)} autoFocus />
+          {shown.length === 0 && <div className="menu-empty">没有匹配的</div>}
+          {shown.map(p => (
             <button
               key={p.name}
               type="button"

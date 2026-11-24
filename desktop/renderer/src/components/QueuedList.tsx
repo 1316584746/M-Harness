@@ -12,6 +12,7 @@ export function QueuedList({ items, onCancel }: { items: QueuedMsg[]; onCancel: 
           <span className="queued-text" title={m.text}>
             {m.text}
           </span>
+          {!!m.images?.length && <span className="queued-tag">{m.images.length} 张图</span>}
           <button className="icon-btn sm" title="取消这条" data-testid="queued-cancel" onClick={() => onCancel(i)}>
             <Icon name="x" size={13} />
           </button>

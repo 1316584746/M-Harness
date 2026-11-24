@@ -40,22 +40,65 @@ describe("技能 / MCP / 规则 / 动作的推荐与导入", () => {
 
   const cfg = () => JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8"));
 
-  it("软件自带的推荐：按类型给，加进配置后标记已添加，在页面里删掉后又变回可添加", async () => {
-    const b = new Backend(home, { send() {} });
-    for (const kind of ["mcp", "skill", "action", "rule"]) {
-      const list = b.resourceRecommended(kind);
-      expect(list.length).toBeGreaterThan(0);
-      expect(list.every(i => i.kind === kind && !i.added && i.source === "软件推荐")).toBe(true);
+  it("推荐：去 GitHub 按星标榜取（不是写死的），缓存下来；网络挂了用旧缓存；MCP 没有 .mcp.json 时认 README 里的配置", async () => {
+    const fence = "```";
+    const readme = `${fence}json\n${JSON.stringify({ mcpServers: { zeta: { command: "npx", args: ["zeta-mcp"] } } })}\n${fence}`;
+    let online = true;
+    let searches = 0;
+    const fake = (async (u: any) => {
+      const s = String(u);
+      if (!online) throw new Error("断网");
+      if (s.startsWith("https://api.github.com/search/repositories")) {
+        searches++;
+        const q = decodeURIComponent(new URL(s).searchParams.get("q")!);
+        const items = q.includes("topic:agent-skills")
+          ? [{ full_name: "o/skills-a", stargazers_count: 500, description: "技能合集", html_url: "https://github.com/o/skills-a", topics: [] }]
+          : q.includes("mcp in:name")
+            ? [{ full_name: "o/zeta-mcp", stargazers_count: 300, description: "demo mcp", html_url: "https://github.com/o/zeta-mcp", topics: [] }]
+            : [];
+        return new Response(JSON.stringify({ items }), { status: 200 });
+      }
+      const m = /packages\/gh\/([^@]+)@/.exec(s);
+      if (m) return new Response(JSON.stringify({ files: (m[1] === "o/skills-a" ? ["skills/x/SKILL.md"] : ["README.md"]).map(name => ({ name: "/" + name })) }), { status: 200 });
+      if (/raw\.githubusercontent\.com\/o\/zeta-mcp\//.test(s)) return new Response(readme, { status: 200 });
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+    const real = globalThis.fetch;
+    globalThis.fetch = fake;
+    try {
+      const b = new Backend(home, { send() {} });
+      const skills = await b.resourceRecommended("skill");
+      expect(skills.ok).toBe(true);
+      expect(skills.items.map(i => `${i.name}:${i.stars}:${i.source}`)).toEqual(["o/skills-a:500:GitHub 星标榜"]);
+      expect(fs.existsSync(path.join(home, "recommend-cache.json"))).toBe(true);
+      // 12 小时内不重复去拉
+      const before = searches;
+      await b.resourceRecommended("skill");
+      expect(searches).toBe(before);
+      // 强制刷新，但网络挂了：用旧缓存并说明
+      online = false;
+      const stale = await b.resourceRecommended("skill", true);
+      expect(stale.ok).toBe(true);
+      expect(stale.stale).toBe(true);
+      expect(stale.items).toHaveLength(1);
+      expect(stale.error).toBeTruthy();
+      // 没有缓存又断网：如实报错，不拿写死的数据凑
+      const none = await b.resourceRecommended("rule");
+      expect(none.ok).toBe(false);
+      expect(none.items).toEqual([]);
+      online = true;
+      // MCP：榜上的仓库，添加时扫描——没有 .mcp.json，从 README 的配置片段里装
+      const mcp = await b.resourceRecommended("mcp");
+      expect(mcp.items.map(i => i.name)).toEqual(["o/zeta-mcp"]);
+      const scan = await b.resourceScan("o/zeta-mcp", "mcp");
+      expect(scan.ok).toBe(true);
+      const item = scan.items!.find(i => i.kind === "mcp")!;
+      expect(item.name).toBe("zeta");
+      expect(await b.resourceAdd(item.key)).toMatchObject({ ok: true });
+      expect(cfg().mcpServers.zeta).toMatchObject({ command: "npx", enabled: true });
+    } finally {
+      globalThis.fetch = real;
     }
-    const mcp = b.resourceRecommended("mcp").find(i => i.name === "时间与时区")!;
-    expect(await b.resourceAdd(mcp.key)).toEqual({ ok: true });
-    expect(cfg().mcpServers.time).toMatchObject({ command: "uvx", enabled: true });
-    expect(b.resourceRecommended("mcp").find(i => i.key === mcp.key)!.added).toBe(true);
-    // 用户在 MCP 页里把它删掉
-    const c = cfg();
-    delete c.mcpServers.time;
-    fs.writeFileSync(path.join(home, "harness.config.json"), JSON.stringify(c));
-    expect(b.resourceRecommended("mcp").find(i => i.key === mcp.key)!.added).toBe(false);
   });
 
   it("从资源文件导入：四类都能添加，写进各自的配置；重复添加不会多出一份", async () => {

@@ -158,6 +158,15 @@ describe("连接：保存与密码", () => {
     expect(st.secretsOf(c.id).password).toBeUndefined();
   });
 
+  it("编辑框回显：只取这个连接已保存的密码字段；没保存的 / 不存在的连接返回空", () => {
+    const st = new ConnectionStore(tmp());
+    const c = st.save(db({ secrets: { password: "s3cret-pw" } }));
+    expect(st.revealSecrets(c.id)).toEqual({ password: "s3cret-pw" });
+    const none = st.save(db({ name: "无密码库" }));
+    expect(st.revealSecrets(none.id)).toEqual({});
+    expect(st.revealSecrets("不存在")).toEqual({});
+  });
+
   it("重新打开能读回；停用、删除；删除连接同时删掉它的密码", () => {
     const dir = tmp();
     const st = new ConnectionStore(dir);

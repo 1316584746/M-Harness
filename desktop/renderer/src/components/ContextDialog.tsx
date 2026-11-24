@@ -8,7 +8,7 @@ const KIND: Record<ReturnType<typeof docKind>, { label: string; icon: IconName }
   text: { label: "文本", icon: "file" },
 };
 
-const SOURCE_NAME: Record<Task["source"], string> = { feishu: "飞书 story", dingtalk: "钉钉待办" } as Record<Task["source"], string>;
+const SOURCE_NAME: Record<Task["source"], string> = { feishu: "飞书 story", dingtalk: "钉钉待办", manual: "手动新建的任务" };
 
 /** 任务上下文：一条一条加文档（链接 / 本机路径 / 文字），发给 AI 前一起带上 */
 export function ContextDialog({ task, onClose, onChange }: { task: Task; onClose: () => void; onChange: (patch: Partial<Task>) => void }) {

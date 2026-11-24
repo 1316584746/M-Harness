@@ -153,7 +153,7 @@ export function gitTools(repos: Record<string, RepoConfig> = {}, authEnv?: (remo
   return [
     {
       name: "git_repos",
-      description: "列出已登记的代码仓库（名称、本地路径、远端地址、平台，以及约定的基线 / 提测 / 联调分支 branches.base / test / integration）。创建 feature 分支、提测、联调时按这些分支操作。另有：readOnly=只读仓库（不能改）、scriptRepo=脚本仓（不是业务代码仓）、branchTemplate=feature 分支名模板（有就按它起名）、installCmd=依赖初始化命令、previewCmd=预览启动命令。",
+      description: "列出已登记的代码仓库（名称、本地路径、远端地址、平台，以及约定的基线 / 提测 / 联调分支 branches.base / test / integration）。创建 feature 分支、提测、联调时按这些分支操作。另有：readOnly=只读仓库（不能改）、scriptRepo=脚本仓（不是业务代码仓）、installCmd=依赖初始化命令。",
       risk: "read",
       schema: z.object({}),
       async run() {
@@ -249,7 +249,8 @@ export interface BranchInfo {
   dirty?: boolean;
 }
 
-const BRANCH_NAME = /^[A-Za-z0-9_][A-Za-z0-9_./@+-]*$/;
+// 允许中文等字母（需求名称常是中文），仍然不允许空格和 git 不接受的符号
+const BRANCH_NAME = /^[\p{L}\p{N}_][\p{L}\p{N}_./@+-]*$/u;
 export const validBranchName = (n: string) => BRANCH_NAME.test(n) && !n.includes("..") && !n.endsWith("/") && !n.endsWith(".lock");
 
 /** 聊天输入框里的分支选择器用：当前分支 + 本地 / 远端分支 */
@@ -342,6 +343,8 @@ export interface SyncResult {
   base?: string;
   switched: boolean;
   pulled: boolean;
+  /** 切分支前因为有未提交改动而 stash 暂存了多少个文件 */
+  stashed?: number;
   /** 没做的事和原因（比如有未提交改动，不敢切分支） */
   skipped?: string;
   error?: string;
@@ -359,7 +362,7 @@ export async function detectBaseBranch(dir: string, configured?: string): Promis
 
 /**
  * 把仓库同步到基线分支的最新代码：fetch → 切到基线分支 → 快进拉取。
- * 不会丢东西：工作区有未提交的改动时不切分支；拉取只做快进（--ff-only），有分叉就报错不合并。
+ * 不会丢东西：工作区有未提交的改动时先 stash 暂存（含新文件）再切，切不过去就放回原处；拉取只做快进（--ff-only），有分叉就报错不合并。
  * 联网失败（没网 / 没权限）时，仍然会切到本地已有的基线分支，并在 skipped 里说明没拉到最新。
  */
 export async function syncBaseBranch(dir: string, configured?: string, signal?: AbortSignal, env?: Record<string, string>): Promise<SyncResult> {
@@ -382,12 +385,25 @@ export async function syncBaseBranch(dir: string, configured?: string, signal?: 
   } else notes.push("这个仓库没有远端，只用本地分支");
 
   if (st.branch !== base) {
+    // 有未提交的改动：先 stash 暂存起来（含新文件），再切基线分支。改动不会丢，随时能在原分支上 git stash pop 恢复
+    let stashed = false;
+    const from = st.branch ?? "（游离）";
     if (st.changed > 0) {
-      notes.push(`当前分支 ${st.branch ?? "（游离）"} 有 ${st.changed} 个文件未提交，没有切换到 ${base}`);
-      return { ...out, ok: true, skipped: notes.join("；") };
+      const sh = await runGit(["stash", "push", "--include-untracked", "-m", `M-Harness 关联仓库前自动暂存（${from}）`], dir, signal, 60);
+      stashed = sh.code === 0 && !/No local changes/i.test(sh.out + sh.err);
+      if (!stashed) {
+        notes.push(`当前分支 ${from} 有 ${st.changed} 个文件未提交，暂存失败（${(sh.err || sh.out).trim().split("\n").slice(-1)[0] || "未知原因"}），没有切换到 ${base}`);
+        return { ...out, ok: true, skipped: notes.join("；") };
+      }
+      out.stashed = st.changed;
+      notes.push(`${from} 上有 ${st.changed} 个文件未提交，已用 git stash 暂存；要继续改，回到 ${from} 后执行 git stash pop`);
     }
     const sw = await runGit(["switch", base], dir, signal, 60);
-    if (sw.code !== 0) return { ...out, error: `切换到 ${base} 失败：${(sw.err || sw.out).trim().split("\n").slice(-1)[0]}` };
+    if (sw.code !== 0) {
+      // 切不过去：把刚暂存的改动放回原处，别让用户的东西悬在 stash 里
+      if (stashed) await runGit(["stash", "pop"], dir, undefined, 60);
+      return { ...out, stashed: undefined, error: `切换到 ${base} 失败：${(sw.err || sw.out).trim().split("\n").slice(-1)[0]}` };
+    }
     out.switched = true;
     out.branch = base;
   }
@@ -401,4 +417,85 @@ export async function syncBaseBranch(dir: string, configured?: string, signal?: 
     } else notes.push(`${base} 没有对应的远端分支，没有拉取`);
   }
   return { ...out, ok: true, skipped: notes.length ? notes.join("；") : undefined };
+}
+
+// ───────────── 进行开发：基于基线分支新建开发分支 ─────────────
+
+/** 需求名称 → 能放进分支名的一段：空白和 git 不接受 / 难看的符号换成 -，不超过 max 个字 */
+export function branchSlug(title: string, max = 40): string {
+  const s = title
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\s~^:?*[\]\\@{}<>|"'`!#$%&()=;,/+【】（）：，、；！？“”‘’《》「」]+/g, "-")
+    .replace(/\.{2,}/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  return Array.from(s).slice(0, max).join("").replace(/[-.]+$/, "");
+}
+
+/** 开发分支名：feature-需求名称-日期（如 feature-导出报表-20261123） */
+export function featureBranchName(title: string, now: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `feature-${branchSlug(title) || "dev"}-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}`;
+}
+
+export interface StartBranchResult {
+  ok: boolean;
+  /** 现在所在的分支 */
+  branch?: string;
+  /** 基线分支 */
+  base?: string;
+  /** 这次新建的 */
+  created?: boolean;
+  /** 已经在这个需求的开发分支上 / 同名分支已存在，直接用 */
+  reused?: boolean;
+  /** 提醒（没拉到最新、带着未提交改动等） */
+  skipped?: string;
+  error?: string;
+}
+
+/**
+ * 「进行开发」开始前：基于基线分支（取远端最新的 origin/<基线>）新建开发分支并切过去。
+ * - 已经在这个需求的开发分支上（feature-需求名称-*）就不再新建；同名分支已存在就直接切过去；
+ * - 工作区有未提交的改动会原样带到新分支（git 觉得会冲突就拒绝，原因带回来），不会丢；
+ * - 联网失败时用本地已有的基线分支，并在 skipped 里说明。
+ */
+export async function startFeatureBranch(
+  dir: string,
+  configuredBase: string | undefined,
+  title: string,
+  opts: { signal?: AbortSignal; env?: Record<string, string>; now?: Date } = {},
+): Promise<StartBranchResult> {
+  const st = await repoStatus(dir);
+  if (!st.exists) return { ok: false, error: "目录不存在" };
+  if (st.error) return { ok: false, error: st.error };
+  const name = featureBranchName(title, opts.now);
+  const prefix = `feature-${branchSlug(title) || "dev"}-`;
+  const base = await detectBaseBranch(dir, configuredBase);
+  if (st.branch?.startsWith(prefix)) return { ok: true, branch: st.branch, base, reused: true };
+  if (!base) return { ok: false, branch: st.branch, error: "没有找到基线分支（可以在设置里给这个仓库填基线分支）" };
+
+  const notes: string[] = [];
+  const hasRemote = (await runGit(["remote"], dir, undefined, 15)).out.trim().length > 0;
+  let fetched = false;
+  if (hasRemote) {
+    const f = await runGit(["fetch", "--prune", "origin"], dir, opts.signal, 120, opts.env);
+    fetched = f.code === 0;
+    if (!fetched) notes.push(`没能拉取远端（${(f.err || f.out).trim().split("\n").slice(-1)[0] || "网络或权限问题"}），用的是本地已有的 ${base}`);
+  }
+  const exists = async (ref: string) => (await runGit(["rev-parse", "--verify", "--quiet", ref], dir, undefined, 15)).code === 0;
+  const start = (await exists(`refs/remotes/origin/${base}`)) ? `origin/${base}` : (await exists(`refs/heads/${base}`)) ? base : undefined;
+  if (!start) return { ok: false, base, branch: st.branch, error: `找不到基线分支 ${base}（本地和远端都没有）` };
+
+  if (st.changed > 0) notes.push(`有 ${st.changed} 个文件未提交，已原样带到新分支`);
+
+  // 同名分支已经有了（同一天重复点）：直接切过去
+  if (await exists(`refs/heads/${name}`)) {
+    const sw = await runGit(["switch", name], dir, opts.signal, 60);
+    if (sw.code !== 0) return { ok: false, base, branch: st.branch, error: `切换到已有的 ${name} 失败：${(sw.err || sw.out).trim().split("\n").slice(-1)[0]}` };
+    return { ok: true, branch: name, base, reused: true, skipped: notes.length ? notes.join("；") : undefined };
+  }
+  const sw = await runGit(["switch", "-c", name, "--no-track", start], dir, opts.signal, 60);
+  if (sw.code !== 0) return { ok: false, base, branch: st.branch, error: `基于 ${start} 新建 ${name} 失败：${(sw.err || sw.out).trim().split("\n").slice(-1)[0]}` };
+  return { ok: true, branch: name, base, created: true, skipped: notes.length ? notes.join("；") : undefined };
 }

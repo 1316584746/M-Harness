@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildFlow, toolArgLine } from "../desktop/renderer/src/lib/flow";
+import { buildFlow, itemsSummary, toolArgLine, toolKind } from "../desktop/renderer/src/lib/flow";
 
 const p = (line: string, kind?: string) => ({ type: "agent_progress", line, ...(kind ? { kind } : {}) }) as any;
 
@@ -45,5 +45,17 @@ describe("buildFlow", () => {
   it("工具参数一行摘要", () => {
     expect(toolArgLine("shell", '{"command":"ls -la"}')).toBe("$ ls -la");
     expect(toolArgLine("read", '{"path":"a/b.ts"}')).toBe("a/b.ts");
+  });
+
+  it("搜索类参数：模式 + 位置；读文件：路径", () => {
+    expect(toolArgLine("grep", '{"pattern":"fixSubscribe","path":"src/service"}')).toBe("fixSubscribe  ·  src/service");
+    expect(toolArgLine("read", '{"path":"A.java","offset":280}')).toBe("A.java");
+    expect(toolArgLine("glob", '{"glob_pattern":"**/*.ts"}')).toBe("**/*.ts");
+  });
+
+  it("工具分类与小结", () => {
+    expect(["read", "grep", "edit", "shell", "foo"].map(toolKind)).toEqual(["read", "search", "edit", "run", "other"]);
+    const segs = buildFlow([p('🔧 read {"path":"a"}', "tool"), p("   ✓ read → x", "tool"), p('🔧 read {"path":"b"}', "tool"), p('🔧 grep {"pattern":"x"}', "tool")], [1, 2, 3, 4]);
+    expect(itemsSummary(segs[0].items)).toBe("读取 2 个文件 · 搜索 1 次");
   });
 });

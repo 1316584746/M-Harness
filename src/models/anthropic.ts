@@ -1,5 +1,6 @@
 import type { ModelAdapter, ModelReply, Msg, ToolCall } from "../core/types";
 import { postJson, toJsonSchema } from "./http";
+import { loadImages } from "./images";
 
 export interface AnthropicOptions {
   id: string;
@@ -12,7 +13,9 @@ export interface AnthropicOptions {
 
 /** Anthropic Messages API 适配器（也适用于兼容 Anthropic 协议的中转 / 部分国产模型的 Anthropic 端点） */
 export function anthropic(o: AnthropicOptions): ModelAdapter {
-  const url = (o.baseURL ?? "https://api.anthropic.com").replace(/\/+$/, "") + "/v1/messages";
+  const base = (o.baseURL ?? "https://api.anthropic.com").replace(/\/+$/, "");
+  const official = /^https?:\/\/api\.anthropic\.com$/i.test(base);
+  const url = base + "/v1/messages";
   return {
     id: o.id,
     async chat(messages, tools, signal): Promise<ModelReply> {
@@ -32,7 +35,8 @@ export function anthropic(o: AnthropicOptions): ModelAdapter {
       }
       const json = await postJson(
         url,
-        { "x-api-key": o.apiKey, "anthropic-version": "2023-06-01" },
+        // 官方只认 x-api-key；各家的 Anthropic 兼容地址（智谱、Kimi、MiniMax…）有的认 x-api-key，有的认 Bearer，两个都带
+        { "x-api-key": o.apiKey, "anthropic-version": "2023-06-01", ...(official ? {} : { authorization: `Bearer ${o.apiKey}` }) },
         body,
         signal,
       );
@@ -66,7 +70,10 @@ function toWireMessages(msgs: Msg[]): Array<{ role: "user" | "assistant"; conten
   };
   for (const m of msgs) {
     if (m.role === "user") {
-      push("user", [{ type: "text", text: m.content }]);
+      push("user", [
+        ...loadImages(m.images).map(i => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } })),
+        { type: "text", text: m.content },
+      ]);
     } else if (m.role === "assistant") {
       const blocks: any[] = [];
       if (m.content) blocks.push({ type: "text", text: m.content });

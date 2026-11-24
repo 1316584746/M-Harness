@@ -27,15 +27,26 @@ describe("版本比较 / 仓库解析", () => {
 describe("Updater", () => {
   let server: http.Server;
   let base = "";
-  let release: { status: number; body: any } = { status: 404, body: {} };
+  let release: { status: number; body: any; apiStatus?: number } = { status: 404, body: {} };
   let hits = 0;
 
   beforeAll(async () => {
+    // 假的 GitHub：网页 /releases/latest 跳转到 /releases/tag/<tag>（读版本号）；API 只用来取更新说明
     server = http.createServer((req, res) => {
       hits++;
-      expect(req.url).toBe("/repos/acme/app/releases/latest");
-      res.writeHead(release.status, { "content-type": "application/json" });
-      res.end(JSON.stringify(release.body));
+      if (req.url === "/acme/app/releases/latest") {
+        if (release.status === 404) return (res.writeHead(404), res.end());
+        if (release.status === 403) return (res.writeHead(429), res.end());
+        const tag = release.body.tag_name;
+        res.writeHead(302, { location: tag ? `/acme/app/releases/tag/${tag}` : "/acme/app/releases" });
+        return res.end();
+      }
+      if (req.url?.startsWith("/repos/acme/app/releases/tags/")) {
+        res.writeHead(release.apiStatus ?? 200, { "content-type": "application/json" });
+        return res.end(JSON.stringify(release.body));
+      }
+      res.writeHead(500);
+      res.end();
     });
     await new Promise<void>(r => server.listen(0, "127.0.0.1", r));
     base = `http://127.0.0.1:${(server.address() as any).port}`;
@@ -45,12 +56,12 @@ describe("Updater", () => {
   function make(over: Partial<ConstructorParameters<typeof Updater>[0]> = {}) {
     const sent: UpdateStateDTO[] = [];
     const opened: string[] = [];
-    const u = new Updater({ version: "0.1.0", repo: () => "acme/app", send: s => sent.push(s), openExternal: x => opened.push(x), canAutoInstall: false, apiBase: base, ...over });
+    const u = new Updater({ version: "0.1.0", repo: () => "acme/app", send: s => sent.push(s), openExternal: x => opened.push(x), canAutoInstall: false, apiBase: base, webBase: base, ...over });
     return { u, sent, opened };
   }
 
   it("没配仓库：手动检查提示未配置，自动检查不打扰", async () => {
-    const { u } = make({ repo: () => "" });
+    const { u } = make({ repo: () => "", defaultRepo: "" });
     expect((await u.check({ silent: true })).state).toBe("idle");
     expect((await u.check()).state).toBe("unconfigured");
   });
@@ -79,6 +90,21 @@ describe("Updater", () => {
     expect(u.state.state).toBe("available");
     release = { status: 403, body: {} };
     expect((await u.check({ silent: true })).state).toBe("available");
+  });
+
+  it("API 被限流（403）也不影响检查：照样报「有新版本」，只是没有更新说明", async () => {
+    release = { status: 200, body: { tag_name: "v0.2.0", body: "不会用到" }, apiStatus: 403 };
+    const { u } = make();
+    const s = await u.check();
+    expect(s).toMatchObject({ state: "available", latest: "0.2.0", url: "https://github.com/acme/app/releases/tag/v0.2.0" });
+    expect(s.notes).toBe("");
+  });
+
+  it("仓库还没发布过 Release：给出明确提示", async () => {
+    release = { status: 200, body: {} };
+    const s = await make().u.check();
+    expect(s.state).toBe("error");
+    expect(s.error).toContain("还没有发布过 Release");
   });
 
   it("并发检查合并为一次请求", async () => {

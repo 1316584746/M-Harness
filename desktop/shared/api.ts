@@ -22,6 +22,16 @@ export interface RepoStatusDTO {
   error?: string;
 }
 
+export interface ModelTestDTO {
+  ok: boolean;
+  error?: string;
+  /** 实际使用的协议和地址（和填的不一样时，据此纠正配置） */
+  type?: "openai-compat" | "anthropic";
+  baseURL?: string;
+  notes?: string[];
+  ms?: number;
+}
+
 export interface KeyProbeDTO {
   ok: boolean;
   models?: string[];
@@ -136,6 +146,19 @@ export interface RepoSyncDTO {
   base?: string;
   switched: boolean;
   pulled: boolean;
+  /** 切分支前，因为有未提交改动而 stash 暂存的文件数 */
+  stashed?: number;
+  skipped?: string;
+  error?: string;
+}
+
+export interface StartBranchDTO {
+  name: string;
+  ok: boolean;
+  branch?: string;
+  base?: string;
+  created?: boolean;
+  reused?: boolean;
   skipped?: string;
   error?: string;
 }
@@ -274,11 +297,19 @@ export interface RunRequest {
   input: string;
   provider: string;
   history: Msg[];
+  /** 这条消息附带的图片（本机文件绝对路径，粘贴的图片先由 saveImage 存好） */
+  images?: string[];
   workspace?: string;
   /** 只对本次覆盖该 provider 的默认模型 */
   model?: string;
   /** 本次不提供给模型的工具名 */
   disabledTools?: string[];
+  /** 会话 id：外部 Agent（Cursor）据此续接上一轮的 Agent，记得读过的文件，不用每一步从头探索 */
+  sessionKey?: string;
+  /** 这一轮开全新上下文，不续接 */
+  fresh?: boolean;
+  /** 探索预算（只读步骤用）：外部 Agent 工具调用达到这个数就让它直接写结论 */
+  toolBudget?: number;
 }
 
 export interface ToolInfo {
@@ -403,6 +434,8 @@ export interface HarnessApi {
   onDefectsOpen(cb: () => void): () => void;
   /** 关联仓库时同步到基线分支最新代码 */
   repoSync(name: string): Promise<RepoSyncDTO>;
+  /** 「进行开发」开始前：给每个仓库基于基线分支新建 feature-需求名称-日期 分支并切过去 */
+  repoStartBranch(names: string[], title: string): Promise<StartBranchDTO[]>;
   repoDiffStat(names: string[]): Promise<{ added: number; deleted: number; files: number }>;
   /** 任务的专属文件夹；open=true 时同时在资源管理器里打开，返回路径 */
   taskFolder(id: string, open?: boolean): Promise<string>;
@@ -416,8 +449,10 @@ export interface HarnessApi {
   pluginUninstall(id: string): Promise<{ ok: boolean; error?: string }>;
   /** 仓库里的 MCP / 技能 / 动作 / 规则：装进本软件的配置（参数是商店条目的 key） */
   /** 技能 / MCP / 动作 / 规则：软件自带的推荐、从 GitHub 导入、添加（这些不是插件，在各自的设置页里用） */
-  resourceRecommended(kind: string): Promise<import("./plugins").ResourceItem[]>;
-  resourceScan(url: string): Promise<import("./plugins").ResourceScan>;
+  /** 推荐：去 GitHub 按星标排行取这一类最高的 6 个仓库（缓存 12 小时；refresh 强制重新拉） */
+  resourceRecommended(kind: string, refresh?: boolean): Promise<import("./plugins").ResourceRec>;
+  /** kind 传 "mcp" 时，没有 .mcp.json 的仓库会再看 README 里的配置片段 */
+  resourceScan(url: string, kind?: string): Promise<import("./plugins").ResourceScan>;
   resourceAdd(key: string): Promise<{ ok: boolean; error?: string }>;
   /** 「加载」：在用户选的本机文件夹里找技能 / MCP / 动作 / 规则 */
   resourceScanLocal(dir: string): Promise<import("./plugins").ResourceScan>;
@@ -427,6 +462,8 @@ export interface HarnessApi {
   resourceSyncScan(id: string): Promise<import("./plugins").ResourceScan>;
   connectionList(): Promise<import("./connections").Connection[]>;
   connectionSave(input: import("./connections").ConnectionInput): Promise<{ ok: boolean; conn?: import("./connections").Connection; error?: string }>;
+  /** 编辑框打开时回显已保存的密码 / 令牌（字段名 → 明文），只在用户主动打开编辑时取 */
+  connectionSecrets(id: string): Promise<Record<string, string>>;
   connectionRemove(id: string): Promise<{ ok: boolean; error?: string }>;
   connectionToggle(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>;
   /** 测试连接（秘密留空时用已保存的），不会把秘密返回给界面 */
@@ -470,6 +507,8 @@ export interface HarnessApi {
   /** 插件界面发来的请求（backend.invoke 等），由主进程转给插件后台 */
   pluginRequest(id: string, method: string, params: unknown): Promise<import("./pluginhost").PluginReply>;
   onPluginEvent(cb: (e: { id: string; method: string; params: unknown }) => void): () => void;
+  /** 插件后台发来的二进制数据（终端输出等；插件要有 host.binary 权限） */
+  onPluginBinary(cb: (e: { id: string; channel: string; data: Uint8Array }) => void): () => void;
   /** 工作台：我的待办（飞书项目 + 钉钉），没启用的来源 enabled=false */
   workbenchTodos(): Promise<WorkbenchTodosDTO>;
   /** 上一次读成功的待办（立即返回、不联网），用来先显示；at 是读取时间 */
@@ -490,6 +529,8 @@ export interface HarnessApi {
   setSecret(name: string, value: string): Promise<{ ok: boolean; error?: string }>;
   /** 用（可能尚未保存的）Key 向服务商校验、取模型列表，并尽可能取回 Key 所属账号信息 */
   listModels(req: { type: string; baseURL?: string; apiKey?: string }): Promise<KeyProbeDTO>;
+  /** 真发一次很小的对话请求，验证地址 / 协议 / Key / 模型名都对得上 */
+  testModel(req: { type: string; baseURL?: string; apiKey?: string; model?: string }): Promise<ModelTestDTO>;
   /** 用（可能尚未保存的）令牌向代码托管平台查询所属账号 */
   /** 当前可提供给模型的全部工具（对话框里「工具」下拉用） */
   listTools(): Promise<ToolInfo[]>;
@@ -499,6 +540,10 @@ export interface HarnessApi {
   pickFile(title?: string): Promise<string | null>;
   /** 拖入窗口的文件对应的本地绝对路径 */
   pathForFile(file: File): string;
+  /** 把粘贴的图片存到数据目录下，返回文件路径；格式 / 大小不合要求返回错误原因 */
+  saveImage(bytes: Uint8Array, mime: string): Promise<{ ok: true; path: string } | { ok: false; error: string }>;
+  /** 读一张本地图片做缩略图（data URL）；不是图片 / 读不到返回 null */
+  imageDataUrl(path: string): Promise<string | null>;
   /** 仓库的本地 + 远端分支名，用于分支下拉候选 */
   /** 聊天输入框的分支选择器：当前分支 + 本地 / 远端分支 */
   branchInfo(dir: string): Promise<BranchInfoDTO>;
@@ -552,7 +597,6 @@ export interface HarnessApi {
   setZoom(factor: number): Promise<void>;
   /** 同步窗口标题栏按钮（最小化/最大化/关闭）的配色 */
   setTheme(theme: "light" | "dark"): Promise<void>;
-
   run(req: RunRequest): Promise<RunOutcome>;
   abort(runKey: string): Promise<void>;
   respondApproval(id: string, approved: boolean, remember: boolean): Promise<void>;

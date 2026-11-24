@@ -32,7 +32,7 @@ interface Manifest {
   description?: string;
   icon?: string;
   permissions?: string[];
-  entrypoints?: { backend?: { executable?: string }; ui?: { root?: string; entry?: string } };
+  entrypoints?: { backend?: { executable?: string; transport?: string }; ui?: { root?: string; entry?: string } };
   contributions?: { type?: string; icon?: string; label?: string; database_type?: string; workbench?: string }[];
   localizations?: Record<string, { name?: string; description?: string }>;
 }
@@ -74,6 +74,8 @@ export interface PluginHostOpts {
   /** 用户确认过的记录文件 */
   consentFile: string;
   onEvent?: (id: string, method: string, params: unknown) => void;
+  /** 插件后台发来的二进制帧（终端输出、文件分块），要有 host.binary 权限才会转出来 */
+  onBinary?: (id: string, channel: string, data: Uint8Array) => void;
   /** 测试用：自定义怎么启动后台程序 */
   launch?: (exe: string) => { command: string; args?: string[]; env?: Record<string, string> };
   locale?: string;
@@ -353,6 +355,10 @@ export class PluginHost {
       version: r.version,
       permissions: Array.isArray(r.manifest.permissions) ? r.manifest.permissions.map(String) : [],
       hostVersion: HOST_COMPAT_VERSION,
+      transport: r.manifest.entrypoints?.backend?.transport === "stdio-framed" ? "stdio-framed" : "stdio-jsonl",
+      onBinary: (channel, data) => {
+        if (r.manifest.permissions?.includes("host.binary")) this.o.onBinary?.(r.id, channel, data);
+      },
       onEvent: (m, params) => {
         if (r.manifest.permissions?.includes("host.events")) this.o.onEvent?.(r.id, m, params);
       },
@@ -415,6 +421,14 @@ export class PluginHost {
         const m = String(p.method ?? "");
         if (!m || m.length > 200 || /^(plugin|host)\//.test(m)) throw new Error("不允许的方法名");
         (await this.sidecar(r.id)).notify(m, p.params ?? {});
+        return null;
+      }
+      case "host.sendBinary": {
+        if (!perms.includes("host.binary")) throw new Error("这个插件没有声明 host.binary 权限");
+        const ch = String(p.channel ?? "");
+        const d = p.data instanceof Uint8Array ? p.data : p.data instanceof ArrayBuffer ? new Uint8Array(p.data) : undefined;
+        if (!ch || ch.length > 200 || !d) throw new Error("二进制数据不合法");
+        (await this.sidecar(r.id)).sendBinary(ch, d);
         return null;
       }
       case "host.getContext":

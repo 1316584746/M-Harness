@@ -17,6 +17,36 @@ const WIN_EXTS = [".exe", ".com", ".cmd", ".bat"];
 /** `npm prefix -g` 的结果（异步探测后缓存） */
 let npmPrefix: string | undefined;
 
+/**
+ * 随安装包一起发的 CLI（lark-cli / meegle / dws）所在目录，同事不用装 Node / npm 也能直接用。
+ * 顺序：HARNESS_CLI_DIR（手动指定）→ 打包后的 resources/cli → 开发时的 build/cli。找不到返回 undefined。
+ */
+export function bundledCliDir(): string | undefined {
+  const res = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  // 开发时：源码（src/tools）和打包后的主进程（out/main）距项目根都是两级；再兜底看一眼当前目录
+  const dev = typeof __dirname === "string" ? path.resolve(__dirname, "..", "..", "build", "cli") : undefined;
+  const tries = [process.env.HARNESS_CLI_DIR, res && path.join(res, "cli"), dev, path.join(process.cwd(), "build", "cli")];
+  for (const t of tries) {
+    try {
+      if (t && fs.statSync(t).isDirectory()) return t;
+    } catch {
+      /* 下一个 */
+    }
+  }
+  return undefined;
+}
+
+/** 把随包 CLI 目录追加进当前进程的 PATH：模型通过 shell 工具直接执行 `lark-cli ...` 时也能找到（不覆盖用户自己装的版本） */
+export function ensureBundledCliOnPath(): string | undefined {
+  const dir = bundledCliDir();
+  if (!dir) return undefined;
+  const key = Object.keys(process.env).find(k => k.toLowerCase() === "path") ?? "PATH";
+  const parts = (process.env[key] ?? "").split(path.delimiter).filter(Boolean);
+  const same = (a: string, b: string) => (WIN ? a.toLowerCase() === b.toLowerCase() : a === b);
+  if (!parts.some(p => same(p, dir))) process.env[key] = [...parts, dir].join(path.delimiter);
+  return dir;
+}
+
 /** 除了 PATH 之外，CLI 常见的安装位置 */
 export function extraBinDirs(): string[] {
   const d: string[] = [];
@@ -26,6 +56,8 @@ export function extraBinDirs(): string[] {
   } else {
     d.push(path.join(os.homedir(), ".npm-global", "bin"), path.join(os.homedir(), ".local", "bin"), "/usr/local/bin", "/opt/homebrew/bin");
   }
+  const b = bundledCliDir();
+  if (b) d.push(b); // 随包版本永远排最后：用户自己装的 / 用 npm 升级过的优先
   return d;
 }
 
@@ -48,7 +80,9 @@ export function resolveBin(bin: string): string {
     for (const c of candidates(path.resolve(bin))) if (isFile(c)) return c;
     return bin;
   }
-  const dirs = [...(process.env.PATH ?? process.env.Path ?? "").split(path.delimiter), ...extraBinDirs()].filter(Boolean);
+  const bundled = bundledCliDir();
+  const isBundled = (p: string) => !!bundled && (WIN ? p.toLowerCase() === bundled.toLowerCase() : p === bundled);
+  const dirs = [...(process.env.PATH ?? process.env.Path ?? "").split(path.delimiter).filter(p => !isBundled(p)), ...extraBinDirs()].filter(Boolean);
   for (const dir of dirs) for (const c of candidates(path.join(dir, bin))) if (isFile(c)) return c;
   return bin;
 }
@@ -119,7 +153,14 @@ export function ensureNpmBinOnPath(force = false): Promise<string | undefined> {
       const dir = WIN ? prefix : path.join(prefix, "bin");
       const parts = (process.env.PATH ?? process.env.Path ?? "").split(path.delimiter).filter(Boolean);
       const has = parts.some(p => (WIN ? p.toLowerCase() === dir.toLowerCase() : p === dir));
-      if (!has) process.env.PATH = [...parts, dir].join(path.delimiter);
+      if (!has) {
+        // 随包 CLI 目录要留在最后，npm 装的（用户升级过的）排在它前面
+        const b = bundledCliDir();
+        const i = b ? parts.findIndex(p => (WIN ? p.toLowerCase() === b.toLowerCase() : p === b)) : -1;
+        if (i >= 0) parts.splice(i, 0, dir);
+        else parts.push(dir);
+        process.env.PATH = parts.join(path.delimiter);
+      }
       resolve(dir);
     });
   });

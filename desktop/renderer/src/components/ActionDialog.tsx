@@ -3,18 +3,20 @@ import type { SkillDTO } from "../../../shared/api";
 import { api } from "../api";
 import type { ActionItem } from "../lib/actionSteps";
 import { Icon } from "./Icon";
+import { SearchSelect } from "./SearchSelect";
 
 /** 下拉里「不绑技能、自己写提示词」的取值 */
 const OWN = "__prompt__";
 
 /** 新建 / 编辑推进入口：挑一个技能挂到推进面板，再补产出要求和输入框提示（也可以不绑技能、直接写提示词） */
-export function ActionDialog({ item, onClose, onSave }: { item?: ActionItem; onClose: () => void; onSave: (v: Omit<ActionItem, "id">) => void }) {
+export function ActionDialog({ item, draft, onClose, onSave }: { item?: ActionItem; /** 当新建来开，但先填好这些默认值（内置动作的「编辑」：另存为一个自定义动作） */ draft?: Partial<Omit<ActionItem, "id">>; onClose: () => void; onSave: (v: Omit<ActionItem, "id">) => void }) {
+  const src = item ?? draft;
   const [skills, setSkills] = useState<SkillDTO[]>([]);
-  const [name, setName] = useState(item?.name ?? "");
-  const [pick, setPick] = useState(item ? (item.skill ? item.skill : OWN) : "");
-  const [output, setOutput] = useState(item?.output ?? "");
-  const [placeholder, setPlaceholder] = useState(item?.placeholder ?? "");
-  const [prompt, setPrompt] = useState(item?.prompt ?? "");
+  const [name, setName] = useState(src?.name ?? "");
+  const [pick, setPick] = useState(src ? (src.skill ? src.skill : OWN) : "");
+  const [output, setOutput] = useState(src?.output ?? "");
+  const [placeholder, setPlaceholder] = useState(src?.placeholder ?? "");
+  const [prompt, setPrompt] = useState(src?.prompt ?? "");
 
   useEffect(() => {
     void api.listSkills().then(setSkills);
@@ -37,7 +39,7 @@ export function ActionDialog({ item, onClose, onSave }: { item?: ActionItem; onC
       skill: own ? undefined : pick,
       output: output.trim() || undefined,
       placeholder: placeholder.trim() || undefined,
-      description: item?.description,
+      description: src?.description,
       hidden: item?.hidden,
     });
     onClose();
@@ -67,17 +69,16 @@ export function ActionDialog({ item, onClose, onSave }: { item?: ActionItem; onC
           <label className="cx-label" htmlFor="ad-skill">
             主 skill
           </label>
-          <select id="ad-skill" className="cx-input ad-select" value={pick} onChange={e => setPick(e.target.value)} data-testid="action-skill">
-            <option value="" disabled>
-              选一个 skill
-            </option>
-            {list.map(s => (
-              <option key={s.name} value={s.name} title={s.description}>
-                {s.name}
-              </option>
-            ))}
-            <option value={OWN}>不绑 skill，自己写提示词</option>
-          </select>
+          <SearchSelect
+            value={pick}
+            onChange={setPick}
+            options={[...list.map(s => ({ value: s.name, label: s.name })), { value: OWN, label: "不绑 skill，自己写提示词" }]}
+            placeholder="选一个 skill"
+            searchPlaceholder="搜索 skill 名字…"
+            emptyText="没有匹配的 skill"
+            className="cx-input ad-select"
+            testid="action-skill"
+          />
           {!skills.length && !own && <div className="ad-hint">还没有可用的技能，可以先到「设置 → 技能」新建，或选「不绑 skill，自己写提示词」。</div>}
           {!own && pick && <div className="ad-hint">{skills.find(s => s.name === pick)?.description || "推进时会让 AI 先读取这个技能的完整说明，再按它执行。"}</div>}
         </div>

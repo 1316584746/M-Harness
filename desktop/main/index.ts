@@ -1,28 +1,33 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, protocol, safeStorage, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, protocol, safeStorage, screen, session, shell } from "electron";
 import { getAutostart, setAutostart } from "./autostart";
 import { ensureDirs, migrateData, readPointer, requestDataDir, resolveLayout, writePointer, type DataDirInfo } from "./datadir";
 import fs from "node:fs";
 import path from "node:path";
 import { Backend } from "./backend";
-import { ensureNpmBinOnPath } from "../../src/tools/cli-spawn";
+import { ensureBundledCliOnPath, ensureNpmBinOnPath } from "../../src/tools/cli-spawn";
 import { HomeService } from "./home";
 import { Updater, type AutoUpdaterLike } from "./updater";
+import { loadWinState, saveWinState, usableWinState } from "./winstate";
 import type { RunRequest } from "../shared/api";
 import { PLUGIN_SCHEME } from "../shared/pluginhost";
 import type { ConnectionInput } from "../shared/connections";
 
-// 数据位置（见 datadir.ts）：打包后默认 D:\M-Harness-data（mac / Linux 在用户目录下），可在设置里改；
-// 开发时没改过位置就放项目根（与 CLI 共用 harness.config.json / .traces）。必须在 ready 之前定好，浏览器存储也跟着走
+// 数据位置（见 datadir.ts）：默认 D:\M-Harness-data（没有 D 盘 / mac / Linux 在用户目录下），不存在就自动创建，可在设置里改；
+// 开发模式也一样，首次会把项目根里已有的数据带过来。必须在 ready 之前定好，浏览器存储也跟着走
 const appData = app.getPath("appData");
 const systemUserData = app.getPath("userData");
 const layout = (() => {
   const l = resolveLayout({ packaged: app.isPackaged, cwd: process.cwd(), appData, forced: process.env["HARNESS_DATA_DIR"] });
   try {
+    const fresh = !fs.existsSync(l.home);
     ensureDirs(l);
     const mig = readPointer(appData).migrate;
     if (mig) {
       migrateData(mig, l);
       writePointer(appData, { dir: l.home }); // 迁完了，去掉「待迁移」标记
+    } else if (fresh && !app.isPackaged && l.source === "default") {
+      // 开发模式以前把数据放在项目根：默认目录第一次建出来时，把已有的配置 / 令牌 / 任务一次性带过来（旧的原样保留）
+      migrateData({ home: process.cwd(), userData: systemUserData }, l);
     }
     if (l.userData) app.setPath("userData", l.userData);
     return l;
@@ -51,9 +56,12 @@ const OVERLAY = {
 const ICON = path.join(app.getAppPath(), "build", "icon.png");
 
 function createWindow() {
+  // 记住上次的窗口位置、大小和是否最大化（像桌面软件那样，下次打开还在原来的地方）
+  const ws = usableWinState(loadWinState(home), screen.getAllDisplays().map(d => d.workArea), { width: 960, height: 600 }, { width: 1280, height: 820 });
   win = new BrowserWindow({
-    width: 1280,
-    height: 820,
+    width: ws.width,
+    height: ws.height,
+    ...(ws.x !== undefined && ws.y !== undefined ? { x: ws.x, y: ws.y } : {}),
     minWidth: 960,
     minHeight: 600,
     backgroundColor: "#181818",
@@ -69,6 +77,34 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+
+  if (ws.maximized) win.maximize();
+  const w = win;
+  let saveTimer: NodeJS.Timeout | undefined;
+  const persist = () => {
+    if (w.isDestroyed() || w.isMinimized() || w.isFullScreen()) return;
+    saveWinState(home, { ...w.getNormalBounds(), maximized: w.isMaximized() });
+  };
+  const later = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(persist, 600);
+  };
+  w.on("resize", later);
+  w.on("move", later);
+  w.on("maximize", later);
+  w.on("unmaximize", later);
+  w.on("close", () => (clearTimeout(saveTimer), persist()));
+
+  // 右键菜单：输入框里有 剪切 / 复制 / 粘贴 / 全选，选中文字能复制，链接能打开或复制（没有菜单栏，不加这个右键就没反应）
+  w.webContents.on("context-menu", (_e, p) => {
+    const items: Electron.MenuItemConstructorOptions[] = [];
+    if (p.linkURL && /^https?:\/\//i.test(p.linkURL)) items.push({ label: "在浏览器中打开链接", click: () => void shell.openExternal(p.linkURL) }, { label: "复制链接地址", click: () => clipboard.writeText(p.linkURL) }, { type: "separator" });
+    if (p.isEditable) items.push({ label: "撤销", role: "undo", enabled: p.editFlags.canUndo }, { label: "重做", role: "redo", enabled: p.editFlags.canRedo }, { type: "separator" }, { label: "剪切", role: "cut", enabled: p.editFlags.canCut }, { label: "复制", role: "copy", enabled: p.editFlags.canCopy }, { label: "粘贴", role: "paste", enabled: p.editFlags.canPaste }, { label: "全选", role: "selectAll" });
+    else if (p.selectionText.trim()) items.push({ label: "复制", role: "copy" }, { label: "全选", role: "selectAll" });
+    if (!app.isPackaged) items.push({ type: "separator" }, { label: "检查元素", click: () => w.webContents.inspectElement(p.x, p.y) });
+    while (items.length && items[items.length - 1].type === "separator") items.pop();
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: w });
   });
 
   // 开发时 F12 打开开发者工具（菜单已去掉）
@@ -147,6 +183,8 @@ function registerIpc() {
     const r = await dialog.showOpenDialog(win!, { properties: ["openFile"], title: title ? String(title) : "选择文件" });
     return r.canceled ? null : r.filePaths[0];
   });
+  ipcMain.handle("image:save", (_e, bytes: Uint8Array, mime: string) => backend.saveImage(bytes, String(mime ?? "")));
+  ipcMain.handle("image:data-url", (_e, p: string) => backend.imageDataUrl(String(p ?? "")));
   ipcMain.handle("repo:list", () => backend.listRepos());
   ipcMain.handle("automation:list", () => backend.automation.list());
   ipcMain.handle("automation:save", (_e, input: any) => backend.automation.saveItem(input));
@@ -161,6 +199,7 @@ function registerIpc() {
   ipcMain.handle("defects:transition", (_e, key: string, tid: string) => backend.defectTransition(String(key), String(tid)));
   ipcMain.handle("automation:running", () => backend.automation.list().filter(a => backend.automation.isRunning(a.id)).map(a => a.id));
   ipcMain.handle("repo:sync", (_e, name: string) => backend.repoSync(String(name)));
+  ipcMain.handle("repo:start-branch", (_e, names: string[], title: string) => backend.repoStartBranch(Array.isArray(names) ? names.map(String) : [], String(title ?? "")));
   ipcMain.handle("repo:diffstat", (_e, names: unknown) => backend.repoDiffStat(Array.isArray(names) ? names.map(String) : []));
   ipcMain.handle("task:folder", async (_e, id: string, open: boolean) => {
     const dir = backend.taskFolder(String(id));
@@ -171,14 +210,15 @@ function registerIpc() {
   ipcMain.handle("plugins:fetch-url", (_e, url: string) => backend.pluginFetchUrl(String(url)));
   ipcMain.handle("plugins:install", (_e, id: string) => backend.pluginInstall(String(id)));
   ipcMain.handle("plugins:uninstall", (_e, id: string) => backend.pluginUninstall(String(id)));
-  ipcMain.handle("resources:recommended", (_e, kind: string) => backend.resourceRecommended(String(kind)));
-  ipcMain.handle("resources:scan", (_e, url: string) => backend.resourceScan(String(url)));
+  ipcMain.handle("resources:recommended", (_e, kind: string, refresh?: boolean) => backend.resourceRecommended(String(kind), !!refresh));
+  ipcMain.handle("resources:scan", (_e, url: string, kind?: string) => backend.resourceScan(String(url), kind ? String(kind) : undefined));
   ipcMain.handle("resources:add", (_e, key: string) => backend.resourceAdd(String(key)));
   ipcMain.handle("resources:scan-local", (_e, dir: string) => backend.resourceScanLocal(String(dir)));
   ipcMain.handle("resources:sync-platforms", () => backend.resourceSyncPlatforms());
   ipcMain.handle("resources:sync-scan", (_e, id: string) => backend.resourceSyncScan(String(id)));
   ipcMain.handle("connections:list", () => backend.connectionList());
   ipcMain.handle("connections:save", (_e, input: ConnectionInput) => backend.connectionSave(input));
+  ipcMain.handle("connections:secrets", (_e, id: string) => backend.connectionSecrets(String(id)));
   ipcMain.handle("connections:remove", (_e, id: string) => backend.connectionRemove(String(id)));
   ipcMain.handle("connections:toggle", (_e, id: string, on: boolean) => backend.connectionToggle(String(id), !!on));
   ipcMain.handle("connections:test", (_e, input: ConnectionInput) => backend.connectionTest(input));
@@ -261,6 +301,7 @@ function registerIpc() {
   ipcMain.handle("secret:get", (_e, name: string) => backend.getSecret(String(name)));
   ipcMain.handle("secret:set", (_e, name: string, value: string) => backend.setSecret(String(name), String(value)));
   ipcMain.handle("models:list", (_e, req) => backend.listModels(req ?? {}));
+  ipcMain.handle("models:test", (_e, req) => backend.testModel(req ?? {}));
   ipcMain.handle("theme:set", (_e, theme: string) => {
     if (process.platform === "darwin" || !win || win.isDestroyed()) return;
     try {
@@ -300,6 +341,7 @@ if (!lock) {
   app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
     // 把 npm 全局目录补进 PATH：从图标启动的桌面端常常拿不到它，导致 npm 装的 CLI（lark-cli / meegle / dws）找不到
+    ensureBundledCliOnPath(); // 先放随包的 CLI（排最后兜底），npm 目录随后插到它前面
     void ensureNpmBinOnPath();
     // 只放行「读取本机字体列表」（设置里选字体用）和复制到剪贴板；其余权限请求一律拒绝
     session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(permission === "local-fonts" || permission === "clipboard-sanitized-write"));
@@ -325,6 +367,7 @@ if (!lock) {
       canAutoInstall: app.isPackaged && process.platform === "win32",
       loadAutoUpdater,
       apiBase: process.env["HARNESS_GITHUB_API"],
+      webBase: process.env["HARNESS_GITHUB_WEB"],
     });
     updater.start(() => backend.config.update.autoCheck);
     registerIpc();
@@ -332,6 +375,7 @@ if (!lock) {
     setTimeout(() => backend.prefetchModels(), 1500);
     backend.startAutomation();
     backend.startDefects();
+    void backend.onlineNotice(app.getVersion());
     app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
   });
   app.on("before-quit", () => backend?.dispose());

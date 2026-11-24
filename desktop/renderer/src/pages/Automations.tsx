@@ -5,6 +5,7 @@ import { api } from "../api";
 import { Icon } from "../components/Icon";
 import { Markdown } from "../components/Markdown";
 import { Req, useRequired } from "../components/Required";
+import { SearchSelect } from "../components/SearchSelect";
 import { Switch } from "./settings/Projects";
 
 type Tab = AutoStatus | "all";
@@ -235,6 +236,20 @@ function Editor({ init, state, onClose, onSaved }: { init: Partial<Automation>; 
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
   useEffect(() => void api.listRepos().then(setRepos).catch(() => setRepos([])), []);
+  // 模型候选：取所选 Agent（没选就是默认的）已保存 Key 能列出来的模型；取不到就只能手输
+  const [modelList, setModelList] = useState<{ models: string[]; labels: Record<string, string> }>({ models: [], labels: {} });
+  const modelOf = provider || state.defaultProvider;
+  useEffect(() => {
+    let alive = true;
+    setModelList({ models: [], labels: {} });
+    void api
+      .providerModels(modelOf, {})
+      .then(r => alive && r.ok && setModelList({ models: r.models ?? [], labels: r.labels ?? {} }))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [modelOf]);
 
   const schedule = (): Schedule => {
     if (kind === "daily") return { kind, time };
@@ -350,20 +365,27 @@ function Editor({ init, state, onClose, onSaved }: { init: Partial<Automation>; 
           </label>
           <label className="auto-field">
             <span>Agent</span>
-            <select className="input" data-testid="auto-f-provider" value={provider} onChange={e => setProvider(e.target.value)}>
-              <option value="">默认（{state.defaultProvider}）</option>
-              {state.providers.map(p => (
-                <option key={p.name} value={p.name}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
+            <SearchSelect
+              testid="auto-f-provider"
+              value={provider}
+              onChange={v => (setProvider(v), setModel(""))}
+              searchPlaceholder="搜索 Agent"
+              options={[{ value: "", label: `默认（${state.defaultProvider}）` }, ...state.providers.map(p => ({ value: p.name, label: p.name, hint: p.kind === "agent" ? "外部 Agent" : undefined }))]}
+            />
           </label>
         </div>
         <div className="auto-two">
           <label className="auto-field">
             <span>模型（可选）</span>
-            <input className="input" data-testid="auto-f-model" placeholder="不填用 Agent 的默认模型" value={model} onChange={e => setModel(e.target.value)} />
+            <SearchSelect
+              allowCustom
+              testid="auto-f-model"
+              value={model}
+              onChange={setModel}
+              placeholder="不选用 Agent 的默认模型"
+              searchPlaceholder="搜索模型，或直接输入模型名"
+              options={[{ value: "", label: "默认（Agent 的默认模型）" }, ...modelList.models.map(m => ({ value: m, label: modelList.labels[m] ?? m, hint: modelList.labels[m] ? m : undefined }))]}
+            />
           </label>
           <label className="auto-field">
             <span>结束时间（可选）</span>

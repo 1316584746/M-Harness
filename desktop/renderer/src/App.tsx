@@ -2,14 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import type { AppState, ApprovalRequest, TodoItemDTO } from "../../shared/api";
 import { api } from "./api";
 import { ApprovalModal } from "./components/ApprovalModal";
+import { Dock, type DockItem } from "./components/Dock";
 import { Icon, type IconName } from "./components/Icon";
 import { Logo } from "./components/Logo";
 import { PluginRail } from "./components/PluginRail";
 import { PluginView } from "./components/PluginView";
 import type { UiPlugin } from "../../shared/pluginhost";
+import type { ConnKind } from "../../shared/connections";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { isRunning, useChatStore } from "./lib/chatStore";
-import { PHASE_TEXT, TIME_GROUPS, taskPhase, timeGroup, useTaskStore, type Task } from "./lib/taskStore";
+import { PHASE_TEXT, TIME_GROUPS, taskPhase, timeGroup, useTaskStore, type Task, type TaskSeed } from "./lib/taskStore";
 import { Automations } from "./pages/Automations";
 import { Defects } from "./pages/Defects";
 import { useDefects } from "./lib/defects";
@@ -31,6 +33,9 @@ const TOOLS: Array<{ id: string; label: string; icon: IconName }> = [
   { id: "automation", label: "自动化任务", icon: "timer" },
   { id: "replay", label: "回放", icon: "history" },
 ];
+
+/** 标题栏里「M-Harness › 页面名」的页面名（Dock 只在首页，其它页面靠它知道自己在哪） */
+const PAGE_NAME: Record<string, string> = { chat: "对话", workbench: "工作台", task: "任务", database: "数据库", plugins: "插件中心", plugin: "插件", defects: "缺陷", automation: "自动化任务", replay: "回放", settings: "设置" };
 
 export type Theme = "light" | "dark";
 
@@ -117,6 +122,9 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
   }, [tab]);
   /** 打开设置时直接定位到哪一项（比如从工作台的「去设置里创建」进来） */
   const [settingsSec, setSettingsSec] = useState<string | undefined>();
+  const [settingsConnKind, setSettingsConnKind] = useState<ConnKind | undefined>();
+  /** 去「设置 → 连接」，并直接停在对应类别（SSH 插件 → 服务器，数据库 → 数据库……） */
+  const manageConnections = (k?: ConnKind) => (setSettingsConnKind(k), setSettingsSec("connections"), setTab("settings"));
   /** 设置 / 回放再点一次、或点「返回」时回到的主页面（首页或对话） */
   const mainTab = useRef("home");
   useEffect(() => {
@@ -216,7 +224,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
     setTab("task");
   };
   /** 点击需求：在左侧创建一个任务（同一个需求只建一次）；open=true 时直接打开 */
-  const taskFromItem = (item: TodoItemDTO, open = false) => {
+  const taskFromItem = (item: TaskSeed, open = false) => {
     let t = tasks.find(item.source, item.id);
     if (!t) {
       const sid = taskChat.newChat(undefined, { title: item.title });
@@ -260,6 +268,19 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
+  /** 底部 Dock：只放主要页面和设置；助手 / 缺陷 / 自动化 / 回放 / 主题这些小工具收在底部状态栏右侧 */
+  const dockGroups: DockItem[][] = [
+    [
+      { id: "chat", testid: "nav-chat", label: "对话", icon: "chat", hue: 212, on: tab === "chat", onClick: () => setTab("chat") },
+      { id: "workbench", testid: "nav-workbench", label: "工作台", icon: "grid", hue: 24, on: tab === "workbench" || tab === "task", onClick: () => setTab("workbench") },
+      { id: "database", testid: "nav-database", label: "数据库", icon: "database", hue: 160, on: tab === "database", onClick: () => setTab("database") },
+      { id: "plugins", testid: "nav-plugins", label: "插件中心", icon: "plug", hue: 268, on: tab === "plugins", onClick: () => setTab("plugins") },
+    ],
+    [
+      { id: "settings", testid: "nav-settings", label: "设置", icon: "settings", hue: 218, on: tab === "settings", dot: state.channel.running ? ("ok" as const) : undefined, onClick: () => toggle("settings") },
+    ],
+  ];
+
   return (
     <div className="app">
       <header className="titlebar">
@@ -268,44 +289,44 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
           M-Harness
           {anyRunning && <span className="spinner" style={{ color: "var(--run)", marginLeft: 8 }} />}
         </div>
-        <div className="titlebar-nav">
-          <button className={`tn-btn ${tab === "chat" ? "on" : ""}`} data-testid="nav-chat" title="对话" onClick={() => setTab("chat")}>
-            <Icon name="chat" size={15} />
-            <span>对话</span>
-          </button>
-          <button className={`tn-btn ${tab === "workbench" ? "on" : ""}`} data-testid="nav-workbench" title="工作台" onClick={() => setTab("workbench")}>
-            <Icon name="grid" size={15} />
-            <span>工作台</span>
-          </button>
-          <button className={`tn-btn ${tab === "database" ? "on" : ""}`} data-testid="nav-database" title="数据库" onClick={() => setTab("database")}>
-            <Icon name="database" size={15} />
-            <span>数据库</span>
-          </button>
-          <button className={`tn-btn ${tab === "plugins" ? "on" : ""}`} data-testid="nav-plugins" title="插件中心" onClick={() => setTab("plugins")}>
-            <Icon name="plug" size={15} />
-            <span>插件中心</span>
-          </button>
-        </div>
+        {tab !== "home" && PAGE_NAME[tab] && (
+          <span className="crumb" data-testid="crumb">
+            <Icon name="right" size={12} />
+            {PAGE_NAME[tab]}
+          </span>
+        )}
+        {/* 不在首页时，页面入口收在标题栏中间（首页是底部 Dock，两处不同时出现） */}
+        {tab !== "home" && (
+          <nav className="title-nav" aria-label="应用栏" data-testid="title-nav">
+            {dockGroups.map((g, gi) => (
+              <div className="title-nav-group" key={gi}>
+                {gi > 0 && <span className="title-nav-sep" aria-hidden />}
+                {g.map(it => (
+                  <button key={it.id} type="button" className={`tn-btn ${it.on ? "on" : ""}`} data-testid={it.testid} title={it.label} aria-label={it.label} aria-current={it.on ? "page" : undefined} onClick={it.onClick}>
+                    <Icon name={it.icon} size={17} />
+                    {it.dot && <span className={`tn-dot ${it.dot}`} />}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </nav>
+        )}
         <span className="spacer" />
+        {/* 小工具：助手 / 缺陷 / 自动化 / 回放 / 主题（底部状态栏已取消，放回标题栏右侧） */}
         <div className="titlebar-tools">
-          {hasUpdate && (
-            <button className="tb-btn update" data-testid="nav-update" title={`发现新版本 v${update!.latest}，点击查看`} onClick={() => setUpdateOpen(true)}>
-              <Icon name="cloud" size={17} />
-              <span className="tb-dot update" />
-            </button>
-          )}
-          <button className={`tb-btn ${assistantOpen ? "on" : ""}`} data-testid="nav-assistant" title="AI 助手 (Ctrl + Alt + I)" onClick={() => setAssistantOpen(o => !o)}>
-            <Icon name="bot" size={17} />
+          <button className={`tb-btn ${assistantOpen ? "on" : ""}`} data-testid="nav-assistant" title="AI 助手 (Ctrl + Alt + I)" aria-label="AI 助手" onClick={() => setAssistantOpen(o => !o)}>
+            <Icon name="bot" size={16} />
             {assistantRunning && !assistantOpen && <span className="tb-dot" />}
           </button>
           {defects?.enabled && (
             <button
               className={`tb-btn ${tab === "defects" ? "on" : ""}`}
               data-testid="nav-defects"
+              aria-label={defectCount > 0 ? `${ENTRY_NAME[defects.source ?? "feishu"]}：${defectCount} 个待处理${defectNew > 0 ? `（${defectNew} 个新的）` : ""}` : ENTRY_NAME[defects.source ?? "feishu"]}
               title={defectCount > 0 ? `${ENTRY_NAME[defects.source ?? "feishu"]}：${defectCount} 个待处理${defectNew > 0 ? `（${defectNew} 个新的）` : ""}` : ENTRY_NAME[defects.source ?? "feishu"]}
               onClick={() => toggle("defects")}
             >
-              <Icon name="bug" size={17} />
+              <Icon name="bug" size={16} />
               {defectCount > 0 && (
                 <span className={`tb-count ${defectNew > 0 ? "new" : ""}`} data-testid="defect-badge">
                   {defectCount > 99 ? "99+" : defectCount}
@@ -314,27 +335,33 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
             </button>
           )}
           {TOOLS.map(t => (
-            <button
-              key={t.id}
-              data-testid={`nav-${t.id}`}
-              className={`tb-btn ${tab === t.id ? "on" : ""}`}
-              title={t.label}
-              onClick={() => toggle(t.id)}
-            >
-              <Icon name={t.icon} size={17} />
+            <button key={t.id} className={`tb-btn ${tab === t.id ? "on" : ""}`} data-testid={`nav-${t.id}`} title={t.label} aria-label={t.label} onClick={() => toggle(t.id)}>
+              <Icon name={t.icon} size={16} />
             </button>
           ))}
-          <button className="tb-btn" data-testid="theme-toggle" title={theme === "dark" ? "切换到浅色" : "切换到深色"} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
-            <Icon name={theme === "dark" ? "moon" : "sun"} size={17} />
+          <button
+            className={`tb-btn ${hasUpdate ? "update" : ""} ${updateOpen ? "on" : ""}`}
+            data-testid="nav-update"
+            data-has-update={hasUpdate ? "1" : "0"}
+            title={hasUpdate ? `发现新版本 v${update!.latest}，点击查看` : "检查更新"}
+            aria-label={hasUpdate ? `发现新版本 v${update!.latest}` : "检查更新"}
+            onClick={() => {
+              // 有新版本直接看；没有就顺手检查一次，弹窗里显示结果
+              if (!hasUpdate && update?.state !== "checking" && update?.state !== "available" && update?.state !== "downloaded") void api.updateCheck();
+              setUpdateOpen(true);
+            }}
+          >
+            <Icon name="cloud" size={16} />
+            {hasUpdate && <span className="tb-dot update" />}
           </button>
-          <button className={`tb-btn ${tab === "settings" ? "on" : ""}`} data-testid="nav-settings" title="设置" onClick={() => toggle("settings")}>
-            <Icon name="settings" size={17} />
-            {state.channel.running && <span className="tb-dot" />}
+          <button className="tb-btn" data-testid="theme-toggle" title={theme === "dark" ? "切换到浅色" : "切换到深色"} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+            <Icon name={theme === "dark" ? "moon" : "sun"} size={16} />
           </button>
         </div>
       </header>
 
       <div className="body-row">
+
       <div style={{ "--nav-w": `${navCollapsed ? NAV_ICON_W : navW}px` } as CSSProperties} className={`body ${assistantOpen ? "has-assistant" : ""} ${!showNav ? "no-nav" : ""} ${navDrag ? "dragging" : ""}`}>
         {showNav && (
           <nav className={`nav ${navCollapsed ? "collapsed" : ""}`} data-testid="nav">
@@ -427,6 +454,18 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
                     <div className="sess-group-head" title={g.ws} data-testid="session-group-head" onClick={() => toggleGroup(g.ws)}>
                       <Icon name={open ? "down" : "right"} size={12} />
                       <span className="sess-group-name">{baseName(g.ws)}</span>
+                      <button
+                        className="sess-group-add"
+                        data-testid="session-group-del"
+                        title="删除这个工作区下的所有对话（不会删除文件夹本身）"
+                        onClick={e => {
+                          e.stopPropagation();
+                          if (!window.confirm(`删除「${baseName(g.ws)}」下的 ${g.list.length} 个对话？\n\n只删对话记录，文件夹和里面的文件不会动。`)) return;
+                          for (const s of g.list) store.remove(s.id);
+                        }}
+                      >
+                        <Icon name="trash" size={13} />
+                      </button>
                       <button
                         className="sess-group-add"
                         title="在这个工作区新建对话"
@@ -543,7 +582,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
           {/* 数据库页：第一次打开后常驻，切走再回来不丢打开的表和写了一半的 SQL */}
           {dbMounted && (
             <div className="page-host" hidden={tab !== "database"}>
-              <Database active={tab === "database"} onManage={() => (setSettingsSec("connections"), setTab("settings"))} onFocus={setDbFocus} run={dbRun} />
+              <Database active={tab === "database"} onManage={() => manageConnections("database")} onFocus={setDbFocus} run={dbRun} />
             </div>
           )}
           {tab === "plugins" && <Plugins state={state} onChanged={refresh} onOpenSettings={() => (setSettingsSec("skills"), setTab("settings"))} />}
@@ -559,14 +598,14 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
             const p = uiPlugins.find(x => x.id === id);
             return p && (
               <div key={`${p.id}@${p.version}`} className="page-host" hidden={!(tab === "plugin" && activePlugin === id)}>
-                <PluginView plugin={p} theme={theme} active={tab === "plugin" && activePlugin === id} onManageConnections={() => (setSettingsSec("connections"), setTab("settings"))} />
+                <PluginView plugin={p} theme={theme} active={tab === "plugin" && activePlugin === id} onManageConnections={manageConnections} />
               </div>
             );
           })}
           {tab === "automation" && <Automations state={state} />}
           {tab === "defects" && <Defects result={defects} />}
           {tab === "replay" && <Replay />}
-          {tab === "settings" && <Settings initial={settingsSec} state={state} onChanged={refresh} theme={theme} setTheme={setTheme} onBack={() => setTab(mainTab.current)}
+          {tab === "settings" && <Settings initial={settingsSec} initialConnKind={settingsConnKind} state={state} onChanged={refresh} theme={theme} setTheme={setTheme} onBack={() => setTab(mainTab.current)}
               onUseRepo={p => {
                 store.newChatWith(p);
                 setTab("chat");
@@ -578,7 +617,14 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
       {uiPlugins.length > 0 && <PluginRail plugins={uiPlugins} activeId={tab === "plugin" ? activePlugin : null} onOpen={openPlugin} onManage={() => setTab("plugins")} />}
       </div>
 
-      {updateOpen && update && update.state !== "none" && <UpdateDialog s={update} onClose={() => setUpdateOpen(false)} />}
+      {/* Dock 只在首页出现；其它页面藏起来（点左上角 M-Harness 回首页），页面里的按钮照常能用 */}
+      {tab === "home" && (
+        <div className="dock-slot float">
+          <Dock groups={dockGroups} />
+        </div>
+      )}
+
+      {updateOpen && update && <UpdateDialog s={update} onClose={() => setUpdateOpen(false)} />}
       {approvals[0] && (
         <ApprovalModal key={approvals[0].id} req={approvals[0]} queued={approvals.length - 1} onDone={() => setApprovals(a => a.slice(1))} />
       )}

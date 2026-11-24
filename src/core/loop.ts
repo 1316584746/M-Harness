@@ -8,6 +8,8 @@ export interface RunOptions {
   tools: Tool[];
   system: string;
   input: string;
+  /** 这条消息附带的图片（本机文件绝对路径） */
+  images?: string[];
   /** 之前的对话（不含 system），用于多轮会话 */
   history?: Msg[];
   maxSteps?: number;
@@ -23,6 +25,12 @@ export interface RunOptions {
   /** 沙箱根目录 */
   root: string;
   runId?: string;
+  /** 外部 Agent 的会话标识：同一个值 = 续接同一个 Agent（见 DelegateInput.sessionKey） */
+  sessionKey?: string;
+  /** 开全新上下文（不续接旧 Agent） */
+  freshSession?: boolean;
+  /** 外部 Agent 的探索预算（工具调用次数上限，见 DelegateInput.toolBudget） */
+  toolBudget?: number;
 }
 
 /** 统一入口：按 provider 类型走"自驱 loop"或"委托外部 Agent" */
@@ -38,6 +46,8 @@ export async function run(opts: RunOptions): Promise<RunResult> {
       : await runDelegate({ ...opts, emit, signal, backend: opts.provider.backend });
   return result;
 }
+
+const userMsg = (o: { input: string; images?: string[] }): Msg => ({ role: "user", content: o.input, ...(o.images?.length ? { images: o.images } : {}) });
 
 function withTimeout(signal: AbortSignal | undefined, ms: number | undefined): AbortSignal {
   const sigs: AbortSignal[] = [];
@@ -61,7 +71,7 @@ export async function runAgent(
   let messages: Msg[] = [
     { role: "system", content: opts.system },
     ...(opts.history ?? []),
-    { role: "user", content: opts.input },
+    userMsg(opts),
   ];
   let steps = 0;
   let tokens = 0;
@@ -147,10 +157,11 @@ export async function runDelegate(
     opts.system && `【系统要求】${opts.system}`,
     recent && `【此前对话】\n${recent}`,
     `【当前任务】\n${opts.input}`,
+    opts.images?.length && `【附带图片（本机文件，可直接查看）】\n${opts.images.join("\n")}`,
   ]
     .filter(Boolean)
     .join("\n\n");
-  const base: Msg[] = [...(opts.history ?? []), { role: "user", content: opts.input }];
+  const base: Msg[] = [...(opts.history ?? []), userMsg(opts)];
   // 中断要立刻生效：外部 Agent 在「准备中」（创建会话、提交任务）阶段往往不响应 signal，
   // 所以这里不能干等 backend.run 自己返回，而是让「中断」和「运行结束」赛跑。
   // backend 自己仍会收到 signal 去清理（杀进程 / 取消 run），只是用户界面不必等它。
@@ -162,8 +173,13 @@ export async function runDelegate(
     signal.addEventListener("abort", fail, { once: true });
   });
   try {
+    // 续接旧 Agent 时它已经有系统要求和此前的对话，只发这一轮的任务
+    const resumePrompt = [`【当前任务】\n${opts.input}`, opts.images?.length && `【附带图片（本机文件，可直接查看）】\n${opts.images.join("\n")}`].filter(Boolean).join("\n\n");
     const running = backend.run({
       prompt,
+      ...(opts.sessionKey ? { sessionKey: opts.sessionKey, resumePrompt, ...(opts.freshSession ? { freshSession: true } : {}) } : {}),
+      ...(opts.toolBudget ? { toolBudget: opts.toolBudget } : {}),
+      images: opts.images,
       cwd: opts.root,
       signal,
       onProgress: (line, kind) => !signal.aborted && emit({ type: "agent_progress", line, ...(kind ? { kind } : {}) }),

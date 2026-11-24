@@ -3,7 +3,7 @@
  * - 默认：Windows 是 D:\M-Harness-data（没有 D 盘就放用户目录下），macOS / Linux 是用户目录下的 M-Harness-data
  * - 可以在「设置 → 偏好 → 数据目录」里改；改的结果记在一个固定位置的小文件里（启动时最先读它）
  * - 目录不存在会自动创建；换目录时，下次启动先把旧数据复制过去（不删旧的）
- * - 开发模式（npm run desktop）没改过位置时仍用项目根目录，和命令行共用
+ * - 开发模式（npm run desktop）也一样用默认目录；默认目录第一次建出来时，由主进程把项目根里已有的数据带过来
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -66,8 +66,8 @@ export function resolveLayout(o: { packaged: boolean; cwd: string; appData: stri
   if (o.forced?.trim()) return { home: path.resolve(o.forced), source: "dev", defaultDir };
   const p = readPointer(o.appData);
   if (p.dir) return { home: path.resolve(p.dir), userData: path.join(path.resolve(p.dir), APP_STATE_DIR), source: "pointer", defaultDir };
-  if (o.packaged) return { home: defaultDir, userData: path.join(defaultDir, APP_STATE_DIR), source: "default", defaultDir };
-  return { home: o.cwd, source: "dev", defaultDir };
+  // 没改过位置就用默认目录（开发模式也一样，设置里显示的「当前」和「默认」才一致）
+  return { home: defaultDir, userData: path.join(defaultDir, APP_STATE_DIR), source: "default", defaultDir };
 }
 
 /** 目录不存在就创建（含子目录）；建不出来会抛错，由调用方退回到系统默认位置 */

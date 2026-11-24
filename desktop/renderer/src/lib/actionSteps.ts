@@ -1,4 +1,4 @@
-import { builtinPrompt, fillVars, type PromptVars } from "./actionPrompts";
+import { ACTION_FILES, builtinPrompt, fillVars, withShared, type PromptVars } from "./actionPrompts";
 export interface ActionItem {
   id: string;
   name: string;
@@ -26,11 +26,13 @@ export interface BuiltinStep {
 
 /** 通用的几步：软件自带（可以隐藏、调顺序，不能删）。提示词来自 src/prompts/*.md */
 export const BUILTIN_STEPS: BuiltinStep[] = [
-  { id: "plan", slug: "plan", name: "出方案", description: "读需求扫仓库，出技术方案（不改代码）", prompt: builtinPrompt("plan"), file: "action-plan.md" },
-  { id: "build", slug: "build", name: "改代码", description: "按方案或指令改代码并自检", prompt: builtinPrompt("build"), file: "action-build.md" },
-  { id: "review", slug: "review", name: "复核", description: "换个视角对账、找问题（不改代码）", prompt: builtinPrompt("review"), file: "action-review.md" },
+  { id: "analysis", slug: "analysis", name: "业务分析", description: "读飞书需求 / PRD 对照代码仓库，做业务分析（不改代码）", prompt: builtinPrompt("analysis"), file: "action-analysis.md" },
+  { id: "plan", slug: "plan", name: "方案设计", description: "读需求扫仓库，按团队模板出技术方案：背景、库表、接口、变更、灰度、风险、配置（不改代码）", prompt: builtinPrompt("plan"), file: "action-plan.md" },
+  { id: "build", slug: "build", name: "进行开发", description: "按方案或指令改代码并自检", prompt: builtinPrompt("build"), file: "action-build.md" },
+  { id: "review", slug: "review", name: "代码CR", description: "换个视角对账、找问题（不改代码）", prompt: builtinPrompt("review"), file: "action-review.md" },
   { id: "dev", slug: "dev", name: "联调", description: "推改动到联调分支（直推）或生成 PR 链接", prompt: builtinPrompt("dev"), file: "action-dev.md" },
   { id: "ship", slug: "ship", name: "提测", description: "推分支并准备提测 MR（目标是测试分支）", prompt: builtinPrompt("ship"), file: "action-ship.md" },
+  { id: "release", slug: "release", name: "上线检查", description: "列出本次改动涉及服务要新增的配置：xxl-job、MQ、数据库字段、Nacos / 机器配置文件等（不改代码）", prompt: builtinPrompt("release"), file: "action-release.md" },
 ];
 
 /** 没写指令时，自带动作里的 {{input}} 用这句代替 */
@@ -40,19 +42,27 @@ export interface ActionPrefs {
   order?: string[];
   /** 隐藏的自带步骤 id */
   hidden?: string[];
+  /** 自带步骤被用户改过的提示词（只存动作自己的那份，共享规范仍然用软件自带的）：id → 内容 */
+  overrides?: Record<string, { body: string }>;
 }
 
 type Cfg = Record<string, any> | null | undefined;
 
-/** 自带步骤：按设置里的顺序排好，并标出有没有被隐藏 */
-export function builtinSteps(cfg: Cfg): Array<BuiltinStep & { hidden: boolean }> {
+/** 自带步骤：按设置里的顺序排好，标出有没有被隐藏、提示词有没有被用户改过（改过的用改后的，共享规范不变） */
+export function builtinSteps(cfg: Cfg): Array<BuiltinStep & { hidden: boolean; edited: boolean; body: string; defaultBody: string }> {
   const prefs = (cfg?.actionPrefs ?? {}) as ActionPrefs;
   const order = prefs.order ?? [];
   const rank = (id: string) => {
     const i = order.indexOf(id);
     return i < 0 ? order.length + BUILTIN_STEPS.findIndex(b => b.id === id) : i;
   };
-  return [...BUILTIN_STEPS].sort((a, b) => rank(a.id) - rank(b.id)).map(b => ({ ...b, hidden: (prefs.hidden ?? []).includes(b.id) }));
+  return [...BUILTIN_STEPS].sort((a, b) => rank(a.id) - rank(b.id)).map(b => {
+    const defaultBody = ACTION_FILES[b.id]?.body ?? "";
+    const mine = prefs.overrides?.[b.id]?.body;
+    const edited = typeof mine === "string" && mine.trim().length > 0 && mine.trim() !== defaultBody;
+    const body = edited ? mine!.trim() : defaultBody;
+    return { ...b, prompt: edited ? withShared(body) : b.prompt, hidden: (prefs.hidden ?? []).includes(b.id), edited, body, defaultBody };
+  });
 }
 
 /** 自定义动作（设置 → ACTIONS 里配的），保持设置里的顺序 */
@@ -93,6 +103,18 @@ export function composeStep(a: { prompt: string; file?: string; skill?: string; 
   if (!p) return text;
   if (p.includes("{{input}}")) return p.split("{{input}}").join(text || (a.file || a.skill ? EMPTY_INPUT : "")).trim();
   return text ? `${p}\n\n${text}` : p;
+}
+
+/** 「进行开发」开始前，软件已经替 AI 把开发分支建好了；把每个仓库的结果写成一段话，跟在指令后面发给 AI */
+export function branchNote(rs: Array<{ name: string; ok: boolean; branch?: string; base?: string; created?: boolean; reused?: boolean; skipped?: string; error?: string }>): string {
+  if (!rs.length) return "";
+  const lines = rs.map(r => {
+    if (!r.ok) return `- 仓库 ${r.name}：新建开发分支失败（${r.error ?? "未知原因"}）。先把原因告诉用户，不要在基线分支上直接改代码。`;
+    if (!r.branch) return `- 仓库 ${r.name}：${r.skipped ?? "没有处理"}`;
+    const how = r.created ? `已基于基线分支 ${r.base ?? ""} 的最新代码新建并切到 ${r.branch}` : `当前就在这个需求的开发分支 ${r.branch} 上，直接继续`;
+    return `- 仓库 ${r.name}：${how}${r.skipped ? `（${r.skipped}）` : ""}`;
+  });
+  return `## 开发分支（软件已处理好，不用再新建、不用再问用户）\n\n${lines.join("\n")}\n\n在这个分支上开发，不要切回基线分支改代码。`;
 }
 
 /** 现在做不了的自带步骤：id → 原因。联调要送到联调分支，关联的仓库里一个都没配就没法做 */

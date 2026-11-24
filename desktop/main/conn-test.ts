@@ -260,7 +260,7 @@ async function testSsh(f: Record<string, string>): Promise<ConnTestResult> {
   if (!p.ok) return fail(p.ms, p.error ?? "连接失败");
   const banner = p.data?.toString("latin1").split(/\r?\n/)[0] ?? "";
   if (!banner.startsWith("SSH-")) return fail(p.ms, "端口通了，但对方不是 SSH 服务", banner.slice(0, 60));
-  return { ok: true, ms: p.ms, message: "端口可达，SSH 服务正常", detail: banner.replace(/^SSH-[\d.]+-/, "") };
+  return { ok: true, ms: p.ms, message: "端口可达，SSH 服务正常（只检查了端口，账号密码要打开终端才会验证）", detail: banner.replace(/^SSH-[\d.]+-/, "") };
 }
 
 const PG_SSL_REQUEST = Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]);

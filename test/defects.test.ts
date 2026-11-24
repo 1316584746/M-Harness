@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DefectWatcher } from "../desktop/main/defects";
-import { dingtalkTransition, dingtalkTransitions, feishuTransition, feishuTransitions, fetchDingtalkDefects, fetchFeishuDefects, parseDefectRows, parseDingtalkTasks, resetDefectMeta } from "../desktop/main/defects-source";
+import { dingtalkTransition, dingtalkTransitions, failed, feishuTransition, feishuTransitions, fetchDingtalkDefects, fetchFeishuDefects, parseDefectRows, parseDingtalkTasks, resetDefectMeta } from "../desktop/main/defects-source";
 import { defectKey, isClosedStatus, type Defect, type DefectsResult } from "../desktop/shared/defects";
 
 const space = { name: "技术支持部", key: "pk1", simpleName: "wk-support" };
@@ -163,6 +163,24 @@ describe("缺陷：飞书拉取与流转（假 meegle）", () => {
     const log = fs.readFileSync(calls, "utf8");
     expect(log).toContain("workflow transition-state --project-key=pk1 --work-item-id=1 --transition-id=11");
     expect(log).not.toContain("rm -rf");
+  });
+});
+
+describe("缺陷：命令行报错翻成人话", () => {
+  const body = (msg: string) => JSON.stringify({ data: null, error: { code: "SERVER_CALL_FAILED", message: msg, retryable: false }, meta: { logid: "x" } }, null, 2);
+  it("缺陷已被删除：说清楚，不把整坨 JSON 丢给用户", () => {
+    const e = failed(`meegle 退出码 1\n${body("error=WorkItemNotFound,message=work item 7176790147 was not found.,retriable=false")}`)!;
+    expect(e).toContain("已经不存在");
+    expect(e).not.toContain("{");
+  });
+  it("没有权限；其他错误只去掉包装", () => {
+    expect(failed(`meegle 退出码 1\n${body("error=ErrWorkItemNoPermission,message=No Permission,[VerifyTransit]")}`)).toContain("没有权限");
+    expect(failed(`meegle 退出码 1\n${body("error=Other,message=出了点别的问题,retriable=true")}`)).toBe("出了点别的问题");
+  });
+  it("JSON 被截断 / 带杂质时，也能抠出 message；成功的返回 undefined", () => {
+    const cut = `meegle 退出码 1\n{ "data": null, "error": { "code": "SERVER_CALL_FAILED", "message": "error=WorkItemNotFound,message=work item 1 was not found.,retriable=false", "retryable": false }, "met`;
+    expect(failed(cut)).toContain("已经不存在");
+    expect(failed(JSON.stringify({ state_name: "OPEN" }))).toBeUndefined();
   });
 });
 

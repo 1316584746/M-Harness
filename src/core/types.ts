@@ -15,6 +15,8 @@ export interface Msg {
   toolCalls?: ToolCall[];
   /** tool 消息对应的调用 id */
   toolCallId?: string;
+  /** user 消息附带的图片（本机文件绝对路径；发给模型时才读成 base64，所以对话记录 / trace 里不会塞大段图片数据） */
+  images?: string[];
 }
 
 export interface Usage {
@@ -85,6 +87,19 @@ export interface ModelAdapter {
 
 export interface DelegateInput {
   prompt: string;
+  /**
+   * 会话标识（同一个任务 / 对话用同一个）。支持续接的后端（Cursor SDK）据此复用上一轮的 Agent：
+   * 它记得读过的文件和做过的事，不用每一步都从头探索。没有就每次新开。
+   */
+  sessionKey?: string;
+  /** 续接上一轮的 Agent 时改用这份更短的提示（不再重复系统要求和此前对话）；没续接成功就用 prompt */
+  resumePrompt?: string;
+  /** 这一轮要开全新上下文：丢掉 sessionKey 对应的旧 Agent */
+  freshSession?: boolean;
+  /** 探索预算：工具调用达到这个数就叫停，让它基于已掌握的信息直接收尾（只给只读步骤用，如分析 / 方案 / CR） */
+  toolBudget?: number;
+  /** 用户附带的图片（本机文件绝对路径）；prompt 里已经列出了路径，支持图片输入的后端可以直接带上图片本身 */
+  images?: string[];
   cwd: string;
   signal: AbortSignal;
   /** 外部 agent 的过程输出（工具调用、思考等），用于写 trace / 展示；kind 不传按 text 处理 */

@@ -65,4 +65,13 @@ export const md = (ms: number): string => {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 };
 
+/**
+ * 「仅挂名负责人」：飞书里这个需求的某个节点负责人是我，但我名下没有任何子任务、也没有排期。
+ * 这种需求不是「我的排期」：不上甘特图、不放进「进行中」，单独收在一个默认折叠的分组里。
+ * 只对飞书项目生效（钉钉待办本来就可以没有日期）。
+ */
+export function isNominal(t: { source: string; start?: number; end?: number; due?: number; children?: Array<{ kind: string }> }): boolean {
+  return t.source === "feishu" && t.start === undefined && t.end === undefined && t.due === undefined && !(t.children ?? []).some(c => c.kind === "subtask");
+}
+
 export const WEEK = ["日", "一", "二", "三", "四", "五", "六"];

@@ -1,18 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppState, AskRequest, HarnessEvent, Msg } from "../../../shared/api";
 import { api } from "../api";
+import { toolBudgetFor } from "./budget";
 
 /** 运行中按回车排队的消息 */
 export interface QueuedMsg {
   text: string;
   onFinished?: () => void;
   runInput?: string;
+  images?: string[];
+  /** 这条是「推进任务」里选的哪一步（任务页按步骤分开存产物用） */
+  step?: StepRef;
+}
+
+/** 推进任务时选的步骤：id（analysis / plan / build … 或自定义动作的 id）和显示名 */
+export interface StepRef {
+  id: string;
+  name: string;
 }
 
 export interface Turn {
   id: string;
   role: "user" | "assistant";
   text: string;
+  /** 用户这条消息附带的图片（本机文件路径） */
+  images?: string[];
+  /** 用户消息：是从「推进任务」选某一步发出的，产物按这个分开放；自由输入的没有 */
+  step?: StepRef;
   provider?: string;
   events: HarnessEvent[];
   /** 每个事件到达的时间（和 events 一一对应），用来显示已运行多久、多久没有新输出 */
@@ -21,6 +35,8 @@ export interface Turn {
   startedAt?: number;
   status?: "running" | "done" | "error" | "aborted";
   traceFile?: string;
+  /** 这一轮用掉的 token 总数（外部 Agent 没报用量时没有） */
+  tokens?: number;
 }
 
 export interface Session {
@@ -156,7 +172,7 @@ export function useChatStore(state: AppState, storageKey = KEY) {
   );
 
   const send = useCallback(
-    async (text: string, onFinished?: () => void, runInput?: string, opts?: { fresh?: boolean }) => {
+    async (text: string, onFinished?: () => void, runInput?: string, opts?: { fresh?: boolean; images?: string[]; step?: StepRef }) => {
       const cur = ref.current.find(s => s.id === activeId);
       if (isRunning(cur)) return;
       const key = uid();
@@ -168,7 +184,7 @@ export function useChatStore(state: AppState, storageKey = KEY) {
       // fresh：这一轮不带之前的对话（开全新上下文），跑完后后续轮次接着这一轮继续
       const history = opts?.fresh ? [] : (cur?.history ?? []);
       const newTurns: Turn[] = [
-        { id: uid(), role: "user", text, events: [] },
+        { id: uid(), role: "user", text, events: [], ...(opts?.images?.length ? { images: opts.images } : {}), ...(opts?.step ? { step: opts.step } : {}) },
         { id: key, role: "assistant", text: "", provider: prov, events: [], times: [], startedAt: Date.now(), status: "running" },
       ];
       if (cur) {
@@ -183,7 +199,7 @@ export function useChatStore(state: AppState, storageKey = KEY) {
 
       let r: Awaited<ReturnType<typeof api.run>>;
       try {
-        r = await api.run({ runKey: key, input: runInput ?? text, provider: prov, history, workspace: ws, model: mdl, disabledTools: off.length ? off : undefined });
+        r = await api.run({ runKey: key, input: runInput ?? text, images: opts?.images?.length ? opts.images : undefined, provider: prov, history, workspace: ws, model: mdl, disabledTools: off.length ? off : undefined, sessionKey: sid, ...(opts?.fresh ? { fresh: true } : {}), ...(toolBudgetFor(opts?.step?.id) ? { toolBudget: toolBudgetFor(opts?.step?.id) } : {}) });
       } catch (e: any) {
         // 主进程那边崩了 / 通道断了：不能让这一轮永远停在「运行中」，按失败处理并给出原因
         r = { reason: "error", text: "", error: `和后台的连接出问题了：${e?.message ?? e}`, steps: 0, tokens: 0, messages: history, traceFile: "", runId: "" } as Awaited<ReturnType<typeof api.run>>;
@@ -203,6 +219,7 @@ export function useChatStore(state: AppState, storageKey = KEY) {
                         ...t,
                         status,
                         traceFile: r.traceFile,
+                        ...(r.tokens > 0 ? { tokens: r.tokens } : {}),
                         text: r.reason === "final" ? r.text || "（模型没有返回内容）" : `${r.error ?? r.reason}${r.text ? "\n\n" + r.text : ""}`,
                       }
                     : t,
@@ -250,8 +267,8 @@ export function useChatStore(state: AppState, storageKey = KEY) {
   const [queues, setQueues] = useState<Record<string, QueuedMsg[]>>({});
   const queued = activeId ? (queues[activeId] ?? []) : [];
   const enqueue = useCallback(
-    (text: string, onFinished?: () => void, runInput?: string) => {
-      if (activeId) setQueues(q => ({ ...q, [activeId]: [...(q[activeId] ?? []), { text, onFinished, runInput }] }));
+    (text: string, onFinished?: () => void, runInput?: string, images?: string[], step?: StepRef) => {
+      if (activeId) setQueues(q => ({ ...q, [activeId]: [...(q[activeId] ?? []), { text, onFinished, runInput, images, step }] }));
     },
     [activeId],
   );
@@ -261,7 +278,7 @@ export function useChatStore(state: AppState, storageKey = KEY) {
     const [first, ...rest] = queues[activeId] ?? [];
     if (!first) return;
     setQueues(q => ({ ...q, [activeId]: rest }));
-    void send(first.text, first.onFinished, first.runInput);
+    void send(first.text, first.onFinished, first.runInput, first.images?.length || first.step ? { ...(first.images?.length ? { images: first.images } : {}), ...(first.step ? { step: first.step } : {}) } : undefined);
   }, [queues, active, activeId, send]);
 
   // AI 运行中向操作人提的问题：等回答，回答 / 跳过 / 运行结束后移走

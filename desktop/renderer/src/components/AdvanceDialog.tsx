@@ -17,6 +17,8 @@ export interface AdvanceAction {
 export interface AdvanceOptions {
   /** true = 不带之前的对话，开一个全新的上下文来做这一步 */
   fresh: boolean;
+  /** 选的是哪一步（自带步骤的 id，如 build；自定义动作是它自己的 id） */
+  stepId?: string;
 }
 
 interface Props {
@@ -53,7 +55,7 @@ export function AdvanceDialog({ builtins, actions, vars, blocked = {}, agent, ha
   const toggle = (k: string) => setShut(s => (s.has(k) ? new Set([...s].filter(x => x !== k)) : new Set([...s, k])));
   const go = () => {
     if (!text) return;
-    onAdvance(text, { fresh: hasHistory && !cont });
+    onAdvance(text, { fresh: hasHistory && !cont, stepId: sel ?? undefined });
     onClose();
   };
   const card = (a: AdvanceAction, sub: string) => {

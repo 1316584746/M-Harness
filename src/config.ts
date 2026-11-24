@@ -4,6 +4,7 @@ import { z } from "zod";
 import { anthropic } from "./models/anthropic";
 import { cliAgent, CLI_PRESETS } from "./models/cli-agent";
 import { cursorSdk } from "./models/cursor-sdk";
+import { normalizeEndpoint } from "./models/endpoint";
 import { openaiCompat } from "./models/openai-compat";
 import type { Provider } from "./core/types";
 
@@ -133,15 +134,24 @@ export const ConfigSchema = z.object({
   actions: z
     .array(z.object({ id: z.string(), name: z.string(), prompt: z.string().default(""), description: z.string().optional(), hidden: z.boolean().optional(), skill: z.string().optional(), output: z.string().optional(), placeholder: z.string().optional() }))
     .default([]),
-  /** 自带的推进步骤（出方案 / 改代码 / 复核 / 联调 / 提测）的顺序和隐藏 */
-  actionPrefs: z.object({ order: z.array(z.string()).default([]), hidden: z.array(z.string()).default([]) }).default({ order: [], hidden: [] }),
+  /** 自带的推进步骤（方案设计 / 进行开发 / 代码CR / 联调 / 提测）的顺序和隐藏 */
+  actionPrefs: z
+    .object({
+      order: z.array(z.string()).default([]),
+      hidden: z.array(z.string()).default([]),
+      /** 自带动作被用户改过的提示词（只存动作自己的那份）：动作 id → 内容 */
+      overrides: z.record(z.string(), z.object({ body: z.string() })).default({}),
+    })
+    .default({ order: [], hidden: [], overrides: {} }),
   limits: z
     .object({
       maxSteps: z.number().default(20),
       timeoutSec: z.number().default(300),
+      /** 外部 Agent（Cursor SDK 等）一次运行的上限：方案设计这类任务动辄上百步，300 秒不够 */
+      agentTimeoutSec: z.number().default(1800),
       contextTokens: z.number().default(24000),
     })
-    .default({ maxSteps: 20, timeoutSec: 300, contextTokens: 24000 }),
+    .default({ maxSteps: 20, timeoutSec: 300, agentTimeoutSec: 1800, contextTokens: 24000 }),
   guard: z
     .object({
       allowTools: z.array(z.string()).optional(),
@@ -188,6 +198,17 @@ export const ConfigSchema = z.object({
     .default({}),
   /** 代码托管平台的实例地址（自建 GitLab / GitHub Enterprise）；令牌放在 .env 的 GITHUB_TOKEN / GITLAB_TOKEN 等变量里；enabled 为 false 表示停用（不再给 git 注入这个平台的令牌） */
   gitHosts: z.record(z.string(), z.object({ baseURL: z.string().optional(), enabled: z.boolean().optional() })).default({}),
+  /**
+   * 办公集成：同一时间只启用一个平台（飞书 / 钉钉 / 自定义）。
+   * stash 是切走的平台暂存的配置（切回来时恢复）；custom 是「自定义」平台——你们自己的办公系统，说明会加进模型的系统提示。
+   */
+  office: z
+    .object({
+      active: z.enum(["feishu", "dingtalk", "custom"]).optional(),
+      custom: z.object({ name: z.string().default(""), instructions: z.string().default("") }).optional(),
+      stash: z.record(z.string(), z.record(z.string(), z.any())).optional(),
+    })
+    .default({}),
   /** 项目管理等外部系统：以工具的形式提供给模型 */
   integrations: z
     .object({
@@ -237,6 +258,8 @@ export const ConfigSchema = z.object({
           /** 只响应这些 open_id（强烈建议配置，否则任何人都能驱动它） */
           allowUsers: z.array(z.string()).default([]),
           allowChats: z.array(z.string()).default([]),
+          /** 每次打开 M-Harness，由你自己的飞书机器人给你本人发一条「已上线」；不写就是开，写 false 关闭 */
+          notifyOnline: z.boolean().optional(),
         })
         .optional(),
       feishu: FeishuCfg.optional(),
@@ -358,6 +381,15 @@ function needKey(name: string, key: string) {
 }
 
 export function buildProvider(name: string, c: ProviderConfig): Provider {
+  // 类型和地址对不上时（比如选了 OpenAI 兼容却填了 …/anthropic）按地址判断真正的协议，不让用户因为这个报 404
+  if (c.type === "openai-compat" || c.type === "anthropic") {
+    const n = normalizeEndpoint(c.type, c.baseURL);
+    if (n.type !== c.type || n.baseURL !== (c.baseURL ?? "")) {
+      c = n.type === "anthropic"
+        ? { type: "anthropic", apiKey: c.apiKey, model: c.model, ...(n.baseURL ? { baseURL: n.baseURL } : {}) }
+        : { ...(c as Extract<ProviderConfig, { type: "openai-compat" }>), type: "openai-compat", baseURL: n.baseURL };
+    }
+  }
   switch (c.type) {
     case "openai-compat":
       needKey(name, c.apiKey);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppState, RepoInfo, TodoItemDTO, WorkbenchTodosDTO } from "../../../shared/api";
 import { api } from "../api";
 import { Icon } from "../components/Icon";
@@ -6,6 +6,8 @@ import { parseCfg } from "../lib/configEdit";
 import { isRunning, type ChatStore } from "../lib/chatStore";
 import { addChild, patchChild } from "../../../shared/todoPatch";
 import { Schedule, type ChildCreate, type ChildEdit } from "./workbench/Schedule";
+import { NewTaskDialog } from "../components/NewTaskDialog";
+import { manualId, type TaskSeed } from "../lib/taskStore";
 
 /** 截止时间：逾期 / 今天 18:00 / 明天 / 11-20 */
 export function dueText(due: number, now = Date.now()): string {
@@ -35,7 +37,7 @@ export function Workbench({
   /** 已经建过任务的需求（source + id） */
   tasked: Set<string>;
   /** 点击需求：在左侧建任务；open=true 同时打开 */
-  onTask: (t: TodoItemDTO, open: boolean) => void;
+  onTask: (t: TaskSeed, open: boolean) => void;
   /** 打开设置 */
   onOpenSettings: () => void;
 }) {
@@ -45,6 +47,7 @@ export function Workbench({
   const [loadingRepos, setLoadingRepos] = useState(false);
   const loading = loadingTodos || loadingRepos;
   const [at, setAt] = useState(0);
+  const [newTask, setNewTask] = useState(false);
 
   /** 在本软件里改子任务 = 直接改飞书项目：成功后用飞书读回来的值刷新界面，失败把原因交给界面显示 */
   const editChild: ChildEdit = useCallback(async (t, c, change) => {
@@ -97,6 +100,21 @@ export function Workbench({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
+  // 去飞书项目网页里改完再切回软件：窗口重新获得焦点时，停在工作台且数据超过 30 秒也自动重读一次
+  const atRef = useRef(at);
+  atRef.current = at;
+  const busyRef = useRef(false);
+  busyRef.current = loadingTodos || loadingRepos;
+  useEffect(() => {
+    if (!active) return;
+    const onFocus = () => {
+      if (!busyRef.current && Date.now() - atRef.current > 30_000) void load();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
   // 项目管理只接一个：设置 → 办公里接了飞书项目就看飞书，接了钉钉就看钉钉（同时存在时以飞书为准）
   const integrations = useMemo(() => parseCfg(state.configText)?.integrations as { feishuProject?: { defaultSpace?: { name?: string } }; dingtalkProject?: unknown } | undefined, [state.configText]);
   const src: TodoItemDTO["source"] | undefined = integrations?.feishuProject ? "feishu" : integrations?.dingtalkProject ? "dingtalk" : undefined;
@@ -115,9 +133,14 @@ export function Workbench({
             <h1>工作台</h1>
             <div className="muted">{nowStr}</div>
           </div>
-          <button className="btn sm" data-testid="wb-refresh" onClick={() => void load()} disabled={loading}>
-            {loading ? <span className="spinner" /> : <Icon name="refresh" size={14} />} 刷新
-          </button>
+          <div className="wb-head-btns">
+            <button className="btn sm" data-testid="wb-new-task" title="不依赖飞书项目 / 钉钉，直接建一个任务" onClick={() => setNewTask(true)}>
+              <Icon name="plus" size={14} /> 新建任务
+            </button>
+            <button className="btn sm" data-testid="wb-refresh" onClick={() => void load()} disabled={loading}>
+              {loading ? <span className="spinner" /> : <Icon name="refresh" size={14} />} 刷新
+            </button>
+          </div>
         </div>
 
         <div className="wb-stats">
@@ -164,8 +187,21 @@ export function Workbench({
               <button className="link" onClick={() => onOpenSettings()}>
                 去设置里打开
               </button>
+              ；也可以
+              <button className="link" data-testid="wb-new-task-link" onClick={() => setNewTask(true)}>
+                直接新建一个任务
+              </button>
             </div>
           </section>
+        )}
+        {newTask && (
+          <NewTaskDialog
+            onClose={() => setNewTask(false)}
+            onCreate={(title, prdUrl) => {
+              setNewTask(false);
+              onTask({ id: manualId(), title, source: "manual", ...(prdUrl ? { prdUrl } : {}) }, true);
+            }}
+          />
         )}
 
       </div>

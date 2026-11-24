@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { AppState } from "../../../../shared/api";
 import { ActionDialog } from "../../components/ActionDialog";
+import { BuiltinActionDialog } from "../../components/BuiltinActionDialog";
 import { Icon } from "../../components/Icon";
 import { useResourceTools } from "../../components/ResourceTools";
 import { builtinSteps, customActions, moveItem, type ActionItem } from "../../lib/actionSteps";
@@ -50,7 +51,8 @@ export function Actions({ state, onChanged }: { state: AppState; onChanged: () =
   const [err, setErr] = useState("");
   const [shut, setShut] = useState<Set<string>>(new Set());
   const [look, setLook] = useState<string | null>(null);
-  const [dlg, setDlg] = useState<{ item?: ActionItem } | null>(null);
+  const [bdlg, setBdlg] = useState<string | null>(null);
+  const [dlg, setDlg] = useState<{ item?: ActionItem; draft?: Partial<Omit<ActionItem, "id">> } | null>(null);
   const tools = useResourceTools("action", onChanged);
 
   const run = async (fn: (c: Record<string, any>) => void) => {
@@ -95,16 +97,19 @@ export function Actions({ state, onChanged }: { state: AppState; onChanged: () =
                 key={b.id}
                 name={b.name}
                 desc={b.description}
-                tag="内置"
+                tag={b.edited ? "内置 · 已修改" : "内置"}
                 first={i === 0}
                 last={i === builtins.length - 1}
                 shown={!b.hidden}
                 onMove={d => void run(c => (prefs(c).order = moveItem(builtins.map(x => x.id), i, d)))}
                 onShow={v => void run(c => (prefs(c).hidden = v ? (prefs(c).hidden ?? []).filter((x: string) => x !== b.id) : [...new Set([...(prefs(c).hidden ?? []), b.id])]))}
-                extra={look === b.id && <div className="act-look" data-testid="action-look"><div className="act-file">提示词文件：prompts/_shared.md（共享规范）+ prompts/{b.file}。软件自带，只读；{"{{taskTitle}} {{taskId}} {{repoPath}} {{input}}"} 会在发送时替换。</div><pre className="act-pre">{b.prompt}</pre></div>}
+                extra={look === b.id && <div className="act-look" data-testid="action-look"><div className="act-file">提示词文件：prompts/_shared.md（共享规范）+ prompts/{b.file}。{b.edited ? "已按你的修改生效" : "软件自带"}，点「编辑」可以直接改这一条；{"{{taskTitle}} {{taskId}} {{repoPath}} {{input}}"} 会在发送时替换。</div><pre className="act-pre">{b.prompt}</pre></div>}
               >
                 <button className="act-link" onClick={() => setLook(look === b.id ? null : b.id)}>
                   {look === b.id ? "收起" : "查看"}
+                </button>
+                <button className="act-link" data-testid="action-builtin-edit" title="直接修改这条内置动作的提示词（可恢复默认，也可另存为自定义）" onClick={() => setBdlg(b.id)}>
+                  编辑
                 </button>
               </Row>
             ))}
@@ -133,7 +138,35 @@ export function Actions({ state, onChanged }: { state: AppState; onChanged: () =
             ))}
         </div>
       </div>
-      {dlg && <ActionDialog item={dlg.item} onClose={() => setDlg(null)} onSave={saveDialog} />}
+      {bdlg &&
+        (() => {
+          const b = builtins.find(x => x.id === bdlg);
+          if (!b) return null;
+          return (
+            <BuiltinActionDialog
+              key={b.id}
+              name={b.name}
+              file={b.file}
+              body={b.body}
+              defaultBody={b.defaultBody}
+              edited={b.edited}
+              onClose={() => setBdlg(null)}
+              onSave={body => {
+                void run(c => void ((prefs(c).overrides ??= {})[b.id] = { body }));
+                setBdlg(null);
+              }}
+              onReset={() => {
+                void run(c => void delete (prefs(c).overrides ??= {})[b.id]);
+                setBdlg(null);
+              }}
+              onSaveAs={body => {
+                setBdlg(null);
+                setDlg({ draft: { name: `${b.name}（我的版本）`, description: b.description, prompt: `${b.prompt.slice(0, b.prompt.length - b.body.length)}${body}` } });
+              }}
+            />
+          );
+        })()}
+      {dlg && <ActionDialog item={dlg.item} draft={dlg.draft} onClose={() => setDlg(null)} onSave={saveDialog} />}
     </>
   );
 }

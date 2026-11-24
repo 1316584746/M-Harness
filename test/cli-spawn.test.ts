@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { findBin, resolveBin, spawnCli } from "../src/tools/cli-spawn";
+import { bundledCliDir, ensureBundledCliOnPath, findBin, resolveBin, spawnCli } from "../src/tools/cli-spawn";
 
 const WIN = process.platform === "win32";
 let dir: string;
@@ -60,5 +60,54 @@ describe("spawnCli：npm 装出来的 CLI 要能被找到并正确启动", () =>
     const full = resolveBin(path.join(dir, "fakecli"));
     expect(full).toContain(dir);
     expect(JSON.parse((await run(path.join(dir, "fakecli"), ["hi"])).out).args).toEqual(["hi"]);
+  });
+});
+
+describe("随包 CLI（resources/cli）：不用装 Node / npm 也能用，且排在用户自己装的后面", () => {
+  const exe = WIN ? ".exe" : "";
+  let bundled: string;
+  let npmDir: string;
+  const oldEnv = process.env.HARNESS_CLI_DIR;
+
+  beforeAll(() => {
+    bundled = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-cli-"));
+    npmDir = fs.mkdtempSync(path.join(os.tmpdir(), "npm-cli-"));
+    fs.writeFileSync(path.join(bundled, `onlybundled${exe}`), "x", { mode: 0o755 });
+    fs.writeFileSync(path.join(bundled, `both${exe}`), "bundled", { mode: 0o755 });
+    fs.writeFileSync(path.join(npmDir, `both${exe}`), "npm", { mode: 0o755 });
+  });
+  afterAll(() => {
+    process.env.PATH = oldPath;
+    if (oldEnv === undefined) delete process.env.HARNESS_CLI_DIR;
+    else process.env.HARNESS_CLI_DIR = oldEnv;
+  });
+
+  it("HARNESS_CLI_DIR 指向的目录：PATH 里没有也能找到", () => {
+    process.env.PATH = oldPath;
+    process.env.HARNESS_CLI_DIR = bundled;
+    expect(bundledCliDir()).toBe(bundled);
+    expect(findBin("onlybundled")).toContain(bundled);
+  });
+
+  it("同名时用户自己装的优先，随包版本只兜底（即使随包目录被加进了 PATH）", () => {
+    process.env.HARNESS_CLI_DIR = bundled;
+    process.env.PATH = [bundled, npmDir, oldPath].join(path.delimiter);
+    expect(resolveBin("both")).toContain(npmDir);
+  });
+
+  it("ensureBundledCliOnPath 追加到 PATH 末尾，重复调用不重复添加", () => {
+    process.env.HARNESS_CLI_DIR = bundled;
+    process.env.PATH = oldPath;
+    expect(ensureBundledCliOnPath()).toBe(bundled);
+    ensureBundledCliOnPath();
+    const parts = (process.env.PATH ?? "").split(path.delimiter);
+    expect(parts.filter(p => p === bundled)).toHaveLength(1);
+    expect(parts[parts.length - 1]).toBe(bundled);
+  });
+
+  it("目录不存在时当作没有随包 CLI", () => {
+    process.env.HARNESS_CLI_DIR = path.join(bundled, "nope");
+    process.env.PATH = oldPath;
+    expect(findBin("onlybundled")).toBeUndefined();
   });
 });

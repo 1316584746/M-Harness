@@ -1,5 +1,6 @@
 import type { ModelAdapter, ModelReply, Msg, ToolCall, ToolSpec } from "../core/types";
 import { postJson, safeParseArgs, toJsonSchema } from "./http";
+import { loadImages } from "./images";
 
 export interface OpenAICompatOptions {
   id: string;
@@ -75,6 +76,18 @@ function toWire(m: Msg): Record<string, unknown> {
         function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) },
       })),
     };
+  }
+  if (m.role === "user" && m.images?.length) {
+    const imgs = loadImages(m.images);
+    if (imgs.length) {
+      return {
+        role: "user",
+        content: [
+          ...(m.content ? [{ type: "text", text: m.content }] : []),
+          ...imgs.map(i => ({ type: "image_url", image_url: { url: `data:${i.mime};base64,${i.data}` } })),
+        ],
+      };
+    }
   }
   return { role: m.role, content: m.content };
 }

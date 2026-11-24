@@ -9,7 +9,7 @@ import type { UpdateStateDTO } from "../shared/api";
  */
 
 /** 发布到 GitHub 之后把 "owner/repo" 填在这里，用户就不用在设置里配置了；设置里填写的优先 */
-export const DEFAULT_UPDATE_REPO = "";
+export const DEFAULT_UPDATE_REPO = "1316584746/M-Harness";
 
 export interface AutoUpdaterLike {
   autoDownload: boolean;
@@ -34,6 +34,10 @@ export interface UpdaterDeps {
   loadAutoUpdater?: () => Promise<AutoUpdaterLike>;
   /** 测试用：替换 GitHub API 地址 */
   apiBase?: string;
+  /** 测试用：替换 GitHub 网页地址（用来读 /releases/latest 的跳转） */
+  webBase?: string;
+  /** 设置里没填时用的默认仓库；缺省为 DEFAULT_UPDATE_REPO（测试可传 "" 模拟未配置） */
+  defaultRepo?: string;
 }
 
 /** 接受 owner/repo、https://github.com/owner/repo(.git)、git@github.com:owner/repo.git */
@@ -76,7 +80,7 @@ export class Updater {
   }
 
   private repoText(): string {
-    const r = parseRepo(this.d.repo() || DEFAULT_UPDATE_REPO);
+    const r = parseRepo(this.d.repo() || (this.d.defaultRepo ?? DEFAULT_UPDATE_REPO));
     return r ? `${r.owner}/${r.repo}` : "";
   }
 
@@ -106,33 +110,19 @@ export class Updater {
   }
 
   private async doCheck(silent: boolean): Promise<UpdateStateDTO> {
-    const repo = parseRepo(this.d.repo() || DEFAULT_UPDATE_REPO);
+    const repo = parseRepo(this.d.repo() || (this.d.defaultRepo ?? DEFAULT_UPDATE_REPO));
     if (!repo) return silent ? this.state : this.set({ state: "unconfigured", error: undefined });
     const prev = this.st.state;
     if (!silent) this.set({ state: "checking", error: undefined });
     try {
-      const base = (this.d.apiBase ?? "https://api.github.com").replace(/\/+$/, "");
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), 15_000);
-      let res: Response;
-      try {
-        res = await fetch(`${base}/repos/${repo.owner}/${repo.repo}/releases/latest`, {
-          headers: { accept: "application/vnd.github+json", "user-agent": "M-Harness-Updater", "x-github-api-version": "2022-11-28" },
-          signal: ctl.signal,
-        });
-      } finally {
-        clearTimeout(t);
-      }
-      if (res.status === 404) throw new Error("仓库不存在，或还没有发布过 Release");
-      if (res.status === 403 || res.status === 429) throw new Error("GitHub 接口访问过于频繁，请稍后再试");
-      if (!res.ok) throw new Error(`GitHub 返回 HTTP ${res.status}`);
-      const j: any = await res.json();
-      const tag = String(j.tag_name ?? "");
-      if (!tag) throw new Error("Release 没有版本号（tag）");
+      // 版本号走网页的 /releases/latest 跳转（不占 GitHub API 的额度）。
+      // API 对没登录的请求每小时每个 IP 只给 60 次，公司网络里很多人共用一个出口 IP，很容易被用光，所以 API 只用来取更新说明，取不到也不影响。
+      const tag = await this.latestTag(repo);
       const latest = tag.replace(/^v/i, "");
       const common = { checkedAt: Date.now(), error: undefined, percent: undefined };
       if (compareVersions(latest, this.d.version) > 0) {
-        return this.set({ ...common, state: "available", latest, notes: String(j.body ?? "").slice(0, 6000), url: String(j.html_url ?? `https://github.com/${repo.owner}/${repo.repo}/releases`) });
+        const j = await this.releaseNotes(repo, tag);
+        return this.set({ ...common, state: "available", latest, notes: String(j?.body ?? "").slice(0, 6000), url: String(j?.html_url ?? `https://github.com/${repo.owner}/${repo.repo}/releases/tag/${encodeURIComponent(tag)}`) });
       }
       return this.set({ ...common, state: "none", latest, notes: undefined, url: undefined });
     } catch (e: any) {
@@ -145,11 +135,45 @@ export class Updater {
     }
   }
 
+  private async timedFetch(url: string, init: RequestInit, ms: number): Promise<Response> {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), ms);
+    try {
+      return await fetch(url, { ...init, signal: ctl.signal, headers: { "user-agent": "M-Harness-Updater", ...(init.headers as Record<string, string> | undefined) } });
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  /** 最新 Release 的 tag：请求网页 /releases/latest，读它跳转到的 /releases/tag/<tag> */
+  private async latestTag(repo: { owner: string; repo: string }): Promise<string> {
+    const web = (this.d.webBase ?? "https://github.com").replace(/\/+$/, "");
+    const res = await this.timedFetch(`${web}/${repo.owner}/${repo.repo}/releases/latest`, { redirect: "manual" }, 15_000);
+    if (res.status === 404) throw new Error("仓库不存在，或还没有发布过 Release");
+    if (res.status === 403 || res.status === 429) throw new Error("GitHub 访问过于频繁，请稍后再试");
+    const loc = res.headers.get("location") ?? "";
+    const m = /\/releases\/tag\/([^/?#]+)/.exec(loc) ?? (res.status === 200 ? /\/releases\/tag\/([^/?#]+)/.exec(res.url) : null);
+    if (m) return decodeURIComponent(m[1]);
+    if (res.status >= 300 && res.status < 400) throw new Error("仓库还没有发布过 Release");
+    throw new Error(`GitHub 返回 HTTP ${res.status}`);
+  }
+
+  /** 更新说明：走 API，被限流 / 没网都当没有，不影响「有新版本」的结论 */
+  private async releaseNotes(repo: { owner: string; repo: string }, tag: string): Promise<{ body?: string; html_url?: string } | undefined> {
+    try {
+      const base = (this.d.apiBase ?? "https://api.github.com").replace(/\/+$/, "");
+      const res = await this.timedFetch(`${base}/repos/${repo.owner}/${repo.repo}/releases/tags/${encodeURIComponent(tag)}`, { headers: { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" } }, 8_000);
+      return res.ok ? ((await res.json()) as any) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** 应用内下载；做不到（或失败）就打开 Release 页面 */
   async download(): Promise<UpdateStateDTO> {
     const url = this.st.url;
     if (this.st.state !== "available" && this.st.state !== "error") return this.state;
-    const repo = parseRepo(this.d.repo() || DEFAULT_UPDATE_REPO);
+    const repo = parseRepo(this.d.repo() || (this.d.defaultRepo ?? DEFAULT_UPDATE_REPO));
     if (!this.d.canAutoInstall || !repo || !this.d.loadAutoUpdater) {
       if (url) this.d.openExternal(url);
       return this.state;

@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppState, KeyProbeDTO } from "../../../../shared/api";
 import { api } from "../../api";
 import { Icon } from "../../components/Icon";
 import { Req, useRequired } from "../../components/Required";
+import { SearchSelect } from "../../components/SearchSelect";
 import { envVarFor, useConfigEditor, type Cfg } from "../../lib/configEdit";
+import { normalizeEndpoint } from "../../../../shared/endpoint";
 
 const TYPE_LABEL: Record<string, string> = {
   "openai-compat": "OpenAI 兼容",
@@ -155,19 +157,14 @@ function ModelPicker({
   invalid?: boolean;
 }) {
   const { models, labels } = probe;
-  const label = (m: string) => (labels[m] ? `${labels[m]}（${m}）` : m);
+  const options = useMemo(
+    () => [...(value && !models.includes(value) ? [{ value, label: value, hint: "当前，不在列表中" }] : []), ...models.map(m => ({ value: m, label: labels[m] ?? m, hint: labels[m] ? m : undefined }))],
+    [models, labels, value],
+  );
   return (
     <div className="inputrow">
       {models.length > 0 ? (
-        <select className={invalid ? "input mono invalid" : "input mono"} data-req={reqKey} data-testid={`model-pick-${listId}`} value={value} onChange={e => onChange(e.target.value)}>
-          {!value && <option value="">请选择模型</option>}
-          {value && !models.includes(value) && <option value={value}>{value}（当前，不在列表中）</option>}
-          {models.map(m => (
-            <option key={m} value={m}>
-              {label(m)}
-            </option>
-          ))}
-        </select>
+        <SearchSelect mono allowCustom value={value} onChange={onChange} options={options} placeholder="请选择模型" searchPlaceholder="搜索模型名称或 id" invalid={invalid} reqKey={reqKey} testid={`model-pick-${listId}`} />
       ) : (
         <input className={invalid ? "input mono invalid" : "input mono"} data-req={reqKey} value={value} placeholder={placeholder ?? "模型名称"} onChange={e => onChange(e.target.value)} />
       )}
@@ -239,6 +236,16 @@ export function ProviderCard({
 
   const req = useRequired();
   const modelRequired = type === "openai-compat" || type === "anthropic";
+  // 类型和地址对不上（选了 OpenAI 兼容却填了 …/anthropic）：运行时按地址判断协议，这里显示真实协议，保存时一并纠正
+  const real = type === "openai-compat" || type === "anthropic" ? normalizeEndpoint(type, d.baseURL) : { type, baseURL: d.baseURL, notes: [] as string[] };
+  const [testing, setTesting] = useState(false);
+  const test = async () => {
+    setTesting(true);
+    setMsg(null);
+    const r = await api.testModel({ type, baseURL: d.baseURL, apiKey: d.apiKey, model: d.model });
+    setTesting(false);
+    setMsg(r.ok ? { ok: true, text: `测试调用成功（${r.ms} ms）${r.notes?.length ? "；" + r.notes.join("；") : ""}` } : { ok: false, text: `测试调用没通过：${r.error}` });
+  };
   const save = async () => {
     const miss = req.check([
       ...(type === "openai-compat" ? [{ key: "baseURL", label: "Base URL", ok: !!d.baseURL.trim() }] : []),
@@ -260,8 +267,10 @@ export function ProviderCard({
       const p = c.providers[name];
       if (keyChanged) p.apiKey = "${" + envVar + "}";
       if (type === "openai-compat" || type === "anthropic") {
-        if (d.baseURL) p.baseURL = d.baseURL;
-        else if (type === "anthropic") delete p.baseURL;
+        const n = normalizeEndpoint(type, d.baseURL);
+        p.type = n.type;
+        if (n.baseURL) p.baseURL = n.baseURL;
+        else if (n.type === "anthropic") delete p.baseURL;
       }
       if (type !== "cli") {
         if (d.model) p.model = d.model;
@@ -295,7 +304,7 @@ export function ProviderCard({
     <div className="pcard" data-testid={`provider-card-${name}`}>
       <div className="pcard-head">
         <div className="pcard-name">{name}</div>
-        <span className="tag">{TYPE_LABEL[type] ?? type}</span>
+        <span className="tag">{TYPE_LABEL[real.type] ?? TYPE_LABEL[type] ?? type}</span>
         {info?.problem ? <span className="chip bad">{info.problem}</span> : <span className="chip ok">可用</span>}
         {isDefault && <span className="chip run">全局使用中</span>}
         <span className="spacer" />
@@ -343,8 +352,14 @@ export function ProviderCard({
         </>
       )}
 
+      {real.notes.length > 0 && !msg && <div className="field-hint">{real.notes.join("；")}（保存时会一并纠正）</div>}
       {msg && <div className={msg.ok ? "inline-ok" : "inline-warn"}>{msg.text}</div>}
       <div className="pcard-actions">
+        {HAS_KEY.has(type) && type !== "cursor-sdk" && (
+          <button className="btn sm" data-testid={`provider-test-${name}`} disabled={testing || busy || !d.apiKey || !d.model} onClick={test} title="真发一次很小的对话请求，验证地址、Key、模型名都对得上">
+            {testing ? "测试中…" : "测试调用"}
+          </button>
+        )}
         <button className="btn primary sm" data-testid={`provider-save-${name}`} disabled={(!dirty && isDefault) || busy} onClick={save}>
           {isDefault ? "保存" : "保存并设为全局使用"}
         </button>
@@ -375,8 +390,28 @@ export function AddProvider({
   const [model, setModel] = useState("");
   const [key, setKey] = useState("");
   const [err, setErr] = useState("");
+  /** 测试调用没通过：给出原因，再点一次「仍然添加」才会保存 */
+  const [force, setForce] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [note, setNote] = useState("");
   const probe = useKeyProbe(type, baseURL, key);
   const req = useRequired();
+  // Key / 模型 / 类型一改，上一次的测试结论作废
+  useEffect(() => setForce(false), [key, model, type]);
+
+  /** 地址一填就按地址判断协议：…/anthropic 结尾的是 Anthropic 兼容地址，类型自动切过去 */
+  const onBase = (v: string) => {
+    setBaseURL(v);
+    req.clear("baseURL");
+    setErr("");
+    setForce(false);
+    if (type === "cli") return;
+    const n = normalizeEndpoint(type, v);
+    if (n.type !== type) {
+      setType(n.type);
+      setNote(n.notes.join("；"));
+    } else setNote("");
+  };
 
   const add = async () => {
     const miss = req.check([
@@ -385,10 +420,24 @@ export function AddProvider({
       ...(type !== "cli" ? [{ key: "model", label: "默认模型", ok: !!model.trim() }] : []),
     ]);
     if (miss) return setErr(miss);
-    if (!/^[\w.-]+$/.test(name)) return setErr("名称只能包含字母、数字、下划线、点和短横线");
+    if (!/^[\p{L}\p{N}_.-]+$/u.test(name)) return setErr("名称只能包含文字、数字、下划线、点和短横线（不能有空格）");
     if (names.includes(name)) return setErr("已存在同名提供方");
     if (type !== "cli" && !model) return setErr("请填写默认模型");
     if (type === "openai-compat" && !baseURL) return setErr("请填写 Base URL");
+    // 按地址纠正类型、去掉粘贴时多带的接口路径
+    const ep = type === "cli" ? null : normalizeEndpoint(type, baseURL);
+    const realType = ep ? ep.type : type;
+    const realBase = ep ? ep.baseURL : baseURL;
+    if (type !== "cli" && key.trim() && !force) {
+      setTesting(true);
+      setErr("");
+      const t = await api.testModel({ type: realType, baseURL: realBase, apiKey: key.trim(), model });
+      setTesting(false);
+      if (!t.ok) {
+        setForce(true);
+        return setErr(`测试调用没通过：${t.error}。改好后再点「添加」；确定没问题也可以点「仍然添加」。`);
+      }
+    }
     const envVar = envVarFor(name, "");
     if (HAS_KEY.has(type) && key) {
       const s = await api.setSecret(envVar, key);
@@ -397,8 +446,8 @@ export function AddProvider({
     const r = await update(c => {
       c.providers ??= {};
       if (type === "cli") c.providers[name] = { type, preset: "codex", timeoutSec: 900 };
-      else if (type === "anthropic") c.providers[name] = { type, apiKey: "${" + envVar + "}", model, ...(baseURL ? { baseURL } : {}) };
-      else c.providers[name] = { type, apiKey: "${" + envVar + "}", baseURL, model };
+      else if (realType === "anthropic") c.providers[name] = { type: "anthropic", apiKey: "${" + envVar + "}", model, ...(realBase ? { baseURL: realBase } : {}) };
+      else c.providers[name] = { type: realType, apiKey: "${" + envVar + "}", baseURL: realBase, model };
     });
     if (!r.ok) return setErr(r.error ?? "添加失败");
     onAdded(name);
@@ -414,16 +463,17 @@ export function AddProvider({
           <input className={req.cls("name")} data-req="name" value={name} placeholder="如 qwen、my-gpt" onChange={e => (setName(e.target.value), req.clear("name"), setErr(""))} />
         </Field>
         <Field label="类型">
-          <select className="input" value={type} onChange={e => setType(e.target.value)}>
+          <select className="input" value={type} onChange={e => (setType(e.target.value), setNote(""), setForce(false))}>
             <option value="openai-compat">OpenAI 兼容（DeepSeek、Qwen、Kimi、vLLM 等）</option>
             <option value="anthropic">Anthropic</option>
             <option value="cli">命令行 Agent（Codex / Claude Code / Cursor CLI）</option>
           </select>
         </Field>
       </div>
-      {type === "openai-compat" && (
-        <Field label="Base URL" required>
-          <input className={req.cls("baseURL", "input mono")} data-req="baseURL" value={baseURL} placeholder="https://…/v1" onChange={e => (setBaseURL(e.target.value), req.clear("baseURL"), setErr(""))} />
+      {(type === "openai-compat" || type === "anthropic") && (
+        <Field label="Base URL" required={type === "openai-compat"} hint={type === "anthropic" ? "留空使用官方地址；填 …/anthropic 结尾的兼容地址也行" : undefined}>
+          <input className={req.cls("baseURL", "input mono")} data-req="baseURL" value={baseURL} placeholder={type === "anthropic" ? "https://api.anthropic.com" : "https://…/v1"} onChange={e => onBase(e.target.value)} />
+          {note && <div className="field-hint">{note}，类型已自动切换</div>}
         </Field>
       )}
       {type !== "cli" && (
@@ -439,8 +489,8 @@ export function AddProvider({
       )}
       {err && <div className="inline-warn">{err}</div>}
       <div className="pcard-actions">
-        <button className="btn primary sm" data-testid="provider-add-confirm" onClick={add}>
-          添加
+        <button className="btn primary sm" data-testid="provider-add-confirm" disabled={testing} onClick={add}>
+          {testing ? "正在测试连接…" : force ? "仍然添加" : "添加"}
         </button>
         <button className="btn sm" onClick={onDone}>
           取消

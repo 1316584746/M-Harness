@@ -379,7 +379,8 @@ export async function fetchFeishuTodos(cfg: FeishuProjectConfig): Promise<TodoSo
     Array.from({ length: Math.min(5, order.length) }, async () => {
       while (next < order.length) {
         const [wid, pk] = order[next++];
-        for (const [k, v] of await fetchSubs(c, wid, pk).catch(() => new Map<string, SubInfo>())) subs.set(k, v);
+        // 读待办就是为了看飞书上最新的：不用 3 分钟缓存（缓存只给「写完立刻读回来」这类场景省时间），否则在飞书里改了，这边刷新还是旧的
+        for (const [k, v] of await fetchSubs(c, wid, pk, true).catch(() => new Map<string, SubInfo>())) subs.set(k, v);
       }
     }),
   );
@@ -444,7 +445,15 @@ export async function updateFeishuSubtask(cfg: FeishuProjectConfig, req: Subtask
   }
   const text = await runMeegle(c, argv, sig());
   const bad = cliFailure(text);
-  if (bad) return { ok: false, error: bad };
+  if (bad) {
+    // 界面上的状态可能是旧的（别处已经改过）：失败时去飞书读一次真实状态。
+    // 已经是想要的状态就当成功（比如「回滚」时飞书说任务本来就没完成）；否则报错，同时把真实状态交给界面刷新
+    const real = (await fetchSubs(c, req.wid, req.projectKey, true).catch(() => new Map<string, SubInfo>())).get(req.subId);
+    if (!real) return { ok: false, error: bad };
+    const child = { done: real.done, start: real.start, end: real.end, days: real.days };
+    if (req.done !== undefined && (real.done === true) === req.done) return { ok: true, child };
+    return { ok: false, error: bad, child };
+  }
 
   const subs = await fetchSubs(c, req.wid, req.projectKey, true).catch(() => new Map<string, SubInfo>());
   const now = subs.get(req.subId);

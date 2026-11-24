@@ -179,7 +179,7 @@ export class LarkCliChannel {
   }
 }
 
-function runOnce(cfg: LarkCliCfg, args: string[], stdin?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+export function runOnce(cfg: LarkCliCfg, args: string[], stdin?: string): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => {
     const child = spawnCli(cfg.bin, args);
     let stdout = "";

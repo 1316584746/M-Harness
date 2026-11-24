@@ -160,6 +160,13 @@ export function buildRunView(events: HarnessEvent[], timestamps?: number[]): Run
   return view;
 }
 
+/** token 数：532 / 1.2 万 / 123 万 */
+export function fmtTokens(n: number): string {
+  if (n < 10_000) return String(Math.round(n));
+  const w = n / 10_000;
+  return `${w < 100 ? w.toFixed(1).replace(/\.0$/, "") : Math.round(w)} 万`;
+}
+
 export function fmtMs(ms: number | undefined): string {
   if (ms === undefined) return "";
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;

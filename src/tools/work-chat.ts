@@ -146,8 +146,10 @@ export function createChat(lark: LarkBin | undefined, req: { name: string; descr
 /** 读一个需求对应的飞书群；没拉群就如实说没有，不会编一个 */
 export async function fetchWorkItemChat(fp: FeishuProjectConfig, lark: LarkBin | undefined, req: { projectKey?: string; wid: string; url?: string }): Promise<WorkChat> {
   if (!req.wid || !SAFE_ID.test(req.wid)) return { ok: false, error: "缺少需求 ID" };
-  const space = spaceOf(req.projectKey, req.url);
-  if (!space) return { ok: false, error: "不知道需求在哪个飞书项目空间，请到工作台点「刷新」后再试" };
+  // 任务上没记空间（老任务、或没从工作台点进来）：先看需求链接，再用设置里配的默认空间
+  const dflt = fp.defaultSpace?.key;
+  const space = spaceOf(req.projectKey, req.url) ?? (dflt && SAFE_ID.test(dflt) ? dflt : undefined);
+  if (!space) return { ok: false, error: "不知道需求在哪个飞书项目空间：请到「设置 → 飞书项目」里设置默认空间，或到工作台点「刷新」后再试" };
   const text = await runMeegle({ ...fp, timeoutSec: 30 }, ["workitem", "get", `--project-key=${space}`, `--work-item-id=${req.wid}`, "--fields=group_type", "--format=json"], new AbortController().signal);
   const j = parseJson(text);
   if (j === null) return { ok: false, error: text.replace(/^meegle 退出码 \d+\n?/, "").trim().slice(0, 200) || "读取需求失败" };

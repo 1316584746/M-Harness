@@ -17,14 +17,14 @@ describe("推进任务：合成要发出去的话", () => {
 
 describe("动作列表：内置顺序 / 显隐", () => {
   it("默认五个内置步骤都显示", () => {
-    expect(builtinSteps({}).map(b => b.id)).toEqual(["plan", "build", "review", "dev", "ship"]);
-    expect(visibleSteps({}).builtins).toHaveLength(5);
+    expect(builtinSteps({}).map(b => b.id)).toEqual(["analysis", "plan", "build", "review", "dev", "ship", "release"]);
+    expect(visibleSteps({}).builtins).toHaveLength(7);
   });
   it("按设置里的顺序排，隐藏的不进推进任务", () => {
     const cfg = { actionPrefs: { order: ["review", "plan"], hidden: ["build"] }, actions: [{ id: "a", name: "A", prompt: "p" }, { id: "b", name: "B", prompt: "q", hidden: true }] };
-    expect(builtinSteps(cfg).map(b => b.id)).toEqual(["review", "plan", "build", "dev", "ship"]);
+    expect(builtinSteps(cfg).map(b => b.id)).toEqual(["review", "plan", "analysis", "build", "dev", "ship", "release"]);
     const v = visibleSteps(cfg);
-    expect(v.builtins.map(b => b.id)).toEqual(["review", "plan", "dev", "ship"]);
+    expect(v.builtins.map(b => b.id)).toEqual(["review", "plan", "analysis", "dev", "ship", "release"]);
     expect(v.custom.map(a => a.id)).toEqual(["a"]);
   });
   it("moveItem 换位，越界不动", () => {
@@ -71,6 +71,27 @@ describe("自带动作：提示词文件", () => {
     }
     expect(by("dev")).toContain("branches.integration");
     expect(by("ship")).toContain("branches.test");
+  });
+  it("方案设计：按团队模板分章（一到八），含库表 / 接口 / 灰度 / 配置与分支", () => {
+    const p = steps.find(s => s.id === "plan")!.prompt;
+    for (const k of ["一. 需求背景 & PRD", "二. 数据库设计", "三. 接口逻辑", "四. 变更事项", "五. 数据清洗", "六. 灰度方案", "七. 风险点 & 解决方案", "八. 增加配置 & 分支", "8.2 服务分支", "不改任何文件"]) expect(p).toContain(k);
+  });
+  it("改过的内置提示词：只换动作自己的那份，共享规范不变；和默认一样 / 空的不算改过", () => {
+    const cfg = { actionPrefs: { overrides: { plan: { body: "# 我的方案模板\n{{input}}" }, build: { body: "  " } } } };
+    const by = (id: string) => builtinSteps(cfg).find(b => b.id === id)!;
+    expect(by("plan").edited).toBe(true);
+    expect(by("plan").prompt).toContain("跨动作共享规范");
+    expect(by("plan").prompt).toContain("# 我的方案模板");
+    expect(by("plan").prompt).not.toContain("八. 增加配置");
+    expect(by("plan").defaultBody).toContain("八. 增加配置");
+    expect(by("build").edited).toBe(false);
+    expect(builtinSteps({ actionPrefs: { overrides: { plan: { body: by("plan").defaultBody } } } }).find(b => b.id === "plan")!.edited).toBe(false);
+    expect(visibleSteps(cfg).builtins.find(b => b.id === "plan")!.prompt).toContain("# 我的方案模板");
+  });
+  it("上线检查：只读，覆盖 xxl-job / MQ / 数据库 / 配置中心 / 机器配置，不泄露密钥", () => {
+    const p = steps.find(s => s.id === "release")!.prompt;
+    for (const k of ["xxl-job", "MQ", "数据库", "Nacos", "机器", "不改任何文件", "绝不把密码"]) expect(p).toContain(k);
+    expect(p).toContain("branches.base");
   });
   it("自定义动作没写指令仍然不带默认句", () => {
     expect(composeStep({ prompt: "做周报：{{input}}" }, "", vars)).toBe("做周报：");

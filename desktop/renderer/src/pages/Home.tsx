@@ -44,7 +44,7 @@ function useNow(): Date {
 
 // ───────────── 顶部：问候 + 每日一图一句 ─────────────
 
-function Hello({ now }: { now: Date }) {
+function Hello({ now, quote }: { now: Date; quote?: DailyDTO["quote"] | null }) {
   const [name, setName] = useState(() => localStorage.getItem(NAME_KEY) ?? "");
   useEffect(() => {
     void api.integrationStatus("lark").then(s => {
@@ -62,11 +62,17 @@ function Hello({ now }: { now: Date }) {
         {greeting(now.getHours())}
         {name ? `，${name}` : ""}
       </h1>
-      <p>
+      <div className="home-date" data-testid="home-date">
         {now.getMonth() + 1}月{now.getDate()}日 星期{WEEK[now.getDay()]} · 农历{lunar.month}
         {lunar.day}
-      </p>
+      </div>
       <p className="home-weekday">{WEEKDAY_LINE[now.getDay()]}</p>
+      {quote && (
+        <div className="home-quote" data-testid="home-quote">
+          <span className="home-quote-text">“{quote.text}”</span>
+          {quote.author && <span className="home-quote-author">—— {quote.author}</span>}
+        </div>
+      )}
     </section>
   );
 }
@@ -308,7 +314,6 @@ function TodayTodos({ active, onOpenPlugin }: { active: boolean; onOpenPlugin?: 
 export function Home({ active = true, onOpenPlugin }: { active?: boolean; onOpenPlugin?: (id: string) => void }) {
   const now = useNow();
   const [daily, setDaily] = useState<DailyDTO | null>(null);
-
   const loadDaily = useCallback(() => void api.homeDaily().then(setDaily), []);
   useEffect(loadDaily, [loadDaily]);
 
@@ -327,22 +332,14 @@ export function Home({ active = true, onOpenPlugin }: { active?: boolean; onOpen
       <div className="home-scroll">
         <div className="home-inner">
           <div className="home-top">
-            <Hello now={now} />
+            <Hello now={now} quote={daily?.quote} />
             <Weather />
           </div>
           <div className="home-mid">
             <TodayTodos active={active} onOpenPlugin={onOpenPlugin} />
           </div>
           <div className="home-bottom">
-            <div className="home-foot">
-              {daily && (
-                <div className="home-quote" data-testid="home-quote">
-                  <div className="home-quote-text">“{daily.quote.text}”</div>
-                  {daily.quote.author && <div className="home-quote-author">—— {daily.quote.author}</div>}
-                </div>
-              )}
-              {daily?.copyright && <div className="home-credit">{daily.copyright}</div>}
-            </div>
+            <div className="home-foot" />
             <Calendar now={now} />
           </div>
         </div>

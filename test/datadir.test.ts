@@ -38,10 +38,16 @@ describe("resolveLayout", () => {
     expect(fs.statSync(l.home).isDirectory()).toBe(true);
     expect(fs.statSync(l.userData!).isDirectory()).toBe(true);
   });
-  it("开发模式没改过 → 项目根，不动浏览器存储", () => {
+  it("开发模式没改过 → 同样用默认目录（设置里「当前」与「默认」一致），不再用项目根", () => {
     const base = mk();
-    const l = resolveLayout({ packaged: false, cwd: base, appData: path.join(base, "a") });
-    expect(l).toMatchObject({ source: "dev", home: base });
+    const l = resolveLayout({ packaged: false, cwd: base, appData: path.join(base, "a"), platform: "linux", homedir: path.join(base, "home") });
+    expect(l).toMatchObject({ source: "default", home: path.join(base, "home", "M-Harness-data"), defaultDir: path.join(base, "home", "M-Harness-data") });
+    expect(l.userData).toBe(path.join(l.home, "app-state"));
+  });
+  it("强制指定（自动化测试）→ 用指定目录，忽略记录", () => {
+    const base = mk();
+    const l = resolveLayout({ packaged: true, cwd: base, appData: path.join(base, "a"), forced: path.join(base, "f") });
+    expect(l).toMatchObject({ source: "dev", home: path.join(base, "f") });
     expect(l.userData).toBeUndefined();
   });
   it("改过位置 → 按记录的目录（开发 / 打包都一样）", () => {

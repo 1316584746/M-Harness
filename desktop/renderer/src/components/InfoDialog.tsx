@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { RepoInfo } from "../../../shared/api";
-import { taskUrl, type Task } from "../lib/taskStore";
+import { prdUrlError, taskUrl, type Task } from "../lib/taskStore";
 import { Icon } from "./Icon";
 
 export interface InfoDialogProps {
@@ -21,6 +21,8 @@ export function InfoDialog({ task, repos, sourceText, schedule, onClose, onSave,
   const url = taskUrl(task);
   const [title, setTitle] = useState(task.title);
   const [reqId, setReqId] = useState(task.reqId ?? "");
+  const [prd, setPrd] = useState(task.prdUrl ?? "");
+  const prdErr = prdUrlError(prd);
   const current = task.repos[0] ?? "";
   const [repo, setRepo] = useState(current);
 
@@ -30,17 +32,17 @@ export function InfoDialog({ task, repos, sourceText, schedule, onClose, onSave,
     return () => document.removeEventListener("keydown", esc);
   }, [onClose]);
 
-  const ok = title.trim().length > 0;
+  const ok = title.trim().length > 0 && !prdErr;
   const save = () => {
     if (!ok) return;
-    onSave({ title: title.trim(), reqId: reqId.trim() || undefined });
+    onSave({ title: title.trim(), reqId: reqId.trim() || undefined, prdUrl: prd.trim() || undefined });
     // 选了另一个仓库：它排到第一位（其余已关联的保留）
     if (repo !== current) onRepos(repo ? [repo, ...task.repos.filter(n => n !== repo)] : task.repos.filter(n => n !== current));
     onClose();
   };
   const meta: Array<[string, string]> = [
     ["来源", sourceText],
-    ["工作项 ID", task.itemId],
+    ...(task.source === "manual" ? [] : ([["工作项 ID", task.itemId]] as Array<[string, string]>)),
     ...(task.node ? ([["节点", task.node]] as Array<[string, string]>) : []),
     ["排期", schedule],
     ...(task.sub ? ([["备注", task.sub]] as Array<[string, string]>) : []),
@@ -80,6 +82,14 @@ export function InfoDialog({ task, repos, sourceText, schedule, onClose, onSave,
             REQ-ID
           </label>
           <input id="if-req" className="cx-input" value={reqId} onChange={e => setReqId(e.target.value)} placeholder="暂无 REQ-ID，可后补" data-testid="info-reqid" />
+        </div>
+
+        <div className="if-field">
+          <label className="cx-label" htmlFor="if-prd">
+            PRD 链接 <span className="adv-opt">（选填）</span>
+          </label>
+          <input id="if-prd" className="cx-input" value={prd} onChange={e => setPrd(e.target.value)} placeholder="https://xxx.feishu.cn/wiki/…" spellCheck={false} data-testid="info-prd" />
+          {prdErr ? <span className="if-hint" style={{ color: "var(--bad)" }}>{prdErr}</span> : <span className="if-hint">会随任务说明发给 AI，方案设计会写进「PRD 链接」；也可以在「任务上下文」里加更多文档</span>}
         </div>
 
         <div className="if-field">

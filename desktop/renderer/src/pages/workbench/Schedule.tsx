@@ -1,15 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TodoChildDTO, TodoItemDTO } from "../../../../shared/api";
-import { WEEK, WINDOW_DAYS, DAY, layoutBars, md, startOfDay, windowStart } from "../../../../shared/schedule";
+import { WEEK, WINDOW_DAYS, DAY, isNominal, layoutBars, md, startOfDay, windowStart } from "../../../../shared/schedule";
 import { Icon } from "../../components/Icon";
 
 export const SOURCE_NAME: Record<TodoItemDTO["source"], string> = { feishu: "飞书项目", dingtalk: "钉钉待办" };
 
-/** 日期 → 11/17 或 11/17 18:00（有具体时刻才带） */
+/** 日期 → 11/17（排期只到天，不显示时分秒：飞书的结束时间是当天 23:59，没必要露出来） */
 function when(ms: number): string {
-  const d = new Date(ms);
-  const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0;
-  return hasTime ? `${md(ms)} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}` : md(ms);
+  return md(ms);
 }
 
 function range(t: TodoItemDTO): string {
@@ -372,15 +370,20 @@ export function Schedule({
   onTask: (t: TodoItemDTO, open: boolean) => void;
 }) {
   const [weeks, setWeeks] = useState(0);
-  const [open, setOpen] = useState<string | null>(null);
   const now = Date.now();
   const ws = windowStart(now, weeks);
   const days = useMemo(() => Array.from({ length: WINDOW_DAYS }, (_, i) => new Date(ws + i * DAY + 12 * 3600_000).getTime()), [ws]);
   const todayIdx = Math.round((startOfDay(now) - ws) / DAY);
   const { bars, unscheduled: noDate, outside } = useMemo(() => layoutBars(items, ws), [items, ws]);
-  /** 进行中的需求（不管排没排期都列出来，带我负责的子任务）；未排期里只放没在进行中的 */
-  const active = useMemo(() => items.filter(i => i.active), [items]);
-  const unscheduled = useMemo(() => noDate.filter(i => !i.active), [noDate]);
+  const noDateSet = useMemo(() => new Set(noDate), [noDate]);
+  /** 进行中且有排期的需求 */
+  const active = useMemo(() => items.filter(i => i.active && !isNominal(i) && !noDateSet.has(i)), [items, noDateSet]);
+  /** 进行中但整体没排期的需求：单独一组，卡片和进行中一样带子任务 */
+  const activeNoDate = useMemo(() => noDate.filter(i => i.active && !isNominal(i)), [noDate]);
+  /** 只是挂名负责人（没有我的子任务、没有排期）的需求：不算我的排期，单独收起来 */
+  const nominal = useMemo(() => items.filter(isNominal), [items]);
+  const [nomOpen, setNomOpen] = useState(false);
+  const unscheduled = useMemo(() => noDate.filter(i => !i.active && !isNominal(i)), [noDate]);
   const [subOpen, setSubOpen] = useState<string | null>(null);
   /** 进行中的需求里，被折叠起来的子任务列表（默认都展开） */
   const [folded, setFolded] = useState<Set<string>>(new Set());
@@ -393,20 +396,31 @@ export function Schedule({
   const key = (t: TodoItemDTO) => t.source + t.id;
   const last = ws + (WINDOW_DAYS - 1) * DAY;
 
-  const detail = (t: TodoItemDTO) => (
-    <div className="gantt-detail" data-testid="gantt-detail">
-      <div className="gd-meta">
-        <b className="gd-title">{t.title}</b>
-        <span>{range(t)}</span>
-        {t.node && <span>节点：{t.node}</span>}
-        {t.sub && <span>{t.sub}</span>}
-        {t.overdue && <span className="bad">已逾期</span>}
-      </div>
-      <button className="btn sm" data-testid="wb-todo-ai" onClick={() => onTask(t, true)}>
-        <Icon name="spark" size={13} /> 打开任务
-      </button>
-      <Children key={refreshKey} t={t} onEdit={onEdit} />
-    </div>
+  /** 需求卡片：标题、节点、我的子任务（进行中 / 未排期的进行中需求共用） */
+  const renderActive = (t: TodoItemDTO) => (
+          <div className="act-item" key={key(t)} data-testid="wb-active-item">
+            <div className="act-head">
+              <div className={`wb-todo-main${tasked.has(key(t)) ? " jump" : ""}`} data-testid="wb-active-main" onClick={() => tasked.has(key(t)) && onTask(t, true)} title={tasked.has(key(t)) ? "打开对应任务" : undefined}>
+                <div className="wb-todo-title">{t.title}</div>
+                <div className="wb-sub">
+                  <Nodes t={t} />
+                  {t.overdue && <span className="bad"> 已逾期 </span>}
+                  <SelfSched t={t} />
+                  {t.sub ? ` · ${t.sub}` : ""}
+                </div>
+              </div>
+              <button className="btn sm wb-ai" data-testid="wb-active-open" onClick={() => onTask(t, true)}>
+                <Icon name="spark" size={13} /> {tasked.has(key(t)) ? "打开任务" : "创建任务"}
+              </button>
+            </div>
+            <SubHead t={t} open={!folded.has(key(t))} onToggle={() => toggleFold(key(t))} testid="wb-sub-fold" />
+            {!folded.has(key(t)) && (
+              <>
+                <Children key={refreshKey} t={t} onEdit={onEdit} />
+                <AddSub key={`add${refreshKey}`} t={t} onCreate={onCreate} />
+              </>
+            )}
+          </div>
   );
 
   return (
@@ -482,25 +496,19 @@ export function Schedule({
             )}
             {bars.map(b => {
               const t = b.item;
-              const isOpen = open === key(t);
               return (
                 <div className="gantt-row" key={key(t)} data-testid="gantt-row">
                   <button
-                    className={`gantt-bar${t.overdue ? " overdue" : ""}${b.cutL ? " cut-l" : ""}${b.cutR ? " cut-r" : ""}${isOpen ? " open" : ""}${tasked.has(key(t)) ? " tasked" : ""}`}
+                    className={`gantt-bar${t.overdue ? " overdue" : ""}${b.cutL ? " cut-l" : ""}${b.cutR ? " cut-r" : ""}${tasked.has(key(t)) ? " tasked" : ""}`}
                     style={{ gridColumn: `${b.s + 1} / ${b.e + 2}` }}
                     title={`${t.title}\n${range(t)}`}
                     data-testid="gantt-bar"
-                    onClick={() => {
-                      if (tasked.has(key(t))) return onTask(t, true);
-                      onTask(t, false);
-                      setOpen(isOpen ? null : key(t));
-                    }}
+                    onClick={() => (tasked.has(key(t)) ? onTask(t, true) : onTask(t, false))}
                   >
-                    <span className={`chev${isOpen ? " open" : ""}${tasked.has(key(t)) ? " tasked" : ""}`}>›</span>
+                    <span className={`chev${tasked.has(key(t)) ? " tasked" : ""}`}>›</span>
                     <b>{t.title}</b>
                     {t.node && <em>{t.node}</em>}
                   </button>
-                  {isOpen && detail(t)}
                 </div>
               );
             })}
@@ -513,39 +521,16 @@ export function Schedule({
           <div className="sch-sub">
             进行中的需求 <em>{active.length}</em>
           </div>
-          {active.map(t => (
-            <div className="act-item" key={key(t)} data-testid="wb-active-item">
-              <div className="act-head">
-                <div className={`wb-todo-main${tasked.has(key(t)) ? " jump" : ""}`} data-testid="wb-active-main" onClick={() => tasked.has(key(t)) && onTask(t, true)} title={tasked.has(key(t)) ? "打开对应任务" : undefined}>
-                  <div className="wb-todo-title">{t.title}</div>
-                  <div className="wb-sub">
-                    <Nodes t={t} />
-                    {t.overdue && <span className="bad"> 已逾期 </span>}
-                    <SelfSched t={t} />
-                    {t.sub ? ` · ${t.sub}` : ""}
-                  </div>
-                </div>
-                <button className="btn sm wb-ai" data-testid="wb-active-open" onClick={() => onTask(t, true)}>
-                  <Icon name="spark" size={13} /> {tasked.has(key(t)) ? "打开任务" : "创建任务"}
-                </button>
-              </div>
-              <SubHead t={t} open={!folded.has(key(t))} onToggle={() => toggleFold(key(t))} testid="wb-sub-fold" />
-              {!folded.has(key(t)) && (
-                <>
-                  <Children key={refreshKey} t={t} onEdit={onEdit} />
-                  <AddSub key={`add${refreshKey}`} t={t} onCreate={onCreate} />
-                </>
-              )}
-            </div>
-          ))}
+          {active.map(renderActive)}
         </div>
       )}
 
-      {unscheduled.length > 0 && (
+      {activeNoDate.length + unscheduled.length > 0 && (
         <div className="sch-unscheduled" data-testid="wb-unscheduled">
           <div className="sch-sub">
-            未排期 <em>{unscheduled.length}</em>
+            未排期的需求 <em>{activeNoDate.length + unscheduled.length}</em>
           </div>
+          {activeNoDate.map(renderActive)}
           {unscheduled.map(t => (
             <div className="wb-todo" key={key(t)} data-testid="wb-todo">
               <div className="wb-todo-main">
@@ -566,6 +551,31 @@ export function Schedule({
               </button>
             </div>
           ))}
+        </div>
+      )}
+
+      {nominal.length > 0 && (
+        <div className="sch-unscheduled" data-testid="wb-nominal">
+          <button className="sch-sub link" data-testid="wb-nominal-toggle" onClick={() => setNomOpen(v => !v)} title="这些需求的负责人里有你，但你名下没有子任务、也没有排期，所以不算在你的排期里">
+            仅挂名负责人（没有我的排期）<em>{nominal.length}</em> {nomOpen ? "收起" : "展开"}
+          </button>
+          {nomOpen &&
+            nominal.map(t => (
+              <div className="wb-todo" key={key(t)} data-testid="wb-nominal-item">
+                <div className="wb-todo-main">
+                  <div className={`wb-todo-title${tasked.has(key(t)) ? " jump" : ""}`} onClick={() => tasked.has(key(t)) && onTask(t, true)} title={tasked.has(key(t)) ? "打开对应任务" : undefined}>
+                    {t.title}
+                  </div>
+                  <div className="wb-sub">
+                    <Nodes t={t} />
+                    {t.sub ? ` · ${t.sub}` : ""}
+                  </div>
+                </div>
+                <button className="btn sm wb-ai" onClick={() => onTask(t, true)}>
+                  <Icon name="spark" size={13} /> {tasked.has(key(t)) ? "打开任务" : "创建任务"}
+                </button>
+              </div>
+            ))}
         </div>
       )}
     </section>

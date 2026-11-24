@@ -10,6 +10,7 @@ import { builtinTools } from "./tools/builtin";
 import { dingtalkProjectTools } from "./tools/dingtalk-project";
 import { feishuProjectTools } from "./tools/feishu-project";
 import { McpManager } from "./mcp/manager";
+import { customOfficePrompt } from "./prompt/office";
 import { buildRulesSection } from "./prompt/rules";
 import { scanSkills, skillTool, skillsPrompt, type Skill } from "./prompt/skills";
 import { gitTools } from "./tools/git";
@@ -23,6 +24,8 @@ export interface ExtraTools {
 
 export interface TaskRequest {
   input: string;
+  /** 附带的图片（本机文件绝对路径），发给支持图片的模型 / Agent */
+  images?: string[];
   /** 指定 provider，缺省用配置里的 defaultProvider */
   provider?: string;
   history?: Msg[];
@@ -40,6 +43,12 @@ export interface TaskRequest {
   model?: string;
   /** 本次不提供给模型的工具名 */
   disabledTools?: string[];
+  /** 外部 Agent 的会话标识（任务 / 对话 id）：同一个值会续接同一个 Agent，不用每一步从头探索 */
+  sessionKey?: string;
+  /** 开全新上下文：不续接旧 Agent */
+  freshSession?: boolean;
+  /** 外部 Agent 的探索预算：工具调用达到这个数就让它直接收尾 */
+  toolBudget?: number;
 }
 
 /** 装配好的运行时：配置 + provider 注册表 + 护栏 + trace，CLI / 通道 / 桌面端共用 */
@@ -113,16 +122,17 @@ export class Runtime {
     await this.prepare();
     const skills = provider.kind === "model" ? this.allSkills(root).filter(s => s.enabled) : [];
     const baseTools = [...this.tools, ...(skills.length ? [skillTool(skills)] : []), ...(req.ask && provider.kind === "model" ? [askUserTool] : [])];
-    const system = [req.system ?? this.config.system, buildRulesSection(this.config.rules, root), skillsPrompt(skills)].filter(Boolean).join("\n\n");
+    const system = [req.system ?? this.config.system, buildRulesSection(this.config.rules, root), skillsPrompt(skills), customOfficePrompt(this.config.office)].filter(Boolean).join("\n\n");
 
     const result = await run({
       provider,
       tools: req.disabledTools?.length ? baseTools.filter(t => !req.disabledTools!.includes(t.name)) : baseTools,
       system,
       input: req.input,
+      images: req.images,
       history: req.history,
       maxSteps: this.config.limits.maxSteps,
-      timeoutMs: this.config.limits.timeoutSec * 1000,
+      timeoutMs: (provider.kind === "model" ? this.config.limits.timeoutSec : Math.max(this.config.limits.timeoutSec, this.config.limits.agentTimeoutSec)) * 1000,
       guard: this.guardFor(mode),
       approve,
       ask: req.ask,
@@ -131,6 +141,9 @@ export class Runtime {
       signal: req.signal,
       root,
       runId,
+      sessionKey: req.sessionKey,
+      freshSession: req.freshSession,
+      toolBudget: req.toolBudget,
     });
     return { ...result, runId, traceFile: trace.file, provider: providerName };
   }

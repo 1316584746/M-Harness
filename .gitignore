@@ -3,6 +3,7 @@ node_modules/
 dist/
 out/
 release/
+build/cli/
 
 # ───────── 数据与配置：一律不上传（开发时数据目录就是项目根目录） ─────────
 # 配置文件（可能含 Key、令牌、本机路径、飞书空间等）；模板请用 *.example.json

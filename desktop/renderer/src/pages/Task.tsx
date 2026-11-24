@@ -1,32 +1,39 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, McpServerDTO, RepoInfo, RepoSyncDTO, WorkChatDTO } from "../../../shared/api";
+import type { AppState, McpServerDTO, RepoInfo, RepoSyncDTO, StartBranchDTO, WorkChatDTO } from "../../../shared/api";
 import { md, startOfDay } from "../../../shared/schedule";
 import { api } from "../api";
+import { BranchPicker } from "../components/BranchPicker";
 import { Icon } from "../components/Icon";
 import { Markdown } from "../components/Markdown";
 import { ModelPicker } from "../components/ModelPicker";
 import { ProviderPicker } from "../components/ProviderPicker";
 import { FlowLive, FlowTranscript } from "../components/FlowRun";
-import { AdvanceDialog } from "../components/AdvanceDialog";
+import { AdvanceDialog, type AdvanceOptions } from "../components/AdvanceDialog";
 import { ContextDialog } from "../components/ContextDialog";
 import { GroupDialog } from "../components/GroupDialog";
 import { InfoDialog } from "../components/InfoDialog";
 import { RunFailure } from "../components/RunLive";
 import { AskForm } from "../components/AskCard";
 import { QueuedList } from "../components/QueuedList";
-import { isRunning, type ChatStore, type Turn } from "../lib/chatStore";
-import { blockedSteps, visibleSteps } from "../lib/actionSteps";
+import { ImageStrip, MsgImages } from "../components/ImageStrip";
+import { useImageAttach } from "../lib/useImageAttach";
+import { isRunning, type ChatStore, type StepRef, type Turn } from "../lib/chatStore";
+import { blockedSteps, branchNote, visibleSteps } from "../lib/actionSteps";
 import { parseCfg } from "../lib/configEdit";
-import { buildRunView, fmtMs } from "../lib/steps";
+import { buildRunView, fmtMs, fmtTokens } from "../lib/steps";
+import { progressDigest } from "../lib/flow";
+import { upstreamBlock } from "../lib/upstream";
 import { docKind, PHASE_TEXT, taskPhase, taskUrl, type Task, type TaskPhase, type TaskStore } from "../lib/taskStore";
 
-export const SOURCE_TEXT: Record<Task["source"], string> = { feishu: "飞书项目", dingtalk: "钉钉待办" };
+export const SOURCE_TEXT: Record<Task["source"], string> = { feishu: "飞书项目", dingtalk: "钉钉待办", manual: "手动新建" };
 
 /** 第一次打开任务时放进输入框的提示词（用户确认后再发送） */
 export const taskPrompt = (t: Pick<Task, "source" | "itemId" | "title">) =>
-  t.source === "feishu"
-    ? `我在飞书项目里有一个需求「${t.title}」（工作项 ID：${t.itemId}）。请先用 feishu_project_read 查看它的详情，再告诉我现在该怎么推进，需要我做什么。`
-    : `我在钉钉里有一个待办「${t.title}」（任务 ID：${t.itemId}）。请先用 dingtalk_project_read 查看它的详情，再告诉我现在该怎么推进，需要我做什么。`;
+  t.source === "manual"
+    ? `我有一个任务「${t.title}」。我会把需求内容和相关材料发给你，请先帮我理清要做什么，再一起往下推进。`
+    : t.source === "feishu"
+      ? `我在飞书项目里有一个需求「${t.title}」（工作项 ID：${t.itemId}）。请先用 feishu_project_read 查看它的详情，再告诉我现在该怎么推进，需要我做什么。`
+      : `我在钉钉里有一个待办「${t.title}」（任务 ID：${t.itemId}）。请先用 dingtalk_project_read 查看它的详情，再告诉我现在该怎么推进，需要我做什么。`;
 
 const FLOW_DEFAULT = 420;
 const FLOW_MIN = 300;
@@ -54,10 +61,15 @@ function range(t: Task): string {
 /** 发给 AI 的任务说明：需求、关联仓库、任务上下文 */
 function preamble(t: Task, repos: RepoInfo[]): string {
   const rs = t.repos.map(n => repos.find(r => r.name === n)).filter((r): r is RepoInfo => !!r);
-  const lines = [`【任务】${t.title}`, `来源：${SOURCE_TEXT[t.source]}，工作项 ID ${t.itemId}${t.node ? `，当前节点 ${t.node}` : ""}`];
+  const lines = [`【任务】${t.title}`, t.source === "manual" ? `来源：${SOURCE_TEXT.manual}（没有关联项目管理里的工作项）` : `来源：${SOURCE_TEXT[t.source]}，工作项 ID ${t.itemId}${t.node ? `，当前节点 ${t.node}` : ""}`];
   const link = taskUrl(t);
   if (link) lines.push(`需求链接：${link}`);
+  if (t.prdUrl?.trim()) lines.push(`PRD 链接：${t.prdUrl.trim()}`);
   if (t.reqId?.trim()) lines.push(`需求编号（REQ-ID）：${t.reqId.trim()}`);
+  // 命令直接给全：Agent 以前每次都先 --help 摸索一遍（6~10 次调用、大段输出），白白耗 token
+  if (t.source === "feishu" && t.projectKey && /^[\w.-]+$/.test(t.projectKey) && /^\d+$/.test(t.itemId)) {
+    lines.push(`读飞书的现成命令（直接用，不要先跑 --help）：\n- 工作项详情：meegle workitem get --project-key ${t.projectKey} --work-item-id ${t.itemId} --fields _all --page-size 200\n- 评论：meegle comment list --project-key ${t.projectKey} --work-item-id ${t.itemId}\n- 飞书文档：lark-cli docs +fetch --doc <文档链接> --doc-format markdown（文档很长时先加 --scope outline 看目录）`);
+  }
   if (rs.length) lines.push(`关联仓库（需要看代码 / 改代码时就用这些）：\n${rs.map(r => `- ${r.name}：${r.path}${r.status.branch ? `（当前分支 ${r.status.branch}）` : ""}`).join("\n")}`);
   if (t.context.trim()) lines.push(`任务上下文：\n${t.context.trim()}`);
   const docs = t.docs ?? [];
@@ -75,7 +87,7 @@ function preamble(t: Task, repos: RepoInfo[]): string {
   lines.push("回复里提到需求、文档、网页时，请用 Markdown 链接写成 [标题](完整网址)，界面里才能直接点开；只有标题没有网址的，请在后面补上网址。");
   return lines.join("\n");
 }
-const sigOf = (t: Task) => JSON.stringify([t.repos, t.reqId ?? "", t.context.trim(), (t.docs ?? []).map(d => [d.title, d.content])]);
+const sigOf = (t: Task) => JSON.stringify([t.repos, t.reqId ?? "", t.context.trim(), (t.docs ?? []).map(d => [d.title, d.content]), ...(t.prdUrl?.trim() ? [t.prdUrl.trim()] : [])]);
 
 type Pop = "info" | "ctx" | "mcp" | "repo" | "group" | null;
 
@@ -116,11 +128,26 @@ export function TaskPage({
     }
     return out;
   }, [turns]);
+  // 产物按「步骤」分开放：业务分析、方案设计、进行开发……（自定义动作也一样）各一份，互不覆盖；
+  // 同一步骤跑了多次，显示最新一次。只有从「推进任务」点动作发出的轮次才有产物；
+  // 自由输入（随口问、追问）没有产物，回复只在右侧事件流里，不会进左边，也不会覆盖任何动作的产物
+  // 同名的动作（比如内置「方案设计」和自己建的「方案设计」）算同一份产物：后跑的覆盖前面的，不另开标签
+  const stepKey = (r: { user: Turn }) => r.user.step?.name ?? "";
+  const stepTabs = useMemo(() => {
+    const m = new Map<string, { key: string; label: string; round: (typeof rounds)[number]; count: number }>();
+    for (const r of rounds) if (r.user.step) m.set(stepKey(r), { key: stepKey(r), label: r.user.step.name, round: r, count: (m.get(stepKey(r))?.count ?? 0) + 1 });
+    return [...m.values()];
+  }, [rounds]);
   const [sel, setSel] = useState<number | null>(null);
-  const cur = rounds.find(r => r.n === sel) ?? rounds.at(-1);
+  const [tabKey, setTabKey] = useState<string | null>(null);
+  const selRound = rounds.find(r => r.n === sel && r.user.step);
+  // 默认停在最新一个「动作」的产物上；一个动作都没跑过时，左边什么产物都没有
+  const lastStep = [...rounds].reverse().find(r => r.user.step);
+  const activeKey = selRound ? stepKey(selRound) : (tabKey ?? (lastStep ? stepKey(lastStep) : ""));
+  const cur = selRound ?? stepTabs.find(t => t.key === activeKey)?.round ?? lastStep;
   // 发起新一轮时自动切到最新一轮
   const nRounds = rounds.length;
-  useEffect(() => setSel(null), [nRounds, task.id]);
+  useEffect(() => (setSel(null), setTabKey(null)), [nRounds, task.id]);
   // ───── 右侧事件流栏：宽度可拖动（记住上次的宽度，双击分隔条恢复默认），输入框高度可拖动 ─────
   const bodyRef = useRef<HTMLDivElement>(null);
   const [flowW, setFlowW] = useState(() => {
@@ -286,15 +313,68 @@ export function TaskPage({
     el.style.height = "auto";
     el.style.height = Math.min(Math.max(el.scrollHeight, 64), 220) + "px";
   }, [input]);
-  const send = (override?: string, opts?: { fresh?: boolean }) => {
-    const text = (override ?? input).trim();
+  const pics = useImageAttach();
+  const send = (override?: string, o?: { fresh?: boolean; step?: StepRef; extra?: string }) => {
+    const { extra, ...opts } = o ?? {};
+    const imgs = override === undefined ? pics.images : [];
+    const text = (override ?? input).trim() || (imgs.length ? "请看附图。" : "");
     if (!text) return;
-    if (override === undefined) setInput("");
-    const need = turns.length === 0 || task.ctxSent !== sigOf(task) || !!opts?.fresh;
-    const runInput = need ? `${preamble(task, repos)}\n\n${text}` : undefined;
+    if (override === undefined) {
+      setInput("");
+      pics.clear();
+    }
+    const need = turns.length === 0 || task.ctxSent !== sigOf(task) || !!opts.fresh;
+    const base = need ? `${preamble(task, repos)}\n\n${text}` : undefined;
+    // extra：只发给 AI、不存进对话记录的附加内容（比如这一步已有的产物）
+    const runInput = extra ? `${base ?? text}\n\n${extra}` : base;
     // AI 还在运行：先排队，这一轮结束后自动发
-    if (running) chat.enqueue(text, onChanged, runInput);
-    else void chat.send(text, onChanged, runInput, opts);
+    if (running) chat.enqueue(text, onChanged, runInput, imgs, opts.step);
+    else void chat.send(text, onChanged, runInput, { ...opts, ...(imgs.length ? { images: imgs } : {}) });
+    tasks.update(task.id, { ctxSent: sigOf(task) });
+  };
+  /** 推进到下一步。「进行开发」先基于基线分支把开发分支（feature-需求名称-日期）建好、切过去，再让 AI 开工 */
+  const advance = async (text: string, o: AdvanceOptions) => {
+    // 记下这一轮是哪一步：左边的产物按步骤分开放，点了方案设计，业务分析的产物也还在
+    const stepDef = o.stepId ? [...steps.builtins, ...steps.custom].find(a => a.id === o.stepId) : undefined;
+    // 这一步之前已经有产物：让 AI 在它的基础上修改，最后仍交一份完整的最新产物，覆盖原来的，不另起一份
+    const prevDone = stepDef ? [...rounds].reverse().find(r => r.user.step?.name === stepDef.name && r.ai?.status === "done" && r.ai.text) : undefined;
+    const extra = prevDone?.ai?.text
+      ? [
+          `【这一步已有的产物】「${stepDef!.name}」之前已经产出过一份（见下）。这次是在它的基础上修改：保留仍然正确、已经确认的内容，只改需要变的地方；`,
+          "最后仍然输出一份完整的最新产物（它会覆盖原来那份，不会另存一份）。已有内容里能直接用的结论不要重新查。",
+          "---",
+          prevDone.ai.text.length > 20000 ? prevDone.ai.text.slice(0, 20000) + "\n…（已截断）" : prevDone.ai.text,
+          "---",
+        ].join("\n")
+      : undefined;
+    const up = o.stepId && stepDef ? upstreamBlock(rounds, o.stepId, stepDef.name) : undefined;
+    // 内置和自定义的步骤都带上：这一步的最后一条回复就是左边的产物，不能只是「已写入飞书」+ 链接
+    const deliver = stepDef
+      ? `【产物要求】这一步的最后一条回复会原样显示在左边「产物」里给用户审阅。即使你同时把内容写进了飞书文档 / 知识库 / 别的地方，最后一条回复仍然必须是完整的「${stepDef.name}」正文（和写进去的内容一致），不要只回复「已写入…」加链接和几条要点；链接最多在开头用一行带过。`
+      : undefined;
+    const extraAll = [up, extra, deliver].filter(Boolean).join("\n\n") || undefined;
+    const opts = { fresh: o.fresh, ...(extraAll ? { extra: extraAll } : {}), ...(o.stepId && stepDef ? { step: { id: o.stepId, name: stepDef.name } } : {}) };
+    if (o.stepId !== "build" || !task.repos.length) return send(text, opts);
+    const rs = await api.repoStartBranch(task.repos, task.title).catch((e): StartBranchDTO[] => [{ name: task.repos[0], ok: false, error: e instanceof Error ? e.message : String(e) }]);
+    loadRef.current();
+    const note = branchNote(rs);
+    send(note ? `${text}\n\n${note}` : text, opts);
+  };
+  /** 失败 / 超时 / 中断后「继续」：沿用刚才的问题（同一步骤），并把上次已经读过、搜过、做过的事带上，新开的 Agent 接着做 */
+  const lastRound = rounds.at(-1);
+  const retry = (r: (typeof rounds)[number]) => {
+    if (running || !r.ai) return;
+    const why = short((r.ai.text ?? "").split("\n")[0] || "没有跑完", 60);
+    const digest = progressDigest(r.ai.events, r.ai.times?.length === r.ai.events.length ? r.ai.times : undefined);
+    const note = [
+      `【续跑】上一次运行没有跑完（${why}）。上面是同一个问题，请接着做，不要从头开始。`,
+      "下面是上次已经做过的事：已读过的文件不要重复读，直接用你记得的结论往下做，只补读还缺的部分。",
+      "如果这一步内容很多、一个人做不完，先把要查的点拆成几个互相独立的小问题，用 researcher 子代理同时去查，都回来以后再汇总写产物。",
+      "",
+      digest || "（上次没有留下可用的进度，只能重新开始，但请更快地定位，不要整仓遍历。）",
+    ].join("\n");
+    const up = r.user.step ? upstreamBlock(rounds, r.user.step.id, r.user.step.name) : undefined;
+    void chat.send(r.user.text, onChanged, `${preamble(task, repos)}\n\n${r.user.text}${up ? `\n\n${up}` : ""}\n\n${note}`, { ...(r.user.images?.length ? { images: r.user.images } : {}), ...(r.user.step ? { step: r.user.step } : {}) });
     tasks.update(task.id, { ctxSent: sigOf(task) });
   };
   const attach = async (kind: "file" | "folder") => {
@@ -332,7 +412,7 @@ export function TaskPage({
         </span>
         <span className="chip">{SOURCE_TEXT[task.source]}</span>
         <span className="spacer" />
-        <button className="btn sm primary" data-testid="task-advance-top" title="推进任务：选下一步（出方案 / 改代码 / 复核 / 联调 / 提测 / 你配置的动作）" onClick={() => setAdvOpen(true)} disabled={!!info?.problem}>
+        <button className="btn sm primary" data-testid="task-advance-top" title="推进任务：选下一步（业务分析 / 方案设计 / 进行开发 / 代码CR / 联调 / 提测 / 你配置的动作）" onClick={() => setAdvOpen(true)} disabled={!!info?.problem}>
           <Icon name="spark" size={14} /> 推进
         </button>
         <button className="btn sm" data-testid="task-done" onClick={() => tasks.update(task.id, { done: !task.done })}>
@@ -360,11 +440,7 @@ export function TaskPage({
                   <span className="spinner" /> 同步基线分支…
                 </em>
               ) : (
-                r.status.branch && (
-                  <em data-testid="task-repo-branch" title={r.status.branch}>
-                    {r.status.branch}
-                  </em>
-                )
+                r.status.exists && r.status.branch && <BranchPicker dir={r.path} compact down initial={r.status.branch} refreshKey={`${r.status.branch}:${r.status.changed}`} onSwitched={() => loadRef.current()} />
               )}
               {r.status.changed > 0 && <i className="dirty" title={`${r.status.changed} 个文件有改动`} />}
               <button aria-label="取消关联" onClick={() => setTaskRepos(task.repos.filter(n => n !== r.name))}>
@@ -392,20 +468,29 @@ export function TaskPage({
           </div>
         </div>
 
-        {picked.some(r => syncRes[r.name] && (syncRes[r.name].error || syncRes[r.name].skipped || syncRes[r.name].switched || syncRes[r.name].pulled)) && (
+        {/* 同步成功不再提示（分支名就在标签上）；只有出错、或者暂存了你的未提交改动（要告诉你去哪恢复）才显示 */}
+        {picked.some(r => syncRes[r.name] && (syncRes[r.name].error || syncRes[r.name].stashed)) && (
           <div className="repo-notes" data-testid="task-repo-notes">
             {picked.map(r => {
               const s = syncRes[r.name];
-              if (!s) return null;
-              const ok = s.ok && !s.error;
-              const text = s.error
-                ? `${r.name}：${s.error}`
-                : [s.switched ? `已切换到基线分支 ${s.base}` : s.base && s.branch === s.base ? `在基线分支 ${s.base}` : "", s.pulled ? "已拉取最新代码" : "", s.skipped ?? ""].filter(Boolean).join("，");
-              return text ? (
-                <span key={r.name} className={`repo-note ${ok ? (s.skipped ? "warn" : "ok") : "bad"}`} title={text}>
-                  {s.error ? r.name + "：" + s.error : r.name + "：" + text}
+              if (!s || !(s.error || s.stashed)) return null;
+              const text = s.error ? `${r.name}：${s.error}` : `${r.name}：${s.skipped ?? `已暂存 ${s.stashed} 个未提交文件（git stash）`}`;
+              return (
+                <span key={r.name} className={`repo-note ${s.error ? "bad" : "warn"}`}>
+                  <span className="repo-note-text" title={text}>
+                    {text}
+                  </span>
+                  <button
+                    className="repo-note-x"
+                    data-testid="repo-note-close"
+                    title="关闭这条提示"
+                    aria-label="关闭这条提示"
+                    onClick={() => setSyncRes(m => Object.fromEntries(Object.entries(m).filter(([k]) => k !== r.name)))}
+                  >
+                    ×
+                  </button>
                 </span>
-              ) : null;
+              );
             })}
           </div>
         )}
@@ -461,7 +546,7 @@ export function TaskPage({
         </div>
       </div>
 
-      {advOpen && <AdvanceDialog builtins={steps.builtins} actions={steps.custom} blocked={blocked} hasHistory={turns.length > 0} agent={<><ProviderPicker providers={state.providers} value={provider} onChange={chat.setProvider} disabled={running} /><ModelPicker provider={provider} info={info} value={chat.model} onChange={chat.setModel} disabled={running} /></>} vars={{ taskTitle: task.title, taskId: task.id, repoPath: picked.find(r => r.path)?.path ?? "未关联仓库" }} onClose={() => setAdvOpen(false)} onAdvance={(t, o) => send(t, o)} />}
+      {advOpen && <AdvanceDialog builtins={steps.builtins} actions={steps.custom} blocked={blocked} hasHistory={turns.length > 0} agent={<><ProviderPicker providers={state.providers} value={provider} onChange={chat.setProvider} disabled={running} /><ModelPicker provider={provider} info={info} value={chat.model} onChange={chat.setModel} disabled={running} /></>} vars={{ taskTitle: task.title, taskId: task.id, repoPath: picked.find(r => r.path)?.path ?? "未关联仓库" }} onClose={() => setAdvOpen(false)} onAdvance={(t, o) => void advance(t, o)} />}
       {infoOpen && <InfoDialog task={task} repos={repos} sourceText={SOURCE_TEXT[task.source]} schedule={range(task)} onClose={() => setInfoOpen(false)} onSave={patch => tasks.update(task.id, patch)} onRepos={setTaskRepos} />}
       {ctxOpen && <ContextDialog task={task} onClose={() => setCtxOpen(false)} onChange={patch => tasks.update(task.id, patch)} />}
       {grpOpen && (
@@ -482,6 +567,17 @@ export function TaskPage({
         <div className="task-main">
           {cur ? (
             <>
+              {stepTabs.length > 0 && (
+                <div className="out-tabs out-steps" data-testid="out-steps">
+                  {stepTabs.map(t => (
+                    <button key={t.key} type="button" className={`out-tab${t.key === activeKey ? " on" : ""}`} data-testid="out-step" data-step={t.round.user.step?.id ?? t.key} title={t.count > 1 ? `跑了 ${t.count} 次，这里是最新一次` : undefined} onClick={() => (setSel(null), setTabKey(t.key))}>
+                      {t.round.ai?.status === "running" ? <span className="spinner" /> : <span className={`dot ${t.round.ai?.status === "done" ? "ready" : t.round.ai?.status ? "error" : ""}`} />}
+                      {t.label}
+                      {t.count > 1 && <em>×{t.count}</em>}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="out-tabs">
                 <span className="out-title">
                   <Icon name="file" size={13} /> 产物
@@ -506,7 +602,7 @@ export function TaskPage({
                   return ask ? <AskForm key={ask.id} req={ask} onSubmit={a => void chat.answerAsk(ask.id, a)} /> : null;
                 })()}
                 {cur.ai && (cur.ai.status === "error" || cur.ai.status === "aborted") ? (
-                  <RunFailure text={cur.ai.text ?? ""} aborted={cur.ai.status === "aborted"} />
+                  <RunFailure text={cur.ai.text ?? ""} aborted={cur.ai.status === "aborted"} onRetry={!running && cur.n === lastRound?.n ? () => retry(cur) : undefined} />
                 ) : cur.ai?.text ? (
                   <Markdown text={cur.ai.text} />
                 ) : cur.ai?.status === "running" ? null : (
@@ -522,7 +618,7 @@ export function TaskPage({
               <h2>{short(task.title, 40)}</h2>
               <p className="muted">
                 {task.repos.length ? "" : "先在上方关联这个需求要改的代码仓库，"}
-                在右侧告诉 AI 要做什么，每发一条指令就是一轮，产出会按 #1、#2… 排在这里。
+                点上方「推进任务」选一步（业务分析、方案设计……），那一步的产物会放在这里；右侧自由对话只在事件流里回复，不会生成产物。
               </p>
             </div>
           )}
@@ -576,16 +672,36 @@ export function TaskPage({
               const st = r.ai?.status;
               return (
                 <div key={r.n} className="flow-round" data-testid="flow-round">
-                  <div className="flow-user">
+                  <div
+                    className={`flow-user${r.user.step && cur?.n === r.n ? " cur" : ""}`}
+                    style={r.user.step ? { cursor: "pointer" } : undefined}
+                    title={r.user.step ? "点一下，左边产物区看这一轮的结果" : undefined}
+                    onClick={r.user.step ? () => (setSel(r.n), setTabKey(null)) : undefined}
+                  >
                     <span className="flow-who">我</span>
-                    {short(r.user.text, 160)}
+                    {r.user.step && <span className="flow-step">{r.user.step.name}</span>}
+                    {r.user.step
+                      ? (() => {
+                          // 动作发出去的是一大段提示词，事件流里不贴原文，只写做什么；上一轮没跑完又原样发一次的就是「继续」
+                          const prev = rounds[r.n - 2];
+                          const again = !!prev && prev.user.step?.id === r.user.step!.id && prev.user.text === r.user.text && prev.ai?.status !== "done";
+                          return `${again ? "继续" : "执行"}「${r.user.step!.name}」`;
+                        })()
+                      : short(r.user.text, 160)}
+                    {r.ai?.startedAt ? <em className="flow-at">#{r.n} · {new Date(r.ai.startedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}</em> : null}
+                    <MsgImages images={r.user.images} />
                   </div>
                   {r.ai && (
                     <div className="flow-proc" data-testid="flow-proc">
-                      <FlowTranscript events={r.ai.events} times={r.ai.times?.length === r.ai.events.length ? r.ai.times : undefined} startedAt={r.ai.startedAt} running={st === "running"} />
-                      {(st === "error" || st === "aborted") && <RunFailure text={r.ai.text ?? ""} aborted={st === "aborted"} />}
+                      <FlowTranscript events={r.ai.events} times={r.ai.times?.length === r.ai.events.length ? r.ai.times : undefined} startedAt={r.ai.startedAt} running={st === "running"} brief={!!r.user.step} />
+                      {(st === "error" || st === "aborted") && <RunFailure text={r.ai.text ?? ""} aborted={st === "aborted"} onRetry={!running && r.n === lastRound?.n ? () => retry(r) : undefined} />}
                     </div>
                   )}
+                  {r.ai && st === "running" && !r.user.step && (() => {
+                    // 自由对话中 AI 要问的问题：左边没有产物区，就在这一轮下面作答
+                    const ask = chat.asks.find(a => a.runKey === r.ai!.id);
+                    return ask ? <AskForm key={ask.id} req={ask} onSubmit={a => void chat.answerAsk(ask.id, a)} /> : null;
+                  })()}
                   {r.ai && (
                     <div className={`flow-ai ${st}`} data-testid="flow-ai">
                       {st === "running" ? (
@@ -595,9 +711,10 @@ export function TaskPage({
                           <span className={`dot ${st === "done" ? "ready" : "error"}`} />
                           <span className="flow-ai-main">
                             <b>
-                              #{r.n} {st === "done" ? "已完成，产出已更新" : st === "aborted" ? "已中断" : "失败"}
+                              #{r.n} {st === "done" ? (r.user.step ? "已完成，产出已更新" : "已回复") : st === "aborted" ? "已中断" : "失败"}
                             </b>
                             {v && v.totalMs ? <em>{fmtMs(v.totalMs)}</em> : null}
+                            {r.ai.tokens ? <em title="这一轮用掉的 token 总数（输入 + 输出 + 缓存）">{fmtTokens(r.ai.tokens)} tokens</em> : null}
                           </span>
                         </>
                       )}
@@ -613,14 +730,16 @@ export function TaskPage({
             <QueuedList items={chat.queued} onCancel={chat.dequeue} />
             <div className="composer" data-testid="task-composer">
               <div className="composer-grip" data-testid="task-input-grip" title="拖动调整输入框高度" onMouseDown={startInputResize} />
+              <ImageStrip images={pics.images} error={pics.error} onRemove={pics.remove} />
               <textarea
                 ref={area}
                 data-testid="task-input"
                 rows={2}
                 style={{ height: taH }}
                 value={input}
-                placeholder={running ? "运行中…回车排队，这一轮结束后自动发送；也可点右下角停止" : "想改、想问、拖入文件引用路径（Enter 发送，Shift+Enter 换行）"}
+                placeholder={running ? "运行中…回车排队，这一轮结束后自动发送；也可点右下角停止" : "想改、想问、拖入文件引用路径，也可以直接粘贴图片（Enter 发送，Shift+Enter 换行）"}
                 onChange={e => setInput(e.target.value)}
+                onPaste={pics.onPaste}
                 onKeyDown={e => {
                   if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault();
@@ -635,7 +754,7 @@ export function TaskPage({
                   <ModelPicker provider={provider} info={info} value={chat.model} onChange={chat.setModel} disabled={running} />
                 </div>
                 <div className="row-actions">
-                  <button type="button" className="icon-btn" data-testid="task-advance-btn" title="推进任务：选下一步（出方案 / 改代码 / 复核 / 你配置的动作）" onClick={() => setAdvOpen(true)} disabled={!!info?.problem}>
+                  <button type="button" className="icon-btn" data-testid="task-advance-btn" title="推进任务：选下一步（业务分析 / 方案设计 / 进行开发 / 代码CR / 你配置的动作）" onClick={() => setAdvOpen(true)} disabled={!!info?.problem}>
                     <Icon name="spark" size={20} />
                   </button>
                   <button type="button" className="icon-btn" title="添加文件（插入路径）" onClick={() => void attach("file")} disabled={running}>
@@ -649,7 +768,7 @@ export function TaskPage({
                       <Icon name="stop" size={19} />
                     </button>
                   ) : (
-                    <button className="send" data-testid="task-send" title="发送" onClick={() => send()} disabled={!input.trim() || !!info?.problem}>
+                    <button className="send" data-testid="task-send" title="发送" onClick={() => send()} disabled={(!input.trim() && !pics.images.length) || !!info?.problem}>
                       <Icon name="send" size={20} strokeWidth={2.2} />
                     </button>
                   )}

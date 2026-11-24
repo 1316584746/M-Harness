@@ -8,7 +8,7 @@ import { Switch } from "./settings/Projects";
 /** 飞书消息通道：启停 + 允许谁来驱动它（lark-cli 长连接，无需公网地址） */
 export function FeishuChannel({ state, onChanged }: { state: AppState; onChanged: () => void }) {
   const ed = useConfigEditor(state, onChanged);
-  const lark = ed.cfg?.channels?.larkCli as { allowUsers?: string[]; groupRequireMention?: boolean; replyFormat?: string } | undefined;
+  const lark = ed.cfg?.channels?.larkCli as { allowUsers?: string[]; groupRequireMention?: boolean; replyFormat?: string; notifyOnline?: boolean } | undefined;
   const enabled = !!lark;
   const running = state.channel.running;
   const [busy, setBusy] = useState(false);
@@ -115,6 +115,15 @@ export function FeishuChannel({ state, onChanged }: { state: AppState; onChanged
                   添加
                 </button>
               </div>
+            </div>
+          </div>
+          <div className="srow">
+            <div className="srow-text">
+              <div className="srow-title">打开软件时提醒我</div>
+              <div className="srow-desc">每次打开 M-Harness，由你自己的飞书机器人给你本人发一条「已上线」（时间、电脑名、版本）。只发给你，不发给别人。</div>
+            </div>
+            <div className="srow-ctl">
+              <Switch on={lark?.notifyOnline ?? true} testid="channel-notify-online" onChange={v => void save(c => void (c.channels.larkCli.notifyOnline = v))} />
             </div>
           </div>
           <div className="srow">

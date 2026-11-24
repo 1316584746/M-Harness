@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { LarkCliChannel } from "../../src/channels/lark-cli";
+import os from "node:os";
+import { LarkCliChannel, runOnce } from "../../src/channels/lark-cli";
+import { sendOnlineNotice } from "../../src/channels/online-notice";
+import { loadImage, MAX_IMAGE_BYTES, MAX_IMAGES } from "../../src/models/images";
 import { SessionManager } from "../../src/channels/session";
 import { dropMockProviders, loadConfig, parseConfig, type HarnessConfig } from "../../src/config";
 import { readTrace } from "../../src/core/trace";
@@ -11,6 +14,7 @@ import { loadProjectRules } from "../../src/prompt/rules";
 import { SKILL_NAME } from "../../src/prompt/skills";
 import { Runtime } from "../../src/runtime";
 import { probeKey } from "../../src/models/probe";
+import { pingModel } from "../../src/models/ping";
 import { dwsCheckUpdate, dwsStatus, installCli, larkCheckUpdate, larkStatus, loginCli, type LoginHooks } from "../../src/tools/cli-status";
 import { feishuProjectSpaces, feishuProjectStatus } from "../../src/tools/feishu-project";
 import { PluginMarket } from "./plugins";
@@ -32,14 +36,14 @@ import { checkRepoUrl, PluginRepos, seedRepos } from "./pluginrepos";
 import type { PluginReply, UiPlugin } from "../shared/pluginhost";
 import { TODO_PLUGIN_ID, pickTodayTodos, type HomeTodosDTO } from "../shared/todos";
 import type { Automation } from "../shared/automation";
-import { applyInstall, applyUninstall, DBX_CATALOG_URL, installedOf, isForeignId, OFFICIAL_REPO_URL, parseMarketplace, partsText, type LocalPluginInfo, type MarketResult, type PluginEntry, type PluginRepo, type PlatformInfo, type ResourceItem, type ResourceScan } from "../shared/plugins";
-import { BUNDLED } from "./plugin-catalog";
+import { applyInstall, applyUninstall, DBX_CATALOG_URL, installedOf, isForeignId, OFFICIAL_REPO_URL, parseMarketplace, partsText, type LocalPluginInfo, type MarketResult, type PluginEntry, type PluginRepo, type PlatformInfo, type ResourceItem, type ResourceRec, type ResourceScan } from "../shared/plugins";
+import { fetchReadme, isRecKind, mcpRawFromReadme, topRepos, type RecRepo } from "./recommend";
 import { importGithubRepo, parseGithubUrl } from "./repo-import";
 import { copySkillFiles, PLATFORM_IDS, PLATFORM_NAME, platformFound, scanLocalFolder, scanPlatform, type LocalScan, type PlatformId } from "./local-import";
 import { createChat, fetchWorkItemChat, inspectChat, parseChatRef, type WorkChat } from "../../src/tools/work-chat";
 import { fetchDingtalkTodos, fetchFeishuTodos, sortTodos, createFeishuSubtask, updateFeishuSubtask, type SubtaskCreated, type SubtaskResult, type SubtaskUpdate, type TodoSource } from "../../src/tools/workbench";
 import { addChild, patchChild } from "../shared/todoPatch";
-import { branchInfo, cloneRepo, detectBaseBranch, diffStat, inspectRepo, listBranches, repoStatus, switchBranch, syncBaseBranch } from "../../src/tools/git";
+import { branchInfo, cloneRepo, detectBaseBranch, diffStat, inspectRepo, listBranches, repoStatus, startFeatureBranch, switchBranch, syncBaseBranch, type StartBranchResult } from "../../src/tools/git";
 import { authEnvFor, hostEnabled, probeHost } from "../../src/tools/git-hosts";
 import type {
   AppState,
@@ -48,6 +52,7 @@ import type {
   IntegrationStatusDTO,
   IntegrationUpdateDTO,
   KeyProbeDTO,
+  ModelTestDTO,
   McpServerDTO,
   ProviderInfo,
   RuleFileDTO,
@@ -237,11 +242,26 @@ export class Backend {
     );
   }
 
-  /** 关联仓库时：把它同步到基线分支的最新代码（fetch → 切基线分支 → 快进拉取；有未提交改动不切） */
+  /** 关联仓库时：把它同步到基线分支的最新代码（fetch → 切基线分支 → 快进拉取；有未提交改动先 stash 暂存再切） */
   async repoSync(name: string) {
     const r = this.config.repos[name];
     if (!r) return { ok: false, switched: false, pulled: false, error: "没有登记过这个仓库" };
     return syncBaseBranch(this.resolve(r.path), r.branches?.base, undefined, r.url ? authEnvFor(r.url, this.config.gitHosts) : undefined);
+  }
+
+  /** 「进行开发」开始前：给任务关联的每个仓库基于基线分支新建 feature-需求名称-日期 分支（只读仓库跳过） */
+  async repoStartBranch(names: string[], title: string) {
+    const out: Array<StartBranchResult & { name: string }> = [];
+    for (const name of names) {
+      const r = this.config.repos[name];
+      if (!r) continue;
+      if (r.readOnly) {
+        out.push({ name, ok: true, skipped: "这个仓库被设为只读，没有新建分支" });
+        continue;
+      }
+      out.push({ name, ...(await startFeatureBranch(this.resolve(r.path), r.branches?.base, title, { env: r.url ? authEnvFor(r.url, this.config.gitHosts) : undefined })) });
+    }
+    return out;
   }
 
   /** 任务关联仓库（按配置里的名字）当前的改动行数合计 */
@@ -492,6 +512,11 @@ export class Backend {
 
   connectionList(): Connection[] {
     return this.connections.list();
+  }
+
+  /** 打开编辑框时回显已保存的密码（框里默认是圆点，点眼睛才能看见） */
+  connectionSecrets(id: string): Record<string, string> {
+    return this.connections.revealSecrets(String(id));
   }
 
   connectionSave(input: ConnectionInput): { ok: boolean; conn?: Connection; error?: string } {
@@ -760,25 +785,95 @@ export class Backend {
     return out;
   }
 
-  /** 软件自带的推荐（常用的 MCP、技能、动作、规则）：哪一页就给哪一类 */
-  resourceRecommended(kind: string): ResourceItem[] {
-    return this.toResourceItems(BUNDLED.filter(e => e.kind === kind));
+  private recCache: Record<string, { at: number; repos: RecRepo[] }> | undefined;
+  private recInflight = new Map<string, Promise<{ at: number; repos: RecRepo[] }>>();
+  private get recFile() {
+    return path.join(this.home, "recommend-cache.json");
+  }
+  private recLoad() {
+    if (!this.recCache) {
+      try {
+        const j = JSON.parse(fs.readFileSync(this.recFile, "utf8"));
+        this.recCache = j && typeof j === "object" ? j : {};
+      } catch {
+        this.recCache = {};
+      }
+    }
+    return this.recCache!;
+  }
+
+  /**
+   * 推荐：去 GitHub 按星标排行取这一类最高的 6 个仓库（不再是写死的列表）。
+   * 结果缓存 12 小时（落盘，重启还在）；拉不到时先用旧缓存，没有缓存才报错。refresh = 强制重新拉。
+   * 每一项是一个仓库；点「添加」时再去扫描它里面具体有什么（resourceScan），勾选后添加。
+   */
+  async resourceRecommended(kind: string, refresh = false): Promise<ResourceRec> {
+    if (!isRecKind(kind)) return { ok: false, items: [], error: `不支持的类型：${kind}` };
+    const cache = this.recLoad();
+    const hit = cache[kind];
+    const toItems = (repos: RecRepo[]): ResourceItem[] =>
+      repos.map(r => ({ key: `rec:${r.full}`, kind, name: r.full, description: r.description || "（仓库没有写简介）", author: r.full.split("/")[0], tags: r.topics.slice(0, 4), source: "GitHub 星标榜", homepage: r.url, added: false, stars: r.stars }));
+    if (hit && !refresh && Date.now() - hit.at < 12 * 3600_000) return { ok: true, items: toItems(hit.repos), at: hit.at };
+    let p = this.recInflight.get(kind);
+    if (!p) {
+      p = topRepos(fetch, kind).then(repos => ({ at: Date.now(), repos }));
+      this.recInflight.set(kind, p);
+      void p.finally(() => this.recInflight.delete(kind)).catch(() => {});
+    }
+    try {
+      const fresh = await p;
+      if (fresh.repos.length) {
+        cache[kind] = fresh;
+        try {
+          fs.writeFileSync(this.recFile, JSON.stringify(cache));
+        } catch {
+          /* 缓存写不了不影响使用 */
+        }
+      }
+      return { ok: true, items: toItems(fresh.repos), at: fresh.at };
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      if (hit) return { ok: true, items: toItems(hit.repos), stale: true, error, at: hit.at };
+      return { ok: false, items: [], error };
+    }
   }
 
   /** 从 GitHub 仓库（链接或 owner/repo）或资源文件的直链里找技能 / MCP / 动作 / 规则；一次扫描的结果缓存 10 分钟 */
-  async resourceScan(input: string): Promise<ResourceScan> {
+  async resourceScan(input: string, kind?: string): Promise<ResourceScan> {
     try {
       const raw = String(input ?? "").trim();
       if (!raw) return { ok: false, error: "请填 GitHub 仓库链接（或 owner/repo）" };
-      const hit = this.resourceScans.get(raw);
+      const cacheKey = kind === "mcp" ? `${raw}|mcp` : raw;
+      const hit = this.resourceScans.get(cacheKey);
       if (hit && Date.now() - hit.at < 10 * 60_000) return { ok: true, items: this.toResourceItems(hit.entries), skipped: hit.skipped };
       const gh = parseGithubUrl(raw);
       let got: { entries: PluginEntry[]; skipped: string[] };
       if (gh) {
         const name = `${gh.owner}/${gh.repo}${gh.dir ? `/${gh.dir}` : ""}`;
-        got = await importGithubRepo(fetch, gh, name, () => {
-          throw new Error("这是 DBX 插件目录，里面是插件不是技能 / MCP，请到「插件中心 → 设置 → 插件仓库」里添加");
-        });
+        let found: { entries: PluginEntry[]; skipped: string[] } | undefined;
+        let failure: unknown;
+        try {
+          found = await importGithubRepo(fetch, gh, name, () => {
+            throw new Error("这是 DBX 插件目录，里面是插件不是技能 / MCP，请到「插件中心 → 设置 → 插件仓库」里添加");
+          });
+        } catch (e) {
+          failure = e;
+        }
+        // 大多数 MCP 项目没有 .mcp.json，只在 README 里贴一段配置：找 MCP 时再看一眼 README
+        if (kind === "mcp" && !gh.dir && !found?.entries.some(e => e.kind === "mcp")) {
+          try {
+            const md = await fetchReadme(fetch, `${gh.owner}/${gh.repo}`);
+            const extra = parseMarketplace(mcpRawFromReadme(gh.owner, gh.repo, md), name).entries;
+            if (extra.length) {
+              found = { entries: [...(found?.entries ?? []), ...extra], skipped: found?.skipped ?? [] };
+              failure = undefined;
+            }
+          } catch {
+            /* README 读不到就按原来的结果走 */
+          }
+        }
+        if (!found) throw failure;
+        got = found;
       } else {
         const url = checkRepoUrl(raw);
         const res = await fetch(url, { signal: AbortSignal.timeout(20_000), headers: { accept: "application/json" } });
@@ -795,7 +890,7 @@ export class Backend {
         const p = parseMarketplace(json, host);
         got = { entries: p.entries, skipped: p.skipped };
       }
-      this.resourceScans.set(raw, { at: Date.now(), ...got });
+      this.resourceScans.set(cacheKey, { at: Date.now(), ...got });
       return { ok: true, items: this.toResourceItems(got.entries), skipped: got.skipped };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -926,6 +1021,7 @@ export class Backend {
       // 仅自动化测试用：让后台程序可以是一段脚本（正式插件都是原生程序）
       launch: process.env.HARNESS_PLUGIN_SCRIPT_HOST ? exe => ({ command: process.execPath, args: [exe], env: { ELECTRON_RUN_AS_NODE: "1" } }) : undefined,
       onEvent: (id, method, params) => this.host.send("pluginhost:event", { id, method, params }),
+      onBinary: (id, channel, data) => this.host.send("pluginhost:binary", { id, channel, data }),
       connections: {
         list: kind => this.connections.list().filter(c => c.kind === kind),
         get: id => {
@@ -1208,6 +1304,36 @@ export class Backend {
     return probeKey(req);
   }
 
+  testModel(req: { type?: string; baseURL?: string; apiKey?: string; model?: string }): Promise<ModelTestDTO> {
+    return pingModel(req);
+  }
+
+  // ───────────── 图片（输入框粘贴 / 拖入） ─────────────
+
+  /** 粘贴的图片存成数据目录下 pasted-images 里的文件，之后只传路径（对话记录里不会塞图片数据） */
+  saveImage(bytes: Uint8Array, mime: string): { ok: true; path: string } | { ok: false; error: string } {
+    const ext = ({ "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp" } as Record<string, string>)[mime.toLowerCase()];
+    if (!ext) return { ok: false, error: `不支持这种图片格式（${mime || "未知"}），请用 PNG / JPG / GIF / WebP` };
+    if (!bytes?.byteLength) return { ok: false, error: "剪贴板里的图片是空的" };
+    if (bytes.byteLength > MAX_IMAGE_BYTES) return { ok: false, error: `图片太大（超过 ${MAX_IMAGE_BYTES / 1048576} MB），请压缩或截小一点再贴` };
+    try {
+      const dir = path.join(this.home, "pasted-images");
+      fs.mkdirSync(dir, { recursive: true });
+      // 文件名由内容决定：同一张图片再贴一次还是同一个文件，输入框那边就能认出重复
+      const hash = createHash("sha1").update(bytes).digest("hex").slice(0, 16);
+      const file = path.join(dir, `img-${hash}${ext}`);
+      if (!fs.existsSync(file)) fs.writeFileSync(file, Buffer.from(bytes));
+      return { ok: true, path: file };
+    } catch (e: any) {
+      return { ok: false, error: `保存图片失败：${e?.message ?? e}` };
+    }
+  }
+
+  imageDataUrl(p: string): string | null {
+    const img = loadImage(p);
+    return img ? `data:${img.mime};base64,${img.data}` : null;
+  }
+
   // ───────────── 运行 ─────────────
 
   async run(req: RunRequest): Promise<RunOutcome> {
@@ -1216,11 +1342,14 @@ export class Backend {
     try {
       const r = await this.rt.runTask({
         input: req.input,
+        images: Array.isArray(req.images) ? req.images.filter(p => typeof p === "string").slice(0, MAX_IMAGES) : undefined,
         provider: req.provider,
         history: req.history,
         workspace: req.workspace,
         model: req.model,
         disabledTools: req.disabledTools,
+        ...(req.sessionKey ? { sessionKey: req.sessionKey, freshSession: !!req.fresh } : {}),
+        ...(req.toolBudget ? { toolBudget: req.toolBudget } : {}),
         mode: "local",
         signal: ac.signal,
         approve: ({ tool, args, reason }) => this.askApproval(req.runKey, tool, args, reason),
@@ -1466,6 +1595,18 @@ export class Backend {
     this.lark = ch;
     this.log("飞书通道启动中…");
     return { ok: true };
+  }
+
+  /** 打开软件时：用你自己的飞书机器人给你本人发一条「已上线」。没配飞书 / 关了开关 / 发不出去都只记一行日志，不影响使用 */
+  async onlineNotice(version: string): Promise<void> {
+    const cfg = this.config.channels.larkCli;
+    if (!cfg) return;
+    try {
+      const r = await sendOnlineNotice(cfg, { version, host: os.hostname(), at: new Date() }, (a, s) => runOnce(cfg, a, s));
+      this.log(r.sent ? `已在飞书里提醒你「M-Harness 已上线」（${r.to}）` : `没有发「已上线」提醒：${r.reason}`);
+    } catch (e: any) {
+      this.log(`没有发「已上线」提醒：${e?.message ?? e}`);
+    }
   }
 
   channelStop(): void {

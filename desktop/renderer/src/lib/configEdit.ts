@@ -33,8 +33,4 @@ export function useConfigEditor(state: AppState, onChanged: () => void) {
   return { cfg, update };
 }
 
-/** apiKey 字段形如 ${VAR} 时取 VAR；否则按提供方名生成变量名 */
-export function envVarFor(name: string, apiKey: unknown): string {
-  const m = typeof apiKey === "string" ? /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(apiKey) : null;
-  return m ? m[1] : `${name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_API_KEY`;
-}
+export { envVarFor } from "../../../shared/envvar";

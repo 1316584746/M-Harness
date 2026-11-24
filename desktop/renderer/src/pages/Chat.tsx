@@ -12,6 +12,8 @@ import { McpPicker } from "../components/McpPicker";
 import { BranchPicker } from "../components/BranchPicker";
 import { WorkspacePicker } from "../components/WorkspacePicker";
 import { parseCfg } from "../lib/configEdit";
+import { ImageStrip, MsgImages } from "../components/ImageStrip";
+import { isImageFile, useImageAttach } from "../lib/useImageAttach";
 import { RunSteps, ToolCard } from "../components/Steps";
 import { isRunning, type ChatStore, type Turn } from "../lib/chatStore";
 import { buildRunView, fmtMs } from "../lib/steps";
@@ -29,6 +31,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
   const [minH, setMinH] = useState(96);
   const bottom = useRef<HTMLDivElement>(null);
   const area = useRef<HTMLTextAreaElement>(null);
+  const pics = useImageAttach();
 
   const turns = active?.turns ?? [];
   const running = isRunning(active);
@@ -99,12 +102,14 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
   }, [active?.id]);
 
   const send = (override?: string) => {
-    const text = (override ?? input).trim();
+    const imgs = override === undefined ? pics.images : [];
+    const text = (override ?? input).trim() || (imgs.length ? "请看附图。" : "");
     if (!text) return;
     setInput("");
+    pics.clear();
     // AI 还在运行：先排队，这一轮结束后自动发
-    if (running) return store.enqueue(text, onChanged);
-    void store.send(text, onChanged);
+    if (running) return store.enqueue(text, onChanged, undefined, imgs);
+    void store.send(text, onChanged, undefined, imgs.length ? { images: imgs } : undefined);
   };
 
   const insertPaths = (paths: string[]) => {
@@ -118,7 +123,11 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
   };
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    const paths = [...e.dataTransfer.files].map(f => api.pathForFile(f)).filter(Boolean);
+    const files = [...e.dataTransfer.files];
+    // 图片文件作为附件（发给模型看），其它文件仍是插入路径
+    const imgs = files.filter(isImageFile).map(f => api.pathForFile(f)).filter(Boolean);
+    const paths = files.filter(f => !isImageFile(f)).map(f => api.pathForFile(f)).filter(Boolean);
+    if (imgs.length) pics.add(imgs);
     if (paths.length) insertPaths(paths);
   };
   const startResize = (e: React.MouseEvent) => {
@@ -171,7 +180,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
               </div>
             </div>
           ) : (
-            turns.map(t => (t.role === "user" ? <UserMsg key={t.id} text={t.text} /> : <AssistantMsg key={t.id} t={t} />))
+            turns.map(t => (t.role === "user" ? <UserMsg key={t.id} text={t.text} images={t.images} /> : <AssistantMsg key={t.id} t={t} />))
           )}
           {ask && <AskForm key={ask.id} req={ask} onSubmit={a => void store.answerAsk(ask.id, a)} />}
           <div ref={bottom} />
@@ -202,13 +211,15 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
               <BranchPicker dir={ws} disabled={running} refreshKey={running} />
               <McpPicker disabled={store.disabledTools} onChange={store.setDisabledTools} busy={running} />
             </div>
+            <ImageStrip images={pics.images} error={pics.error} onRemove={pics.remove} />
             <textarea
               ref={area}
               data-testid="composer-input"
               value={input}
               style={{ minHeight: minH }}
-              placeholder={running ? "运行中…回车排队，这一轮结束后自动发送；也可点右下角停止" : "给 Agent 一个任务、拖入文件引用路径（Enter 发送，Shift+Enter 换行）"}
+              placeholder={running ? "运行中…回车排队，这一轮结束后自动发送；也可点右下角停止" : "给 Agent 一个任务、拖入文件引用路径，也可以直接粘贴图片（Enter 发送，Shift+Enter 换行）"}
               onChange={e => setInput(e.target.value)}
+              onPaste={pics.onPaste}
               onKeyDown={e => {
                 if (matches.length && !e.nativeEvent.isComposing) {
                   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -245,7 +256,7 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
                   <Icon name="stop" size={16} />
                 </button>
               ) : (
-                <button className="send" data-testid="send" onClick={() => send()} disabled={!input.trim() || !!info?.problem} title="发送">
+                <button className="send" data-testid="send" onClick={() => send()} disabled={(!input.trim() && !pics.images.length) || !!info?.problem} title="发送">
                   <Icon name="send" size={17} strokeWidth={2.2} />
                 </button>
               )}
@@ -257,10 +268,13 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
   );
 }
 
-export function UserMsg({ text }: { text: string }) {
+export function UserMsg({ text, images }: { text: string; images?: string[] }) {
   return (
     <div className="msg-u">
-      <div className="msg-u-card">{text}</div>
+      <div className="msg-u-card">
+        <MsgImages images={images} />
+        {text}
+      </div>
     </div>
   );
 }

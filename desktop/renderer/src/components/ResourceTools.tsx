@@ -89,7 +89,7 @@ function ResourcePanel({ kind, mode, onClose, onAdded }: { kind: Kind; mode: Mod
   };
 
   // 导入：查找
-  const scanUrl = () => void run(() => api.resourceScan(url));
+  const scanUrl = () => void run(() => api.resourceScan(url, kind));
 
   // 加载：选文件夹并扫描
   const pick = useCallback(async () => {

@@ -15,9 +15,9 @@ const envRank = (env: string) => {
 type Result = ConnTestResult | "testing";
 
 /** 连接：XXL-JOB / 数据库 / Redis / 服务器 / 内嵌终端。每类可以有多个，用环境和机器区分 */
-export function Connections() {
+export function Connections({ initialKind }: { initialKind?: ConnKind } = {}) {
   const [list, setList] = useState<Connection[]>([]);
-  const [kind, setKind] = useState<ConnKind>("xxljob");
+  const [kind, setKind] = useState<ConnKind>(initialKind ?? "xxljob");
   const [env, setEnv] = useState("all");
   const [q, setQ] = useState("");
   const [edit, setEdit] = useState<ConnectionInput | null>(null);
@@ -240,6 +240,15 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
   const [note, setNote] = useState(init.note ?? "");
   const [vals, setVals] = useState<Record<string, string>>(init.fields);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
+  // 编辑已有连接：把已保存的密码带回来（默认是圆点，点眼睛能看），不用再重新输入
+  useEffect(() => {
+    if (!init.id) return;
+    let alive = true;
+    void api.connectionSecrets(init.id).then(s => alive && setSecrets(cur => ({ ...s, ...cur })));
+    return () => {
+      alive = false;
+    };
+  }, [init.id]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [res, setRes] = useState<Result | null>(null);
@@ -441,7 +450,7 @@ function ConnEditor({ init, servers, secretSet, onClose, onSaved }: { init: Conn
   );
 }
 
-/** 密码 / 令牌输入框：右侧的眼睛切换显示或隐藏（只影响正在输入的内容；已保存的秘密不会回传到界面） */
+/** 密码 / 令牌输入框：默认显示圆点，右侧的眼睛切换显示或隐藏；编辑已有连接时会把已保存的密码带回来 */
 function SecretInput({ value, onChange, placeholder, testid, reqKey, invalid }: { value: string; onChange: (v: string) => void; placeholder?: string; testid: string; reqKey?: string; invalid?: boolean }) {
   const [show, setShow] = useState(false);
   return (

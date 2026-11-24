@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { bodyError, explainModelError } from "./endpoint";
 import type { ToolSpec } from "../core/types";
 
 /** POST JSON，对 429 / 5xx / 网络错误做指数退避重试 */
@@ -19,8 +20,18 @@ export async function postJson(
         signal,
       });
       const text = await res.text();
-      if (res.ok) return JSON.parse(text);
-      const err = new Error(`HTTP ${res.status}: ${text.slice(0, 500)}`);
+      if (res.ok) {
+        let json: any;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          throw Object.assign(new Error(`服务商返回的不是 JSON（多半是地址不对，打到了网页上）：${text.slice(0, 120)}`), { fatal: true });
+        }
+        const be = bodyError(json, url);
+        if (be) throw Object.assign(new Error(be), { fatal: true });
+        return json;
+      }
+      const err = new Error(explainModelError(res.status, brief(text), url));
       if (res.status !== 429 && res.status < 500) throw Object.assign(err, { fatal: true });
       lastErr = err;
     } catch (e: any) {
@@ -30,6 +41,18 @@ export async function postJson(
     if (i < retries) await new Promise(r => setTimeout(r, 800 * 2 ** i));
   }
   throw lastErr;
+}
+
+/** 从错误正文里取一句话：JSON 里的 message / msg，否则截断原文 */
+function brief(text: string): string {
+  try {
+    const j = JSON.parse(text);
+    const m = j?.error?.message ?? j?.error ?? j?.message ?? j?.msg;
+    if (m) return typeof m === "string" ? m : JSON.stringify(m);
+  } catch {
+    /* 不是 JSON */
+  }
+  return text.replace(/\s+/g, " ").slice(0, 200);
 }
 
 /** zod → JSON Schema（去掉模型 API 不需要的 $schema） */

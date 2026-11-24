@@ -97,6 +97,14 @@ describe("updateFeishuSubtask 写飞书项目", () => {
     const r = await updateFeishuSubtask(cfg(), { ...req, done: true });
     expect(r.ok).toBe(false);
     expect(r.error).toContain("no permission");
+    expect(r.child).toMatchObject({ done: false }); // 失败时也把飞书里的真实状态交给界面刷新
+  });
+
+  it("界面是旧的：想回滚，飞书里本来就没完成 → 当成成功，并刷新成真实状态", async () => {
+    set("fail");
+    reset();
+    const r = await updateFeishuSubtask(cfg(), { ...req, done: false });
+    expect(r).toMatchObject({ ok: true, child: { done: false } });
   });
 
   it("命令说成功但飞书没变：读回来对不上就报错，并给出飞书里真实的状态", async () => {

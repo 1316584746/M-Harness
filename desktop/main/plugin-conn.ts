@@ -68,7 +68,43 @@ function gitlab(c: Connection, secrets: Record<string, string>): Record<string, 
   };
 }
 
+/** 「设置 → 连接 → 服务器」里的 SSH 服务器 → DBX 终端插件（io.dbx.ssh）的连接 */
+function ssh(c: Connection, secrets: Record<string, string>): Record<string, unknown> {
+  const key = c.fields.authType === "key";
+  const host = c.fields.host.trim();
+  if (!host) throw new Error("缺少主机");
+  const ext = {
+    protocol: "ssh",
+    authentication: key ? "private-key" : "password",
+    password_source: "direct",
+    private_key_path: key ? (c.fields.keyPath ?? "").trim() : "",
+    sudo_source: "custom",
+    auth_flow_mode: "off",
+    read_only: false,
+    connect_timeout_secs: 30,
+    keepalive_interval_secs: 30,
+    environment: c.env,
+  };
+  const sec = key ? (secrets.passphrase ? { private_key_passphrase: secrets.passphrase } : {}) : {};
+  return {
+    id: c.id,
+    connectionId: c.id,
+    name: c.name,
+    display_name: c.name,
+    host,
+    port: Number(c.fields.port || 22),
+    username: c.fields.username ?? "",
+    password: key ? "" : (secrets.password ?? ""),
+    external_config: ext,
+    externalConfig: ext,
+    config: ext,
+    secrets: sec,
+    connection_secrets: sec,
+  };
+}
+
 export const CONN_ADAPTERS: Record<string, ConnAdapter> = {
+  ssh: { kind: "server", toConnection: ssh },
   "xxl-job-dbx-plugin": { kind: "xxljob", toConnection: xxljob },
   gitlab: { kind: "gitlab", toConnection: gitlab },
 };

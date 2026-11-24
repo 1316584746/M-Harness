@@ -1,10 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 /**
- * 插件后台程序（sidecar）：一个常驻子进程，stdin / stdout 走 JSON-RPC 2.0（一行一条消息，stdio-jsonl），
- * 日志走 stderr。协议见 DBX 插件平台文档的 Backend protocol。
+ * 插件后台程序（sidecar）：一个常驻子进程，stdin / stdout 走 JSON-RPC 2.0，日志走 stderr。
+ * 协议见 DBX 插件平台文档的 Backend protocol，两种传输：
+ *  - stdio-jsonl（默认）：一行一条 JSON；
+ *  - stdio-framed（终端 / SFTP 这类要传二进制的插件）：每帧 5 字节头 `kind:u8 | 长度:u32 大端 | 内容`，
+ *    kind 0 = UTF-8 JSON；kind 1 = `通道名长度:u16 大端 | 通道名 | 二进制数据`。
  * 启动后先发 plugin/initialize 握手，插件返回协议版本和自己的 id，id 对不上就拒绝（防止包里放错了程序）。
  */
+
+export type SidecarTransport = "stdio-jsonl" | "stdio-framed";
 
 export interface SidecarOptions {
   command: string;
@@ -16,13 +21,45 @@ export interface SidecarOptions {
   permissions: string[];
   /** 宿主版本：握手时告诉插件（兼容用） */
   hostVersion: string;
+  /** 传输方式，清单里 entrypoints.backend.transport 写的；不写就是 stdio-jsonl */
+  transport?: SidecarTransport;
   onEvent?: (method: string, params: unknown) => void;
+  /** 插件主动发来的二进制帧（只有 stdio-framed） */
+  onBinary?: (channel: string, data: Buffer) => void;
   onExit?: (reason: string) => void;
   initTimeoutMs?: number;
 }
 
-const MAX_LINE = 8 * 1024 * 1024;
+/** 一条 JSON 最大 8 MiB；二进制帧最大 64 MiB（和 DBX 一致） */
+const MAX_JSON = 8 * 1024 * 1024;
+const MAX_BINARY = 64 * 1024 * 1024;
+const MAX_LINE = MAX_JSON;
 const ERR_KEEP = 4000;
+const KIND_JSON = 0;
+const KIND_BINARY = 1;
+
+/** 把一条 JSON 包成 framed 的一帧 */
+export function frameJson(json: string): Buffer {
+  const body = Buffer.from(json, "utf8");
+  if (body.length > MAX_JSON) throw new Error(`一条消息超过 ${MAX_JSON} 字节，请分块传`);
+  const head = Buffer.alloc(5);
+  head[0] = KIND_JSON;
+  head.writeUInt32BE(body.length, 1);
+  return Buffer.concat([head, body]);
+}
+
+/** 把一段二进制包成 framed 的一帧 */
+export function frameBinary(channel: string, data: Uint8Array): Buffer {
+  const name = Buffer.from(channel, "utf8");
+  if (!name.length || name.length > 0xffff) throw new Error("通道名不合法");
+  const len = 2 + name.length + data.length;
+  if (len > MAX_BINARY) throw new Error(`二进制数据超过 ${MAX_BINARY} 字节，请分块传`);
+  const head = Buffer.alloc(7);
+  head[0] = KIND_BINARY;
+  head.writeUInt32BE(len, 1);
+  head.writeUInt16BE(name.length, 5);
+  return Buffer.concat([head, name, Buffer.from(data.buffer, data.byteOffset, data.byteLength)]);
+}
 
 interface Pending {
   resolve: (v: unknown) => void;
@@ -33,6 +70,7 @@ interface Pending {
 export class Sidecar {
   private child?: ChildProcessWithoutNullStreams;
   private buf = "";
+  private raw: Buffer = Buffer.alloc(0);
   private seq = 0;
   private pending = new Map<number, Pending>();
   private err = "";
@@ -40,6 +78,10 @@ export class Sidecar {
   capabilities: string[] = [];
 
   constructor(private o: SidecarOptions) {}
+
+  get framed(): boolean {
+    return this.o.transport === "stdio-framed";
+  }
 
   get alive(): boolean {
     return !!this.child && !this.dead;
@@ -54,8 +96,11 @@ export class Sidecar {
     const o = this.o;
     const child = spawn(o.command, o.args ?? [], { cwd: o.cwd, env: { ...process.env, ...o.env }, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     this.child = child;
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (s: string) => this.onData(s));
+    if (this.framed) child.stdout.on("data", (b: Buffer) => this.onFramed(b));
+    else {
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (s: string) => this.onData(s));
+    }
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (s: string) => (this.err = (this.err + s).slice(-ERR_KEEP)));
     child.stdin.on("error", () => {});
@@ -76,6 +121,12 @@ export class Sidecar {
     }
   }
 
+  /** 往插件 stdin 写一条 JSON（按传输方式打包） */
+  private send(obj: unknown): void {
+    const json = JSON.stringify(obj);
+    this.child?.stdin.write(this.framed ? frameJson(json) : `${json}\n`);
+  }
+
   call(method: string, params: unknown, timeoutMs = 60_000): Promise<unknown> {
     if (this.dead) return Promise.reject(new Error(this.dead));
     const child = this.child;
@@ -88,7 +139,7 @@ export class Sidecar {
       }, Math.max(1000, Math.min(timeoutMs, 600_000)));
       this.pending.set(id, { resolve, reject, timer });
       try {
-        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} })}\n`);
+        this.send({ jsonrpc: "2.0", id, method, params: params ?? {} });
       } catch (e) {
         clearTimeout(timer);
         this.pending.delete(id);
@@ -101,10 +152,17 @@ export class Sidecar {
   notify(method: string, params: unknown): void {
     if (this.dead) return;
     try {
-      this.child?.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} })}\n`);
+      this.send({ jsonrpc: "2.0", method, params: params ?? {} });
     } catch {
       /* 对方已退出 */
     }
+  }
+
+  /** 给插件发一段二进制（终端输入、文件分块）。只有 stdio-framed 的插件能收 */
+  sendBinary(channel: string, data: Uint8Array): void {
+    if (!this.framed) throw new Error("这个插件的后台程序不支持二进制通道");
+    if (this.dead) throw new Error(this.dead);
+    this.child?.stdin.write(frameBinary(channel, data));
   }
 
   /** 停掉后台程序；返回的 Promise 在进程真正退出后（最多等 3 秒）才完成，Windows 上删目录前要等它 */
@@ -153,6 +211,32 @@ export class Sidecar {
     }
   }
 
+  /** stdio-framed：按帧头切开，JSON 帧走 onLine，二进制帧交给 onBinary */
+  private onFramed(b: Buffer): void {
+    this.raw = this.raw.length ? Buffer.concat([this.raw, b]) : b;
+    while (this.raw.length >= 5) {
+      const kind = this.raw[0];
+      const len = this.raw.readUInt32BE(1);
+      const max = kind === KIND_JSON ? MAX_JSON : MAX_BINARY + 1024;
+      if (kind !== KIND_JSON && kind !== KIND_BINARY) return this.bad(`后台程序发来了不认识的帧类型 ${kind}，已终止`);
+      if (len > max) return this.bad(`后台程序发来的一帧太大（${len} 字节），已终止`);
+      if (this.raw.length < 5 + len) return;
+      const payload = this.raw.subarray(5, 5 + len);
+      this.raw = this.raw.subarray(5 + len);
+      if (kind === KIND_JSON) this.onLine(payload.toString("utf8"));
+      else if (payload.length >= 2) {
+        const n = payload.readUInt16BE(0);
+        if (payload.length < 2 + n) return this.bad("后台程序发来了损坏的二进制帧，已终止");
+        this.o.onBinary?.(payload.subarray(2, 2 + n).toString("utf8"), Buffer.from(payload.subarray(2 + n)));
+      }
+    }
+  }
+
+  private bad(reason: string): void {
+    this.die(reason);
+    this.child?.kill();
+  }
+
   private onLine(line: string): void {
     let m: { id?: unknown; method?: unknown; params?: unknown; result?: unknown; error?: { message?: string; code?: number } };
     try {
@@ -176,7 +260,7 @@ export class Sidecar {
 
   private reply(id: unknown, result: unknown, error?: { code: number; message: string }): void {
     try {
-      this.child?.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, ...(error ? { error } : { result }) })}\n`);
+      this.send({ jsonrpc: "2.0", id, ...(error ? { error } : { result }) });
     } catch {
       /* 对方已退出 */
     }

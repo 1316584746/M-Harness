@@ -8,7 +8,7 @@ export const PLUGIN_SHIM = `(function () {
   if (window.dbxPlugin) return;
   var pending = {}, seq = 0;
   var ctx = null, loc = "zh-CN", th = { appearance: "dark", tokens: {} }, caps = {};
-  var onCtx = [], onEv = [], onInit = [];
+  var onCtx = [], onEv = [], onBin = [], onInit = [];
   var readyRes;
   var ready = new Promise(function (r) { readyRes = r; });
   function post(m) { m.__dbx = 1; parent.postMessage(m, "*"); }
@@ -25,6 +25,28 @@ export const PLUGIN_SHIM = `(function () {
     root.style.colorScheme = th.appearance;
     var t = th.tokens || {};
     for (var k in t) if (Object.prototype.hasOwnProperty.call(t, k)) root.style.setProperty(k, t[k]);
+  }
+  // 插件界面里写死的「DBX」字样：本软件不需要 DBX，把会误导人的提示换成不提 DBX 的说法
+  var REWORD = [
+    ["在 DBX 发送凭据前，请先确认该指纹。", "发送登录凭据前，请先确认这个服务器的指纹。"],
+    ["Confirm this fingerprint before DBX sends credentials.", "Confirm this fingerprint before credentials are sent."]
+  ];
+  function reword(node) {
+    if (node.nodeType === 3) {
+      var s = node.nodeValue;
+      for (var i = 0; i < REWORD.length; i++) if (s && s.indexOf(REWORD[i][0]) >= 0) s = s.split(REWORD[i][0]).join(REWORD[i][1]);
+      if (s !== node.nodeValue) node.nodeValue = s;
+    } else if (node.childNodes) {
+      for (var j = 0; j < node.childNodes.length; j++) reword(node.childNodes[j]);
+    }
+  }
+  if (typeof MutationObserver === "function") {
+    new MutationObserver(function (list) {
+      list.forEach(function (r) {
+        if (r.type === "characterData") reword(r.target);
+        else r.addedNodes.forEach(reword);
+      });
+    }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   }
   function off(list, fn) { return function () { var i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); }; }
   function unsupported(name) { return function () { return Promise.reject(new Error("本软件暂不支持 " + name)); }; }
@@ -48,6 +70,8 @@ export const PLUGIN_SHIM = `(function () {
       th = m.theme; applyTheme();
     } else if (m.kind === "event") {
       onEv.slice().forEach(function (f) { try { f({ method: m.method, params: m.params }); } catch (_) {} });
+    } else if (m.kind === "binary") {
+      onBin.slice().forEach(function (f) { try { f({ channel: m.channel, data: m.data instanceof Uint8Array ? m.data : new Uint8Array(m.data || []) }); } catch (_) {} });
     }
   });
   var api = {
@@ -64,8 +88,18 @@ export const PLUGIN_SHIM = `(function () {
     onContext: function (fn) { onCtx.push(fn); return off(onCtx, fn); },
     onInit: function (fn) { onInit.push(fn); if (ctx) { try { fn(ctx); } catch (_) {} } return off(onInit, fn); },
     onEvent: function (fn) { onEv.push(fn); return off(onEv, fn); },
-    onBinary: function () { return function () {}; },
-    sendBinary: unsupported("sendBinary"),
+    onBinary: function (fn) { onBin.push(fn); return off(onBin, fn); },
+    decodeBase64: function (s) {
+      var b = atob(String(s || "")), u = new Uint8Array(b.length);
+      for (var i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
+      return u;
+    },
+    encodeBase64: function (d) {
+      var u = d instanceof Uint8Array ? d : new Uint8Array(d || []), s = "";
+      for (var i = 0; i < u.length; i += 8192) s += String.fromCharCode.apply(null, u.subarray(i, i + 8192));
+      return btoa(s);
+    },
+    sendBinary: function (channel, data) { return request("host.sendBinary", { channel: channel, data: data }); },
     readAsset: function (path) { return request("host.readAsset", { path: path }); },
     readAssetUrl: function (path) { return request("host.readAsset", { path: path, url: true }); },
     setTitle: function (title) { return request("host.setTitle", { title: title }); },

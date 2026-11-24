@@ -60,15 +60,33 @@ describe("基线分支同步", () => {
     expect(fs.existsSync(path.join(work, "c.txt"))).toBe(true);
   });
 
-  it("有未提交的改动：不切分支、不动文件，并说明原因", async () => {
+  it("有未提交的改动：先 stash 暂存（含新文件）再切到基线分支，原分支上 stash pop 能恢复", async () => {
     git(work, "switch", "-c", "feature/x");
     fs.writeFileSync(path.join(work, "a.txt"), "dirty\n");
+    fs.writeFileSync(path.join(work, "new.txt"), "untracked\n");
+    commit(other, "b.txt", "new\n");
+    git(other, "push", "origin", "HEAD:release");
     const r = await syncBaseBranch(work, "release");
-    expect(r.ok).toBe(true);
-    expect(r).toMatchObject({ branch: "feature/x", switched: false, pulled: false });
-    expect(r.skipped).toContain("未提交");
+    expect(r).toMatchObject({ ok: true, branch: "release", switched: true, pulled: true, stashed: 2 });
+    expect(r.skipped).toContain("git stash pop");
+    expect(git(work, "branch", "--show-current")).toBe("release");
+    expect(git(work, "status", "--porcelain")).toBe("");
+    expect(fs.existsSync(path.join(work, "new.txt"))).toBe(false);
+    expect(git(work, "stash", "list")).toContain("关联仓库前自动暂存（feature/x）");
+    git(work, "switch", "feature/x");
+    git(work, "stash", "pop");
+    expect(fs.readFileSync(path.join(work, "a.txt"), "utf8").trim()).toBe("dirty");
+    expect(fs.readFileSync(path.join(work, "new.txt"), "utf8").trim()).toBe("untracked");
+  });
+
+  it("有未提交的改动、基线分支又切不过去：改动放回原处，不留在 stash 里", async () => {
+    git(work, "switch", "-c", "feature/x");
+    fs.writeFileSync(path.join(work, "a.txt"), "dirty\n");
+    const r = await syncBaseBranch(work, "nope");
+    expect(r.error).toContain("切换到 nope 失败");
     expect(git(work, "branch", "--show-current")).toBe("feature/x");
     expect(fs.readFileSync(path.join(work, "a.txt"), "utf8").trim()).toBe("dirty");
+    expect(git(work, "stash", "list")).toBe("");
   });
 
   it("基线分支和远端分叉：不合并，报错", async () => {

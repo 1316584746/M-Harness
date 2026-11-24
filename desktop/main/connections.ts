@@ -17,7 +17,7 @@ interface Stored extends Omit<Connection, "secretSet"> {}
 
 /**
  * 连接的存储：普通字段在 connections.json，密码等秘密在 connection-secrets.json（加密）。
- * 两个文件都在本软件的数据目录里，不进代码仓库。界面只能拿到「有没有设置」，拿不到秘密内容。
+ * 两个文件都在本软件的数据目录里，不进代码仓库。连接列表只带「有没有设置」；明文只在用户打开编辑框时通过 revealSecrets 取一次。
  */
 export class ConnectionStore {
   constructor(
@@ -81,6 +81,17 @@ export class ConnectionStore {
         /* 解不开（换了电脑 / 用户）就当没设置 */
       }
     }
+    return out;
+  }
+
+  /** 编辑框里回显用：这个连接已保存的秘密（只含密码 / 令牌这类字段，当前可见的）。只在用户打开编辑框时取一次 */
+  revealSecrets(id: string): Record<string, string> {
+    const c = this.readAll().find(x => x.id === id);
+    if (!c) return {};
+    const have = this.secretsOf(id);
+    const vals = { ...DEFAULTS[c.kind], ...c.fields };
+    const out: Record<string, string> = {};
+    for (const d of CONN_FIELDS[c.kind].filter(isSecretField)) if (fieldVisible(d, vals) && have[d.key]) out[d.key] = have[d.key];
     return out;
   }
 

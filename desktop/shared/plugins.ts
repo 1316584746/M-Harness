@@ -185,6 +185,19 @@ export interface ResourceItem {
   note?: string;
   /** 已经在配置里了 */
   added: boolean;
+  /** 推荐里的仓库：GitHub 星标数 */
+  stars?: number;
+}
+
+/** 「推荐」的结果：去 GitHub 按星标排行取的，不是写死的；拉不到时用上次缓存的（stale） */
+export interface ResourceRec {
+  ok: boolean;
+  items: ResourceItem[];
+  error?: string;
+  /** 数据是上次缓存的（这次没刷新成功） */
+  stale?: boolean;
+  /** 数据取自什么时候 */
+  at?: number;
 }
 
 /** 「同步」里的一个平台（Cursor / Claude Code / Codex）：用户在「设置 → 模型」里添加过它的账号才算 configured */

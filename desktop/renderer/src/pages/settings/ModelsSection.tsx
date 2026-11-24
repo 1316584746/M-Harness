@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AppState } from "../../../../shared/api";
 import { Icon } from "../../components/Icon";
+import { SearchSelect } from "../../components/SearchSelect";
 import { useConfigEditor, type Cfg } from "../../lib/configEdit";
 import { AddProvider, BUILTIN, ProviderCard } from "./Models";
 
@@ -48,26 +49,16 @@ export function ModelsSection({ state, onChanged }: { state: AppState; onChanged
 
         <div className="field">
           <div className="field-label">选择模型 / Agent</div>
-          <select className="input" data-testid="model-select" value={selected} onChange={e => setSelected(e.target.value)}>
-            <optgroup label="内置">
-              {builtin.map(n => (
-                <option key={n} value={n}>
-                  {label(n)}
-                  {n === current ? "　✓ 全局使用中" : ""}
-                </option>
-              ))}
-            </optgroup>
-            {custom.length > 0 && (
-              <optgroup label="自定义">
-                {custom.map(n => (
-                  <option key={n} value={n}>
-                    {label(n)}
-                    {n === current ? "　✓ 全局使用中" : ""}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-          </select>
+          <SearchSelect
+            testid="model-select"
+            value={selected}
+            onChange={setSelected}
+            searchPlaceholder="搜索提供方名称或类型"
+            options={[
+              ...builtin.map(n => ({ value: n, label: label(n), hint: n === current ? "✓ 全局使用中" : undefined, group: "内置" })),
+              ...custom.map(n => ({ value: n, label: label(n), hint: n === current ? "✓ 全局使用中" : undefined, group: "自定义" })),
+            ]}
+          />
         </div>
 
         {providers[selected] && (
@@ -126,6 +117,21 @@ export function ModelsSection({ state, onChanged }: { state: AppState; onChanged
                     }}
                   >
                     编辑
+                  </button>
+                  <button
+                    className="btn sm danger"
+                    data-testid={`custom-remove-${n}`}
+                    title="删除该提供方（.env 里的 Key 不会被删除）"
+                    onClick={async () => {
+                      if (!confirm(`删除提供方「${n}」？（.env 里的 Key 不会被删除）`)) return;
+                      const r = await ed.update(c => {
+                        delete c.providers[n];
+                        if (c.defaultProvider === n) c.defaultProvider = Object.keys(c.providers)[0] ?? "";
+                      });
+                      if (!r.ok) alert(r.error ?? "删除失败");
+                    }}
+                  >
+                    删除
                   </button>
                 </div>
               </div>

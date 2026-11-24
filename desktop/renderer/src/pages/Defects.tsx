@@ -164,6 +164,11 @@ function DefectCard({ d, isNew, onDone }: { d: Defect; isNew: boolean; onDone: (
       setPanel("closed");
       setPick(null);
       onDone({ ok: true, text: `「${d.title}」已流转到 ${pick.name}` });
+    } else if (/已经不存在/.test(r.error ?? "")) {
+      // 缺陷已被删除 / 移走：别再留在列表里，刷新一下并说明
+      setPanel("closed");
+      setPick(null);
+      onDone({ ok: false, text: `「${d.title}」${r.error}` });
     } else setErr(r.error ?? "流转失败");
   };
 
