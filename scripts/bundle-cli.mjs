@@ -42,6 +42,9 @@ try {
   const home = path.join(tmp, "home");
   fs.mkdirSync(home, { recursive: true });
   const env = { ...process.env, HOME: home, USERPROFILE: home, ...(cache ? { npm_config_cache: cache } : {}) };
+  // 从 PowerShell 7 里启动时，PSModulePath 会带上 pwsh 7 的模块目录；dws 的 postinstall 又会调 Windows PowerShell 5 的
+  // Expand-Archive，加载到 pwsh 7 的 Archive 模块就报「找不到 ExtractToDirectory 的重载」。去掉它，让子进程用自己的默认值。
+  for (const k of Object.keys(env)) if (/^psmodulepath$/i.test(k)) delete env[k];
   const r = spawnSync(`npm install --no-audit --no-fund ${TOOLS.map(t => t.pkg).join(" ")}`, { cwd: tmp, stdio: "inherit", shell: true, env });
   if (r.status !== 0) throw new Error("npm install 失败，请检查网络后重试");
 
