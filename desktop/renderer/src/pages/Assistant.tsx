@@ -9,6 +9,7 @@ import type { Connection } from "../../../shared/connections";
 import type { DbFocus, DbRunReq } from "../../../shared/db";
 import { api } from "../api";
 import { isRunning, type ChatStore } from "../lib/chatStore";
+import { useStickBottom } from "../lib/useStickBottom";
 import { buildDbPreamble, type DbScope } from "../lib/dbAiContext";
 import { AiContextBar } from "./db/AiContextBar";
 import { AssistantMsg, UserMsg } from "./Chat";
@@ -35,7 +36,7 @@ export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { s
     return api.onConnectionsChanged(load);
   }, [inDb]);
   const [history, setHistory] = useState(false);
-  const bottom = useRef<HTMLDivElement>(null);
+  const thread = useRef<HTMLDivElement>(null);
   const area = useRef<HTMLTextAreaElement>(null);
   const histBox = useRef<HTMLDivElement>(null);
 
@@ -51,9 +52,8 @@ export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { s
     if (!store.workspace) store.setWorkspace(state.home);
   }, [store, state.home]);
 
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [active?.id, turns.length, last?.text, last?.events.length, ask?.id]);
+  // 只有停在底部才跟着往下滚；用户往上翻历史时不再被拽回底部。切换对话 / 发新消息才强制回底部
+  useStickBottom(thread, { follow: [last?.text, last?.events.length, ask?.id], force: `${active?.id}|${turns.length}` });
 
   useEffect(() => {
     area.current?.focus();
@@ -165,7 +165,7 @@ export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { s
         </button>
       </header>
 
-      <div className="assistant-thread">
+      <div className="assistant-thread" ref={thread}>
         {!turns.length ? (
           <div className="assistant-empty" data-testid="assistant-empty">
             <Icon name="bot" size={34} />
@@ -178,7 +178,6 @@ export function Assistant({ state, store, wide, onToggleWide, onClose, db }: { s
           turns.map(t => (t.role === "user" ? <UserMsg key={t.id} text={t.text} /> : <AssistantMsg key={t.id} t={t} onRunSql={db ? sql => db.onRunSql({ sql, connId: dbScope?.connId, database: dbScope?.database, schema: dbScope?.schema }) : undefined} />))
         )}
         {ask && <AskForm key={ask.id} req={ask} onSubmit={a => void store.answerAsk(ask.id, a)} />}
-        <div ref={bottom} />
       </div>
 
       <div className="assistant-composer">

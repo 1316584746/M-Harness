@@ -1,16 +1,22 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Icon } from "./Icon";
+import { highlight, parseFence } from "../lib/highlight";
 
 const SQL_LANGS = new Set(["sql", "mysql", "pgsql", "postgresql", "postgres", "plpgsql"]);
 
 function CodeBlock({ lang, code, onRunSql }: { lang: string; code: string; onRunSql?: (sql: string) => void }) {
   const [copied, setCopied] = useState(false);
+  // 信息串可能是 java，也可能是「74:85:src/Foo.java」这种代码引用：后者表头显示文件和行号，语言按扩展名认
+  const fence = useMemo(() => parseFence(lang), [lang]);
+  const toks = useMemo(() => highlight(code, fence.lang), [code, fence.lang]);
   return (
     <div className="codeblock">
       <div className="codeblock-head">
-        <span>{lang || "text"}</span>
+        <span title={fence.path} className="codeblock-name">
+          {fence.path ? `${fence.range}  ${fence.path}` : lang || "text"}
+        </span>
         {onRunSql && SQL_LANGS.has(lang.toLowerCase()) && (
           <button className="icon-btn sm codeblock-run" data-testid="codeblock-run" title="新开一个查询页，带上这段 SQL 直接运行" style={{ marginLeft: "auto" }} onClick={() => onRunSql(code)}>
             <Icon name="play" size={12} />
@@ -31,7 +37,9 @@ function CodeBlock({ lang, code, onRunSql }: { lang: string; code: string; onRun
         </button>
       </div>
       <pre>
-        <code>{code}</code>
+        <code>
+          {toks.map((t, i) => (t.c ? <span key={i} className={`tk-${t.c}`}>{t.s}</span> : t.s))}
+        </code>
       </pre>
     </div>
   );
@@ -47,7 +55,7 @@ export function Markdown({ text, onRunSql }: { text: string; onRunSql?: (sql: st
           pre: ({ children }) => <>{children}</>,
           code({ className, children }) {
             const code = String(children ?? "").replace(/\n$/, "");
-            const lang = /language-(\w+)/.exec(className ?? "")?.[1];
+            const lang = /language-(\S+)/.exec(className ?? "")?.[1];
             if (!lang && !code.includes("\n")) {
               // 行内代码里写的网址也要能点开
               return /^https?:\/\/\S+$/i.test(code) ? (

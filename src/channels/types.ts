@@ -1,4 +1,4 @@
-import type { StreamHandle } from "./stream";
+import type { CardMeta, StreamHandle } from "./stream";
 import type { ApprovalCardIO } from "./group-task";
 
 export interface IncomingMessage {
@@ -19,7 +19,7 @@ export interface IncomingMessage {
   /** 需要主人确认的动作用「带按钮的卡片」发（点按钮或回复文字都行）；不支持卡片的通道不提供 */
   approvalCard?: ApprovalCardIO;
   /** 流式回复：先发一条「处理中」，过程中编辑它，做完改成最终答案；不支持（或发不出）时返回 undefined，调用方退回整条发送 */
-  stream?: () => Promise<StreamHandle | undefined>;
+  stream?: (meta?: CardMeta) => Promise<StreamHandle | undefined>;
   /** 给这条消息点表情回应：收到 = Get（收到了、正在处理），做完 = DONE；不支持的通道不提供 */
   react?: (emoji: "Get" | "DONE") => Promise<void>;
 }

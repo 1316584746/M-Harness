@@ -85,6 +85,14 @@ export interface ModelAdapter {
   chat(messages: Msg[], tools: ToolSpec[], signal: AbortSignal): Promise<ModelReply>;
 }
 
+/** 宿主（桌面端）给外部 Agent 挂的自定义工具：和 ask_user 一样在本进程里执行、不用审批 */
+export interface HostTool {
+  description: string;
+  /** JSON Schema */
+  inputSchema: Record<string, unknown>;
+  execute(args: Record<string, unknown>): Promise<string>;
+}
+
 export interface DelegateInput {
   prompt: string;
   /**
@@ -102,6 +110,10 @@ export interface DelegateInput {
   images?: string[];
   cwd: string;
   signal: AbortSignal;
+  /** 向操作人提问的通道（只有桌面端的对话有）：支持自定义工具的后端（Cursor SDK）据此给 Agent 挂 ask_user，让它遇到要用户拍板的事先问、不要自己挑一个做 */
+  ask?: Asker;
+  /** 桌面端额外给 Agent 挂的自定义工具（如 advance_next）；不支持自定义工具的后端忽略 */
+  hostTools?: Record<string, HostTool>;
   /** 外部 agent 的过程输出（工具调用、思考等），用于写 trace / 展示；kind 不传按 text 处理 */
   onProgress?: (line: string, kind?: ProgressKind) => void;
 }

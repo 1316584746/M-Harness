@@ -38,6 +38,8 @@ const layout = (() => {
   }
 })();
 const home = layout.home;
+// Cursor Agent 会话存档：任务 → Agent id 落盘，软件重启后「继续」仍能接回同一个 Agent（含它读过的文件和做过的事）
+process.env["HARNESS_SESSIONS_FILE"] ||= path.join(home, "cursor-sessions.json");
 process.chdir(home);
 
 let win: BrowserWindow | null = null;
@@ -364,6 +366,7 @@ if (!lock) {
         }
       },
       notify: notifyDefects,
+      clipboard: { readText: () => clipboard.readText(), writeText: t => clipboard.writeText(t) },
       // 连接里的密码用系统的加密存储（Windows 的 DPAPI 等）；系统不支持时才退回明文
       secrets: {
         encrypt: s => (safeStorage.isEncryptionAvailable() ? `enc:${safeStorage.encryptString(s).toString("base64")}` : `plain:${s}`),

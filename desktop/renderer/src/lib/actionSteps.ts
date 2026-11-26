@@ -61,7 +61,7 @@ export function builtinSteps(cfg: Cfg): Array<BuiltinStep & { hidden: boolean; e
     const mine = prefs.overrides?.[b.id]?.body;
     const edited = typeof mine === "string" && mine.trim().length > 0 && mine.trim() !== defaultBody;
     const body = edited ? mine!.trim() : defaultBody;
-    return { ...b, prompt: edited ? withShared(body) : b.prompt, hidden: (prefs.hidden ?? []).includes(b.id), edited, body, defaultBody };
+    return { ...b, prompt: edited ? withShared(body, b.id) : b.prompt, hidden: (prefs.hidden ?? []).includes(b.id), edited, body, defaultBody };
   });
 }
 

@@ -34,6 +34,8 @@ export interface GroupResolver {
   siblings?(chatId: string): string[];
   /** 群主在群里发 /stop：中断这个群正在跑的任务；返回有没有东西被中断 */
   stop?(chatId: string): boolean;
+  /** 桌面端里所有没完成的任务（含没关联需求群的），已按最近更新从新到旧排好：飞书里发 /任务 列出来供选 */
+  tasks?(): TaskGroupBinding[];
 }
 
 /** 这个群这一轮该怎么回：任务里选了流式 / 整条就按任务的，选「跟随全局」看全局默认（不写 = 流式） */

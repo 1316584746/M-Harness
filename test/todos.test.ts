@@ -6,7 +6,7 @@ const at = (d: number, h = 18, m = 0) => new Date(2026, 10, d, h, m).toISOString
 const t = (o: Record<string, unknown>) => ({ id: String(o.title), groupId: "g", priority: "medium", done: false, subtasks: [], ...o });
 
 describe("首页今日待办：挑选", () => {
-  it("没做完的：逾期、今天截止、今天开始；其它不要", () => {
+  it("没做完的：逾期、今天截止、今天开始、进行中（已开始没截止）；其它不要", () => {
     const data = {
       groups: [{ id: "g", name: "工作" }],
       tasks: [
@@ -16,17 +16,22 @@ describe("首页今日待办：挑选", () => {
         t({ title: "今天开始", startAt: at(18, 16), dueAt: at(25) }),
         t({ title: "明天", dueAt: at(19) }),
         t({ title: "昨天开始还没截止", startAt: at(17), dueAt: at(25) }),
+        t({ title: "早就开始没截止日", startAt: at(10) }),
+        t({ title: "还没开始", startAt: at(20), dueAt: at(25) }),
         t({ title: "没日期" }),
         t({ title: "已完成", dueAt: at(15), done: true }),
         t({ title: "  ", dueAt: at(15) }),
       ],
     };
     const r = pickTodayTodos(data, now);
-    expect(r.map(x => x.title)).toEqual(["逾期", "今天早上已过", "今天晚上", "今天开始"]);
+    expect(r.map(x => x.title)).toEqual(["逾期", "今天早上已过", "今天晚上", "今天开始", "昨天开始还没截止", "早就开始没截止日"]);
     expect(r[0]).toMatchObject({ kind: "overdue", days: 3, group: "工作" });
     expect(r[1]).toMatchObject({ kind: "today", late: true });
     expect(r[2]).toMatchObject({ kind: "today", late: false });
     expect(r[3].kind).toBe("start");
+    expect(r[4]).toMatchObject({ kind: "doing" });
+    expect(r[5].kind).toBe("doing");
+    expect(r[5].at).toBeUndefined();
   });
 
   it("同一类里按优先级再按时间；带子任务进度", () => {

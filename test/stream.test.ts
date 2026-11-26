@@ -64,6 +64,50 @@ describe("ReplyStream", () => {
   });
 });
 
+describe("ReplyStream 的卡片附加信息", () => {
+  it("开头和编辑都带上 meta，最终答案多带耗时", async () => {
+    let now = 1000;
+    const seen: Array<{ kind: string; meta: any }> = [];
+    const o: StreamIO = {
+      send: async (_t, meta) => (seen.push({ kind: "send", meta }), "om_1"),
+      edit: async (_id, _t, final, _failed, meta) => (seen.push({ kind: final ? "final" : "edit", meta }), true),
+      reply: async () => {},
+    };
+    const s = new ReplyStream(o, { minIntervalMs: 1, now: () => now, meta: { title: "任务A", question: "问题" } });
+    await s.start("x");
+    now = 1100;
+    s.setMeta({ toolCount: 2, tools: ["🔧 a", "🔧 b"] });
+    s.update("进行中");
+    now = 1000 + 216_000;
+    await s.finish("done");
+    expect(seen[0]).toEqual({ kind: "send", meta: { title: "任务A", question: "问题" } });
+    expect(seen[1].meta).toMatchObject({ title: "任务A", toolCount: 2 });
+    expect(seen[1].meta.ms).toBeUndefined();
+    expect(seen[2]).toMatchObject({ kind: "final", meta: { title: "任务A", toolCount: 2, ms: 216_000 } });
+  });
+});
+
+describe("ProgressText 的工具清单", () => {
+  it("🔧 行算一次调用，✓ 不重复计，✗ 记一笔但不算次数", () => {
+    const p = new ProgressText();
+    p.feed({ type: "agent_progress", line: "🔧 shell {\"command\":\"ls\"}", kind: "tool" });
+    p.feed({ type: "agent_progress", line: "   ✓ shell → ok", kind: "tool" });
+    p.feed({ type: "agent_progress", line: "🔧 read_file {\"path\":\"a\"}", kind: "tool" });
+    p.feed({ type: "agent_progress", line: "   ✗ read_file 失败：没有这个文件", kind: "tool" });
+    const m = p.meta();
+    expect(m.toolCount).toBe(2);
+    expect(m.tools).toHaveLength(3);
+    expect(m.tools?.[2]).toContain("⚠️");
+  });
+  it("自带 loop 的 tool_call 事件也计数；清单只留最近 40 条，总数不丢", () => {
+    const p = new ProgressText();
+    for (let i = 0; i < 50; i++) p.feed({ type: "tool_call", step: 1, name: `t${i}`, args: {} } as any);
+    expect(p.meta().toolCount).toBe(50);
+    expect(p.meta().tools).toHaveLength(40);
+    expect(p.meta().tools?.[39]).toContain("t49");
+  });
+});
+
 describe("ProgressText", () => {
   it("状态 + 已写出的回答", () => {
     const p = new ProgressText();

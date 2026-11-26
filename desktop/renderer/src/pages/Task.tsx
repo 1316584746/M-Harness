@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, McpServerDTO, RepoInfo, RepoSyncDTO, StartBranchDTO, WorkChatDTO } from "../../../shared/api";
+import type { AdvanceRequestDTO, AppState, McpServerDTO, RepoInfo, RepoSyncDTO, StartBranchDTO, WorkChatDTO } from "../../../shared/api";
 import { md, startOfDay } from "../../../shared/schedule";
 import { api } from "../api";
 import { BranchPicker } from "../components/BranchPicker";
@@ -19,7 +19,8 @@ import { ImageStrip, MsgImages } from "../components/ImageStrip";
 import { useImageAttach } from "../lib/useImageAttach";
 import { useStickBottom } from "../lib/useStickBottom";
 import { isRunning, type ChatStore, type StepRef, type Turn } from "../lib/chatStore";
-import { blockedSteps, branchNote, visibleSteps } from "../lib/actionSteps";
+import { blockedSteps, branchNote, composeStep, visibleSteps } from "../lib/actionSteps";
+import { verifyAdvance } from "../lib/advance";
 import { parseCfg } from "../lib/configEdit";
 import { buildRunView, fmtMs, fmtTokens } from "../lib/steps";
 import { progressDigest } from "../lib/flow";
@@ -263,6 +264,8 @@ export function TaskPage({
   const [ctxOpen, setCtxOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [advOpen, setAdvOpen] = useState(false);
+  /** 已经连续自动推进了几步（用户自己发消息 / 点推进后清零） */
+  const chainRef = useRef(0);
   // 推进任务里的「自定义」= 设置 → ACTIONS 里配的动作
   const steps = useMemo(() => visibleSteps(parseCfg(state.configText)), [state.configText]);
   const blocked = useMemo(() => blockedSteps(parseCfg(state.configText), task.repos), [state.configText, reposKey]);
@@ -335,6 +338,9 @@ export function TaskPage({
     if (override === undefined) {
       setInput("");
       pics.clear();
+      chainRef.current = 0;
+      advRef.current = null; // 用户中途发了新消息：之前登记的自动推进作废
+      setAdvNote("");
     }
     const need = turns.length === 0 || task.ctxSent !== sigOf(task) || !!opts.fresh;
     const base = need ? `${preamble(task, repos, state.larkBound)}\n\n${text}` : undefined;
@@ -373,6 +379,36 @@ export function TaskPage({
     const note = branchNote(rs);
     send(note ? `${text}\n\n${note}` : text, opts);
   };
+  // ───── 自动推进：用户说了「做完直接提测」这类话，Agent 用 advance_next 登记，本轮正常结束后按原话核对再自动开下一步 ─────
+  const advRef = useRef<AdvanceRequestDTO | null>(null);
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
+  const [advNote, setAdvNote] = useState("");
+  useEffect(() => api.onRunAdvance(m => { if (turnsRef.current.some(t => t.id === m.runKey)) advRef.current = m; }), []);
+  useEffect(() => {
+    const m = advRef.current;
+    if (!m || running) return;
+    advRef.current = null;
+    // 失败 / 中断：作废，不往下推
+    if (turnsRef.current.find(t => t.id === m.runKey)?.status !== "done") return;
+    const all = [...steps.builtins, ...steps.custom];
+    const step = all.find(a => a.id === m.action);
+    const v = verifyAdvance({
+      action: m.action,
+      userWords: m.userWords,
+      userTexts: turnsRef.current.filter(t => t.role === "user" && !t.step).map(t => t.text),
+      stepIds: all.map(a => a.id),
+      blocked,
+      chain: chainRef.current,
+    });
+    if (!v.ok || !step) {
+      setAdvNote(`AI 想自动进入「${step?.name ?? m.action}」，但${v.ok ? "找不到这一步" : v.reason}，请你手动点「推进」。`);
+      return;
+    }
+    setAdvNote("");
+    chainRef.current += 1;
+    void advance(composeStep(step, m.instruction, stepVars), { fresh: false, stepId: step.id });
+  }, [running]);
   /** 失败 / 超时 / 中断后「继续」：沿用刚才的问题（同一步骤），并把上次已经读过、搜过、做过的事带上，新开的 Agent 接着做 */
   const lastRound = rounds.at(-1);
   const retry = (r: (typeof rounds)[number]) => {
@@ -397,17 +433,16 @@ export function TaskPage({
   };
 
   const flow = useRef<HTMLDivElement>(null);
-  useStickBottom(flow);
   const last = turns.at(-1);
-  useEffect(() => {
-    flow.current?.scrollTo({ top: flow.current.scrollHeight });
-  }, [turns.length, last?.events.length, last?.status]);
+  // 只有停在底部才跟着往下滚；用户往上翻历史时不再被拽回底部。切换任务 / 发新消息才强制回底部
+  useStickBottom(flow, { follow: [last?.events.length, last?.status], force: `${task.id}|${turns.length}` });
 
   const [confirmDrop, setConfirmDrop] = useState(false);
   useEffect(() => setConfirmDrop(false), [task.id]);
 
   const view = useMemo(() => (cur?.ai ? buildRunView(cur.ai.events, cur.ai.times?.length === cur.ai.events.length ? cur.ai.times : undefined) : null), [cur?.ai?.events, cur?.ai?.times]);
   const picked = task.repos.map(n => repos.find(r => r.name === n) ?? ({ name: n, path: "", status: { exists: false, changed: 0, ahead: 0, behind: 0 } } as RepoInfo));
+  const stepVars = { taskTitle: task.title, taskId: task.id, repoPath: picked.find(r => r.path)?.path ?? "未关联仓库" };
   const free = repos.filter(r => !task.repos.includes(r.name));
 
   return (
@@ -560,7 +595,7 @@ export function TaskPage({
         </div>
       </div>
 
-      {advOpen && <AdvanceDialog builtins={steps.builtins} actions={steps.custom} blocked={blocked} hasHistory={turns.length > 0} agent={<><ProviderPicker providers={state.providers} value={provider} onChange={chat.setProvider} disabled={running} /><ModelPicker provider={provider} info={info} value={chat.model} onChange={chat.setModel} disabled={running} /></>} vars={{ taskTitle: task.title, taskId: task.id, repoPath: picked.find(r => r.path)?.path ?? "未关联仓库" }} onClose={() => setAdvOpen(false)} onAdvance={(t, o) => void advance(t, o)} />}
+      {advOpen && <AdvanceDialog builtins={steps.builtins} actions={steps.custom} blocked={blocked} hasHistory={turns.length > 0} agent={<><ProviderPicker providers={state.providers} value={provider} onChange={chat.setProvider} disabled={running} /><ModelPicker provider={provider} info={info} value={chat.model} onChange={chat.setModel} disabled={running} /></>} vars={stepVars} onClose={() => setAdvOpen(false)} onAdvance={(t, o) => { chainRef.current = 0; setAdvNote(""); void advance(t, o); }} />}
       {infoOpen && <InfoDialog task={task} repos={repos} sourceText={SOURCE_TEXT[task.source]} schedule={range(task)} onClose={() => setInfoOpen(false)} onSave={patch => tasks.update(task.id, patch)} onRepos={setTaskRepos} />}
       {ctxOpen && <ContextDialog task={task} onClose={() => setCtxOpen(false)} onChange={patch => tasks.update(task.id, patch)} />}
       {grpOpen && (
@@ -741,6 +776,7 @@ export function TaskPage({
 
           <div className="flow-composer">
             {info?.problem && <div className="inline-warn">{info.problem}</div>}
+            {advNote && <div className="inline-warn" data-testid="adv-note">{advNote}</div>}
             <QueuedList items={chat.queued} onCancel={chat.dequeue} />
             <div className="composer" data-testid="task-composer">
               <div className="composer-grip" data-testid="task-input-grip" title="拖动调整输入框高度" onMouseDown={startInputResize} />

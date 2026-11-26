@@ -16,6 +16,10 @@ interface Session {
   bound?: string;
   /** 正在跑 + 排队中的消息数 */
   waiting: number;
+  /** 用 /任务 选定的任务：选定后这个会话里的所有对话都交给这个任务，直到 /退出 */
+  focus?: { taskId: string; title: string };
+  /** 刚列出来、等着回复编号的任务清单（10 分钟内回复数字有效） */
+  picking?: { ids: string[]; at: number };
   /** 各发送人排队中的消息数（访客限额用） */
   bySender: Map<string, number>;
 }
@@ -23,6 +27,9 @@ interface Session {
 /** 访客在一个会话里最多同时排几条；排队超过多久就作废 */
 const MAX_QUEUED_PER_GUEST = 2;
 const QUEUE_EXPIRE_MS = 30 * 60_000;
+const PICK_EXPIRE_MS = 10 * 60_000;
+/** /任务 清单最多列这么多项，多的用关键字搜 */
+const MAX_LIST = 20;
 
 const HELP = [
   "可用指令：",
@@ -30,6 +37,8 @@ const HELP = [
   "/model <名称>  切换当前会话使用的模型 / Agent",
   "/reset  清空当前会话上下文",
   "/stop  中断正在执行的任务",
+  "任务（或 /任务）  列出桌面端里进行中的任务，回复编号选定；选定后所有对话都围绕这个任务（/任务 关键字 可搜索）",
+  "退出  结束当前选定的任务，回到普通对话（也可以发 退出任务 或 /退出）",
   "/help  查看帮助",
   "其余内容会作为任务交给当前模型处理。",
 ].join("\n");
@@ -56,13 +65,31 @@ export class SessionManager {
 
   handle(msg: IncomingMessage): Promise<void> {
     const s = this.get(msg.conversationId);
-    const text = msg.text.trim();
+    // 中文输入法常打出全角斜杠「／任务」，按半角处理
+    let text = msg.text.trim().replace(/^／/, "/");
+    // 不带斜杠也认：整条消息就是「任务」「我的任务」「任务 3」→ /任务；选定任务期间整条是「退出」「退出任务」→ /退出。
+    // 只认整条消息等于这几个词，免得把正常提问（比如「任务进度怎么样」）当成指令
+    if (!msg.guest) {
+      const n = /^任务\s*(\d{1,3})$/.exec(text);
+      if (/^(任务|任务列表|任务清单|我的任务)$/.test(text)) text = "/任务";
+      else if (n) text = `/任务 ${n[1]}`;
+      else if (/^退出任务$/.test(text) || (s.focus && /^退出$/.test(text))) text = "/退出";
+    }
 
     // 正在等主人确认某个改动：这条是「确认 / 取消」的话直接处理，不排队（任务正卡在等它）
     if (this.gate.tryResolve(msg.conversationId, msg.userId, text)) return Promise.resolve();
 
     // 指令即时处理，不排队（/stop 必须能打断正在跑的任务）
     if (text.startsWith("/")) return this.command(s, msg, text);
+
+    // 刚列出任务清单：回复一个数字 = 选这一项（10 分钟内有效）
+    if (!msg.guest && s.picking && /^\d{1,3}$/.test(text)) {
+      if (Date.now() - s.picking.at <= PICK_EXPIRE_MS) return this.pick(s, msg, Number(text));
+      s.picking = undefined;
+    }
+    s.picking = undefined; // 回的不是编号，这份清单作废
+    // 选定了任务：这个会话里的话都交给它（群里已经绑了需求的，仍按群绑定的需求走）
+    if (s.focus && !msg.guest && !(msg.isGroup && msg.chatId && this.groups?.binding(msg.chatId))) return this.focusRun(s, msg);
 
     void msg.react?.("Get"); // 先应答「收到了」（排队时也立刻有反应），做完再点 DONE
     // 前面还有活没干完：告诉对方在排队（访客每人最多排 2 条，排太久的作废），别让人以为没收到
@@ -132,6 +159,22 @@ export class SessionManager {
           out = `已切换到 ${arg}（${this.rt.registry.describe(arg)}）`;
         }
         break;
+      case "/任务":
+      case "/任务列表":
+      case "/task":
+      case "/tasks":
+        out = this.tasksCommand(s, msg, arg);
+        break;
+      case "/退出":
+      case "/退出任务":
+      case "/exit":
+      case "/quit":
+        if (s.focus) {
+          out = `已退出任务「${s.focus.title}」，回到普通对话。想再选任务发「任务」。`;
+          s.focus = undefined;
+        } else out = "当前没有选定任务。发「任务」可以看任务列表。";
+        s.picking = undefined;
+        break;
       case "/reset":
         s.history = [];
         s.fresh = true; // 外部 Agent 也开全新上下文
@@ -151,6 +194,63 @@ export class SessionManager {
         out = `未知指令 ${cmd}\n\n${HELP}`;
     }
     await this.safeReply(msg, out);
+  }
+
+  /** 编号清单文本；当前选定的任务前面打 👉 */
+  private listText(s: Session, shown: { taskId: string; title: string; repos: string[] }[], total: number, head: string): string {
+    s.picking = { ids: shown.map(t => t.taskId), at: Date.now() };
+    const lines = shown.map((t, i) => `${s.focus?.taskId === t.taskId ? "👉" : "  "}${i + 1}. ${t.title}${t.repos.length ? `（${t.repos.slice(0, 2).join("、")}${t.repos.length > 2 ? "等" : ""}）` : ""}`);
+    const more = total > shown.length ? `\n还有 ${total - shown.length} 个没列出，发「/任务 关键字」搜索。` : "";
+    return `${head}\n${lines.join("\n")}${more}\n\n回复编号选定任务；选定后你在这里说的话都交给它处理，发「退出」结束。`;
+  }
+
+  /** /任务：不带参数 = 列清单；带数字 = 选这一项；带文字 = 按标题搜 */
+  private tasksCommand(s: Session, msg: IncomingMessage, arg: string): string {
+    const bind = msg.isGroup && msg.chatId ? this.groups?.binding(msg.chatId) : undefined;
+    if (bind) return `这个群已经绑定了任务「${bind.title}」，群里的对话本来就围绕它。想切换任务，请到和机器人的单聊里发「任务」。`;
+    const all = this.groups?.tasks?.() ?? [];
+    if (!all.length) return "桌面端里还没有进行中的任务。（M-Harness 窗口要开着，任务才会同步过来。）";
+    if (/^\d{1,3}$/.test(arg)) return this.select(s, Number(arg));
+    if (arg) {
+      const kw = arg.toLowerCase();
+      const hit = all.filter(t => t.title.toLowerCase().includes(kw));
+      if (!hit.length) return `没有标题里带「${arg}」的任务。发「任务」看全部。`;
+      if (hit.length === 1) return this.choose(s, hit[0]);
+      return this.listText(s, hit.slice(0, MAX_LIST), hit.length, `标题里带「${arg}」的任务有 ${hit.length} 个：`);
+    }
+    return this.listText(s, all.slice(0, MAX_LIST), all.length, `进行中的任务共 ${all.length} 个（最近更新的在前）：`);
+  }
+
+  /** 按编号选：优先用刚列出来的那份清单，没有就按当前全部任务的顺序 */
+  private select(s: Session, n: number): string {
+    const all = this.groups?.tasks?.() ?? [];
+    const ids = s.picking && Date.now() - s.picking.at <= PICK_EXPIRE_MS ? s.picking.ids : all.slice(0, MAX_LIST).map(t => t.taskId);
+    const t = n >= 1 && n <= ids.length ? all.find(x => x.taskId === ids[n - 1]) : undefined;
+    if (!t) return n >= 1 && n <= ids.length ? "这个任务已经不在进行中的任务里了，发「任务」重新看清单。" : `没有第 ${n} 项，发「任务」看清单。`;
+    return this.choose(s, t);
+  }
+
+  private choose(s: Session, t: { taskId: string; title: string }): string {
+    s.focus = { taskId: t.taskId, title: t.title };
+    s.picking = undefined;
+    return `已选定任务「${t.title}」。接下来你在这里说的话都会交给这个任务处理（带它的需求、产物和上下文），发 /stop 可以中断正在跑的，发「退出」结束。`;
+  }
+
+  private pick(s: Session, msg: IncomingMessage, n: number): Promise<void> {
+    return this.safeReply(msg, this.select(s, n));
+  }
+
+  /** 选定了任务：这条话交给桌面端里这个任务自己的对话去跑，过程和结果由桌面端发回来 */
+  private async focusRun(s: Session, msg: IncomingMessage): Promise<void> {
+    const f = s.focus!;
+    const b = this.groups?.tasks?.().find(t => t.taskId === f.taskId);
+    if (!b) {
+      s.focus = undefined;
+      return this.safeReply(msg, `任务「${f.title}」已经不在进行中了（完成或删除了），已退出。发「任务」重新选。`);
+    }
+    void msg.react?.("Get");
+    const ok = await (this.groups?.dispatch?.({ ...b, groupId: msg.chatId ?? "" }, msg) ?? Promise.resolve(false)).catch(() => false);
+    if (!ok) await this.safeReply(msg, `没能交给任务「${f.title}」：M-Harness 窗口要开着、任务也要还在。稍后再试，或发「退出」结束。`);
   }
 
   private async runOne(s: Session, msg: IncomingMessage) {
@@ -178,7 +278,9 @@ export class SessionManager {
     // 群主在绑定了需求的群里说话：优先交给这个任务自己的对话（带任务完整的上下文 / 产物 / 工具），结果由桌面端发回群里；接不了才在这里答
     if (bind && ownerInTaskGroup && this.groups?.dispatch && (await this.groups.dispatch(bind, msg).catch(() => false))) return;
     const mode = bind ? replyModeOf(bind, this.groups?.defaultReply?.()) : "whole";
-    const stream = mode === "stream" && msg.stream ? await msg.stream().catch(() => undefined) : undefined;
+    // 卡片上要展示的：任务名当标题、被问的问题、模型名（工具清单随运行过程更新）
+    const model = this.rt.registry.modelOf(provider);
+    const stream = mode === "stream" && msg.stream ? await msg.stream({ ...(bind?.title ? { title: bind.title } : {}), question: msg.text, ...(model ? { model } : {}) }).catch(() => undefined) : undefined;
     const prog = stream ? new ProgressText() : undefined;
     const boundId = bind?.taskId ?? "";
     if (s.bound !== undefined && s.bound !== boundId) {
@@ -200,7 +302,7 @@ export class SessionManager {
         ...(ownerInTaskGroup ? { approve: (q: { tool: { name: string }; args: unknown; reason: string }) => this.gate.ask(msg.conversationId, msg.userId, approvalPrompt(q), t => msg.reply(t), msg.approvalCard) } : {}),
         ...(bind ? { system: groupSystem(bind, !!msg.guest, this.rt.config.system), ...(repoPath ? { workspace: repoPath } : {}) } : {}),
         guest: msg.guest,
-        ...(stream && prog ? { emit: e => { const t = prog.feed(e); if (t) stream.update(t); } } : {}),
+        ...(stream && prog ? { emit: e => { const t = prog.feed(e); stream.setMeta?.(prog.meta()); if (t) stream.update(t); } } : {}),
         // 同一个会话续接同一个外部 Agent：不用每条消息都重新创建（创建 + 提交要好几秒），它也记得之前聊过什么
         // 会话标识 = 哪个群 + 绑定的哪个需求 + 是否访客：不同群、不同需求、主人和访客互不串
         sessionKey: `${msg.conversationId}${bind ? `#${bind.taskId}` : ""}${msg.guest ? ":guest" : ""}`,

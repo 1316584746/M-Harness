@@ -4,8 +4,9 @@ import { ContextManager } from "./core/context";
 import { Guardrails, approveAll, denyAll, type Approver } from "./core/guardrails";
 import { run } from "./core/loop";
 import { createJsonlTrace, fanout, newRunId } from "./core/trace";
-import type { Asker, Emit, Msg, RunResult, Tool } from "./core/types";
+import type { Asker, Emit, HostTool, Msg, RunResult, Tool } from "./core/types";
 import { askUserTool } from "./tools/ask-user";
+import { agentSafetyPrompt } from "./prompt/agent-safety";
 import { builtinTools } from "./tools/builtin";
 import { dingtalkProjectTools } from "./tools/dingtalk-project";
 import { feishuProjectTools } from "./tools/feishu-project";
@@ -36,6 +37,8 @@ export interface TaskRequest {
   approve?: Approver;
   /** 能向操作人提问（只有桌面端的对话提供）；有它才给模型 ask_user 工具 */
   ask?: Asker;
+  /** 给外部 Agent 额外挂的自定义工具（桌面端的 advance_next 等；只对 agent 类 provider 生效） */
+  hostTools?: Record<string, HostTool>;
   emit?: Emit;
   signal?: AbortSignal;
   /** 覆盖工作区（沙箱根） */
@@ -141,7 +144,9 @@ export class Runtime {
     await this.prepare();
     const skills = provider.kind === "model" ? this.allSkills(root).filter(s => s.enabled) : [];
     const baseTools = [...this.tools, ...(skills.length ? [skillTool(skills)] : []), ...(req.ask && provider.kind === "model" ? [askUserTool] : [])];
-    const system = [req.system ?? this.config.system, buildRulesSection(this.config.rules, root), skillsPrompt(skills), customOfficePrompt(this.config.office)].filter(Boolean).join("\n\n");
+    // 外部 Agent 用自己的终端和文件工具、不受路径沙箱约束：用提示词划好操作边界（有人可问时让它用 ask_user 问）
+    const safety = provider.kind === "agent" ? agentSafetyPrompt(root, !!req.ask) : undefined;
+    const system = [req.system ?? this.config.system, buildRulesSection(this.config.rules, root), skillsPrompt(skills), customOfficePrompt(this.config.office), safety].filter(Boolean).join("\n\n");
 
     const result = await run({
       provider,
@@ -155,6 +160,7 @@ export class Runtime {
       guard: this.guardFor(mode, req.guest),
       approve,
       ask: req.ask,
+      ...(provider.kind === "agent" && req.hostTools ? { hostTools: req.hostTools } : {}),
       context: new ContextManager({ maxTokens: this.config.limits.contextTokens }, emit),
       emit,
       signal: req.signal,

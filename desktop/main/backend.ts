@@ -46,6 +46,7 @@ import { sweepAttachments } from "../../src/channels/feishu-api";
 import { ProgressText, type StreamHandle } from "../../src/channels/stream";
 import type { IncomingMessage } from "../../src/channels/types";
 import { createChat, fetchWorkItemChat, inspectChat, parseChatRef, type WorkChat } from "../../src/tools/work-chat";
+import { advanceNextTool } from "../../src/tools/advance-next";
 import { fetchDingtalkTodos, fetchFeishuTodos, sortTodos, createFeishuSubtask, updateFeishuSubtask, type SubtaskCreated, type SubtaskResult, type SubtaskUpdate, type TodoSource } from "../../src/tools/workbench";
 import { addChild, patchChild } from "../shared/todoPatch";
 import { branchInfo, cloneRepo, detectBaseBranch, diffStat, inspectRepo, listBranches, repoStatus, startFeatureBranch, switchBranch, syncBaseBranch, type StartBranchResult } from "../../src/tools/git";
@@ -84,6 +85,8 @@ export interface Host {
   notify?(title: string, body: string): void;
   /** 秘密落盘加密（系统 safeStorage）；没有就明文存在数据目录里 */
   secrets?: SecretBox;
+  /** 系统剪贴板（插件的复制 / 粘贴用）；没有就不支持 */
+  clipboard?: { readText(): string | Promise<string>; writeText(text: string): void | Promise<void> };
 }
 
 export const DEFAULT_CONFIG_TEXT = `{
@@ -137,7 +140,7 @@ export class Backend {
     return this.runs.size > 0;
   }
   /** 飞书需求群里群主的消息：已派给界面里任务的对话、等着它开跑（reqId → 这条消息） */
-  private groupPending = new Map<string, { msg: IncomingMessage; mode: "stream" | "whole"; ack: (ok: boolean) => void; at: number }>();
+  private groupPending = new Map<string, { msg: IncomingMessage; mode: "stream" | "whole"; ack: (ok: boolean) => void; at: number; /** 任务名：卡片标题用 */ title?: string }>();
   /** 正在跑的群消息（runKey → 这条消息），/stop 和收尾用 */
   private groupActive = new Map<string, IncomingMessage>();
   /** 写 / 执行要不要继续：群里问群主，群主回「确认」才继续（群消息和群里的确认共用一个） */
@@ -1053,6 +1056,7 @@ export class Backend {
       consentFile: path.join(this.home, "plugin-consent.json"),
       grantsFile: path.join(this.home, "plugin-db-grants.json"),
       db: this.db,
+      clipboard: this.host.clipboard,
       // 仅自动化测试用：让后台程序可以是一段脚本（正式插件都是原生程序）
       launch: process.env.HARNESS_PLUGIN_SCRIPT_HOST ? exe => ({ command: process.execPath, args: [exe], env: { ELECTRON_RUN_AS_NODE: "1" } }) : undefined,
       onEvent: (id, method, params) => this.host.send("pluginhost:event", { id, method, params }),
@@ -1378,7 +1382,9 @@ export class Backend {
     const g = req.groupReq ? this.groupPending.get(req.groupReq) : undefined;
     if (req.groupReq) this.groupPending.delete(req.groupReq);
     if (g) this.groupActive.set(req.runKey, g.msg);
-    const stream: StreamHandle | undefined = g && g.mode === "stream" && g.msg.stream ? await g.msg.stream().catch(() => undefined) : undefined;
+    // 卡片上要展示的：任务名当标题、被问的问题（原始消息，不带任务提示）、模型名；工具清单随运行过程更新
+    const cardModel = req.model || (g ? this.rt.registry.modelOf(req.provider) : undefined);
+    const stream: StreamHandle | undefined = g && g.mode === "stream" && g.msg.stream ? await g.msg.stream({ ...(g.title ? { title: g.title } : {}), question: g.msg.text, ...(cardModel ? { model: cardModel } : {}) }).catch(() => undefined) : undefined;
     const prog = stream ? new ProgressText() : undefined;
     const finishGroup = async (r: { reason: string; text?: string; error?: string }) => {
       if (!g) return;
@@ -1408,9 +1414,12 @@ export class Backend {
         signal: ac.signal,
         approve: g ? q => this.groupGate.ask(g.msg.conversationId, g.msg.userId, approvalPrompt(q), t => g.msg.reply(t), g.msg.approvalCard) : ({ tool, args, reason }) => this.askApproval(req.runKey, tool, args, reason),
         ...(g ? {} : { ask: (questions: any, signal: any) => this.askUser(req.runKey, questions, signal) }),
+        // 任务里用户说了「做完直接提测」这类话时，Agent 用它登记「本轮结束后自动推进」；授权由界面按用户原话核对
+        ...(g ? {} : { hostTools: { advance_next: advanceNextTool(r => this.host.send("run:advance", { runKey: req.runKey, ...r })) } }),
         emit: (e: HarnessEvent) => {
           this.host.send("run:event", { runKey: req.runKey, event: e });
           const t = prog?.feed(e);
+          if (prog) stream?.setMeta?.(prog.meta());
           if (t) stream?.update(t);
         },
       });
@@ -1663,6 +1672,7 @@ export class Backend {
         siblings: chatId => this.groupSiblings.get(chatId) ?? [],
         dispatch: (b, msg) => this.groupDispatch(b, msg),
         stop: chatId => this.groupStop(chatId),
+        tasks: () => this.openTasks,
       },
       this.groupGate,
     );
@@ -1696,6 +1706,7 @@ export class Backend {
       this.groupPending.set(reqId, {
         msg,
         mode: replyModeOf(b, this.config.channels.larkCli?.groupReply),
+        title: b.title,
         at: Date.now(),
         ack: v => (clearTimeout(timer), resolve(v)),
       });
@@ -1738,11 +1749,17 @@ export class Backend {
   /** 软件里的对话和结果同步到飞书智能体（配置每次现读，设置里改了立刻生效） */
   /** 需求群 → 绑定的任务（桌面端同步过来；飞书群里的提问据此按需求回答） */
   private taskGroups = new Map<string, TaskGroupBinding>();
+  private openTasks: TaskGroupBinding[] = [];
   /** 群 → 绑定在它上面的所有任务标题（一个群绑了好几个任务时，只有第一个生效，群里会提示） */
   private groupSiblings = new Map<string, string[]>();
   syncTaskGroups(list: TaskGroupBindingDTO[]): void {
     const m = new Map<string, TaskGroupBinding>();
     const sib = new Map<string, string[]>();
+    // 所有没完成的任务（含没关联群的）：飞书里发 /任务 列出来给你选
+    this.openTasks = list
+      .filter(b => b && typeof b.taskId === "string" && b.taskId && typeof b.title === "string")
+      .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))
+      .map(b => ({ groupId: typeof b.groupId === "string" ? b.groupId : "", taskId: b.taskId, title: b.title, briefing: String(b.briefing ?? ""), repos: Array.isArray(b.repos) ? b.repos : [], reply: b.reply }));
     for (const b of list) {
       if (!b || typeof b.groupId !== "string" || !b.groupId) continue;
       if (!m.has(b.groupId)) m.set(b.groupId, { ...b, repos: Array.isArray(b.repos) ? b.repos : [] });

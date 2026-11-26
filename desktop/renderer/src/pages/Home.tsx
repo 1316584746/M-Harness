@@ -245,6 +245,10 @@ const TODO_FOLD = 5;
 
 function todoTag(t: TodoItem): string {
   if (t.kind === "overdue") return `逾期 ${t.days} 天`;
+  if (t.kind === "doing") {
+    const d = t.at ? new Date(t.at) : null;
+    return d && !Number.isNaN(d.getTime()) ? `进行中 · 截止 ${d.getMonth() + 1}/${d.getDate()}` : "进行中";
+  }
   const hm = t.at && !Number.isNaN(new Date(t.at).getTime()) ? new Date(t.at) : null;
   const time = hm ? `${String(hm.getHours()).padStart(2, "0")}:${String(hm.getMinutes()).padStart(2, "0")}` : "";
   if (t.kind === "today") return t.late ? `已过 ${time}` : `今天 ${time}`;

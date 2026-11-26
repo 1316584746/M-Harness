@@ -2,13 +2,13 @@
 
 export const TODO_PLUGIN_ID = "com.lwai.todo";
 
-export type TodoKind = "overdue" | "today" | "start";
+export type TodoKind = "overdue" | "today" | "start" | "doing";
 
 export interface TodoItem {
   id: string;
   title: string;
   priority: "high" | "medium" | "low";
-  /** overdue：截止日早于今天；today：今天截止；start：今天开始 */
+  /** overdue：截止日早于今天；today：今天截止；start：今天开始；doing：已经开始、还没到截止日（进行中） */
   kind: TodoKind;
   /** 截止时间（overdue / today）或开始时间（start），ISO 字符串，原样来自插件 */
   at?: string;
@@ -40,7 +40,7 @@ function parse(s: unknown): Date | undefined {
   return Number.isNaN(d.getTime()) ? undefined : d;
 }
 
-/** 没做完、而且今天要关心的：已逾期、今天截止、今天开始。逾期最前，然后按截止时间，再按优先级 */
+/** 没做完、而且今天要关心的：已逾期、今天截止、今天开始、进行中（已开始还没截止）。逾期最前，然后按截止时间，再按优先级 */
 export function pickTodayTodos(data: unknown, now: Date = new Date()): TodoItem[] {
   const d = (data && typeof data === "object" ? data : {}) as { tasks?: unknown; groups?: unknown };
   const groups = new Map<string, string>();
@@ -67,8 +67,11 @@ export function pickTodayTodos(data: unknown, now: Date = new Date()): TodoItem[
       out.push({ ...base, kind: "today", at: String(t.dueAt), late: due.getTime() < now.getTime(), sort: due.getTime() });
     } else if (start && dayStart(start) === today) {
       out.push({ ...base, kind: "start", at: String(t.startAt), sort: start.getTime() });
+    } else if (start && dayStart(start) < today && (!due || dayStart(due) > today)) {
+      // 前几天就开始了、还没到截止日：进行中的事项，每天都该在首页看到
+      out.push({ ...base, kind: "doing", ...(due ? { at: String(t.dueAt) } : {}), sort: due ? due.getTime() : Number.MAX_SAFE_INTEGER });
     }
   }
-  const order = { overdue: 0, today: 1, start: 2 } as const;
+  const order = { overdue: 0, today: 1, start: 2, doing: 3 } as const;
   return out.sort((a, b) => order[a.kind] - order[b.kind] || RANK[a.priority] - RANK[b.priority] || a.sort - b.sort).map(({ sort: _s, ...rest }) => rest);
 }

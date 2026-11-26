@@ -3,7 +3,7 @@ import readline from "node:readline";
 import type { HarnessConfig } from "../config";
 import { spawnCli } from "../tools/cli-spawn";
 import { chunkText, type IncomingMessage } from "./types";
-import { ReplyStream, type StreamHandle, type StreamIO } from "./stream";
+import { ReplyStream, type CardMeta, type StreamHandle, type StreamIO } from "./stream";
 import type { ApprovalCardIO } from "./group-task";
 import { approvalCard, approvalDoneCard, parseCardAction, progressCard, type CardAction } from "./cards";
 import { MAX_FILES, MAX_IMAGES, downloadResource, explainFeishuError, fetchMessage, parseAttachments, quoteBlock, quoteLimiter, type Exec } from "./feishu-api";
@@ -237,7 +237,7 @@ export class LarkCliChannel {
       chatId: ev.chat_id,
       isGroup,
       react: emoji => this.react(messageId, emoji),
-      stream: () => this.openStream(messageId),
+      stream: meta => this.openStream(messageId, meta),
       approvalCard: this.cfg.card === false ? undefined : this.approvalCardIO(messageId),
     });
   }
@@ -263,18 +263,19 @@ export class LarkCliChannel {
   }
 
   /** 流式回复：先回一条「处理中」，之后编辑同一条消息；拿不到消息 id（没法编辑）就返回 undefined */
-  async openStream(messageId: string): Promise<StreamHandle | undefined> {
+  async openStream(messageId: string, meta?: CardMeta): Promise<StreamHandle | undefined> {
     const flag = this.cfg.replyFormat === "markdown" ? "--markdown" : "--text";
     const useCard = this.cfg.card !== false;
     const s = new ReplyStream(
       useCard
         ? {
             // 卡片：蓝色「处理中」一直改到最终答案（变绿）；卡片发不出来 / 改不了就自动退回文字
-            send: async text => (await this.sendCard(messageId, progressCard(text))) ?? (await this.sendText(messageId, text, flag)),
-            edit: async (id, text, final, failed) => (await this.patchCard(id, progressCard(text, !!final, !!failed))) || (await this.editText(id, text, flag)),
+            send: async (text, m) => (await this.sendCard(messageId, progressCard(text, false, false, m))) ?? (await this.sendText(messageId, text, flag)),
+            edit: async (id, text, final, failed, m) => (await this.patchCard(id, progressCard(text, !!final, !!failed, m))) || (await this.editText(id, text, flag)),
             reply: text => this.reply(messageId, text),
           }
         : this.textIO(messageId, flag),
+      meta ? { meta } : {},
     );
     return (await s.start()) ? s : undefined;
   }

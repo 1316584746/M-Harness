@@ -1,6 +1,6 @@
 import { ContextManager, truncate } from "./context";
 import { Guardrails, denyAll, type Approver } from "./guardrails";
-import type { Asker, Emit, ModelAdapter, Msg, Provider, RunResult, Tool } from "./types";
+import type { Asker, Emit, HostTool, ModelAdapter, Msg, Provider, RunResult, Tool } from "./types";
 import { newRunId } from "./trace";
 
 export interface RunOptions {
@@ -19,6 +19,8 @@ export interface RunOptions {
   approve?: Approver;
   /** 让 AI 能向操作人提问（ask_user 工具用） */
   ask?: Asker;
+  /** 外部 Agent 的宿主自定义工具（见 DelegateInput.hostTools） */
+  hostTools?: Record<string, HostTool>;
   context?: ContextManager;
   emit?: Emit;
   signal?: AbortSignal;
@@ -179,6 +181,8 @@ export async function runDelegate(
       prompt,
       ...(opts.sessionKey ? { sessionKey: opts.sessionKey, resumePrompt, ...(opts.freshSession ? { freshSession: true } : {}) } : {}),
       ...(opts.toolBudget ? { toolBudget: opts.toolBudget } : {}),
+      ...(opts.ask ? { ask: opts.ask } : {}),
+      ...(opts.hostTools ? { hostTools: opts.hostTools } : {}),
       images: opts.images,
       cwd: opts.root,
       signal,

@@ -1387,7 +1387,20 @@ pre.mini {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
 }
+.codeblock-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; margin-right: 8px; }
 .codeblock-head .codeblock-run { color: #5fd08c; margin-right: 2px; }
+/* 语法高亮配色：代码块底色始终是深色，一套色板两种主题通用 */
+.tk-k { color: #c792ea; }
+.tk-s { color: #a5d6a7; }
+.tk-c { color: #7f8794; font-style: italic; }
+.tk-n { color: #f78c6c; }
+.tk-t { color: #82aaff; }
+.tk-f { color: #ffd479; }
+.tk-a { color: #f2a65a; }
+.tk-p { color: #7fdbca; }
+.tk-d { color: #8be8ae; background: rgba(95, 208, 140, 0.12); }
+.tk-x { color: #ff8b92; background: rgba(240, 112, 122, 0.12); }
+.tk-h { color: #82aaff; }
 .codeblock-head .codeblock-run:hover { color: #8be8ae; }
 .codeblock pre {
   padding: 12px 14px;

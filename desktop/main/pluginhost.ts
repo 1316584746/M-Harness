@@ -92,6 +92,8 @@ export interface PluginHostOpts {
   };
   /** 记录「哪个插件可以用哪些数据库连接」的文件 */
   grantsFile?: string;
+  /** 系统剪贴板（插件的「复制」「终端粘贴」靠它；沙箱里的页面自己碰不到剪贴板） */
+  clipboard?: { readText(): string | Promise<string>; writeText(text: string): void | Promise<void> };
 }
 
 const DATA_PERMS = ["host.data:read", "host.schema:read", "host.connections:read"];
@@ -401,8 +403,9 @@ export class PluginHost {
     const perms = Array.isArray(r.manifest.permissions) ? r.manifest.permissions : [];
     switch (method) {
       case "backend.invoke": {
+        // plugin/ping 是插件界面用来确认后台已就绪的探活，必须放行（否则像 HTTP 客户端这类插件的「发送」会一直灰）；其余 plugin/ host/ 内部方法仍禁止
         const m = String(p.method ?? "");
-        if (!m || m.length > 200 || /^(plugin|host)\//.test(m)) throw new Error("不允许的方法名");
+        if (!m || m.length > 200 || (m !== "plugin/ping" && /^(plugin|host)\//.test(m))) throw new Error("不允许的方法名");
         const timeout = typeof p.timeoutMs === "number" ? p.timeoutMs : undefined;
         const cid = this.provider(r) && p.params && typeof p.params === "object" ? (p.params as Record<string, unknown>).connectionId : undefined;
         if (typeof cid !== "string" || !cid) return (await this.sidecar(r.id)).call(m, p.params ?? {}, timeout);
@@ -457,6 +460,18 @@ export class PluginHost {
         return this.titles.get(r.id) ?? null;
       case "host.readAsset":
         return this.readAsset(r, String(p.path ?? ""), p.url === true);
+      case "host.clipboard.writeText": {
+        if (!this.o.clipboard) throw new Error("本软件暂不支持剪贴板");
+        const t = String(p.text ?? "");
+        if (t.length > 1024 * 1024) throw new Error("复制的内容太大");
+        await this.o.clipboard.writeText(t);
+        return null;
+      }
+      case "host.clipboard.readText": {
+        if (!perms.includes("host.clipboard:read")) throw new Error("这个插件没有声明 host.clipboard:read 权限");
+        if (!this.o.clipboard) throw new Error("本软件暂不支持剪贴板");
+        return await this.o.clipboard.readText();
+      }
       case "host.storage.get":
       case "host.storage.set":
       case "host.storage.delete": {
@@ -579,9 +594,11 @@ export class PluginHost {
   async aiTools(id: string): Promise<AiRawTool[]> {
     const r = this.resolve(id);
     if (!r) throw new Error("这个插件已经不在了");
-    const res = (await (await this.sidecar(r.id)).call("mcp/tools", {}, 20_000)) as { tools?: unknown } | null;
+    const res = (await (await this.sidecar(r.id)).call("mcp/tools", {}, 20_000)) as { tools?: unknown } | unknown[] | null;
     const out: AiRawTool[] = [];
-    for (const t of Array.isArray(res?.tools) ? res.tools : []) {
+    // 有的插件（如 SSH）直接返回工具数组，有的包一层 { tools: [...] }，两种都认
+    const list = Array.isArray(res) ? res : Array.isArray((res as { tools?: unknown } | null)?.tools) ? ((res as { tools: unknown[] }).tools) : [];
+    for (const t of list) {
       const x = t as { name?: unknown; description?: unknown; inputSchema?: unknown; annotations?: { readOnlyHint?: unknown } };
       if (typeof x?.name !== "string" || !x.name) continue;
       const schema = x.inputSchema && typeof x.inputSchema === "object" ? { ...(x.inputSchema as Record<string, unknown>) } : {};

@@ -1,4 +1,6 @@
-/** 飞书消息卡片（经典 JSON 卡片，直接用 `im +messages-reply --msg-type interactive` 发、`PATCH /im/v1/messages/:id` 改） */
+/** 飞书消息卡片（处理中 / 答案卡是卡片 JSON 2.0，确认卡是经典 JSON 1.0；直接用 `im +messages-reply --msg-type interactive` 发、`PATCH /im/v1/messages/:id` 改） */
+
+import type { CardMeta } from "./stream";
 
 type Template = "blue" | "green" | "orange" | "red" | "grey";
 
@@ -12,9 +14,70 @@ function card(title: string, template: Template, elements: unknown[]): string {
   });
 }
 
-/** 处理过程 / 最终答案卡：进行中是蓝色「处理中」，做完变绿，没做完（失败 / 中断）变红 */
-export function progressCard(text: string, done = false, failed = false): string {
-  return card(failed ? "未完成" : done ? "已完成" : "处理中…", failed ? "red" : done ? "green" : "blue", [{ tag: "markdown", content: clip(text) || "…" }]);
+/** 卡片里的小段文字：去掉会被当成标签的尖括号、换行压成空格、超长截断 */
+const oneLine = (s: string, n: number) => {
+  const t = s.replace(/[<>]/g, " ").replace(/\s+/g, " ").trim();
+  return t.length > n ? t.slice(0, n - 1) + "…" : t;
+};
+
+/** 3m36s / 42s */
+export function fmtDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m${s % 60}s` : `${s}s`;
+}
+
+/**
+ * 处理过程 / 最终答案卡（卡片 JSON 2.0，因为折叠面板和 markdown 表格只有 2.0 支持）：
+ * - 标题 = 任务名，副标题 = 状态；进行中蓝色「处理中…」，做完变绿「已完成」，没做完（失败 / 中断）变红「未完成」
+ * - 先引用一行被问的问题，再是折叠的「思考与工具 · N 次工具调用」（进行中展开看实时进度，做完自动收起）
+ * - 然后是正文（markdown：表格、行内代码、列表都能渲染）
+ * - 底部一行小灰字：耗时 · 模型
+ */
+export function progressCard(text: string, done = false, failed = false, meta: CardMeta = {}): string {
+  const state = failed ? "未完成" : done ? "已完成" : "处理中…";
+  const template: Template = failed ? "red" : done ? "green" : "blue";
+  const finished = done || failed;
+  const md = (content: string, extra: Record<string, unknown> = {}) => ({ tag: "markdown", content, ...extra });
+  const title = meta.title ? oneLine(meta.title, 40) : "";
+  const elements: unknown[] = [];
+
+  if (meta.question?.trim()) elements.push(md(`<font color='grey'>💬 ${oneLine(meta.question, 200)}</font>`));
+
+  const tools = meta.tools ?? [];
+  const n = meta.toolCount ?? tools.length;
+  if (n > 0) {
+    const hidden = n - tools.filter(t => t.startsWith("🔧")).length;
+    const lines = tools.map(t => `\`${t.replace(/[`<>]/g, "'")}\``);
+    if (hidden > 0 && tools.length > 0) lines.unshift(`<font color='grey'>（更早的 ${hidden} 次调用已省略）</font>`);
+    elements.push({
+      tag: "collapsible_panel",
+      expanded: !finished,
+      header: { title: md(`<font color='grey'>思考与工具 · ${n} 次工具调用</font>`) },
+      border: { color: "grey", corner_radius: "6px" },
+      vertical_spacing: "4px",
+      padding: "4px 8px 4px 8px",
+      elements: [md(lines.join("\n") || "…")],
+    });
+  }
+
+  elements.push(md(clip(text) || "…"));
+
+  if (finished && (meta.ms !== undefined || meta.model)) {
+    const foot = [meta.ms !== undefined ? fmtDuration(meta.ms) : "", meta.model ? oneLine(meta.model, 60) : ""].filter(Boolean).join(" · ");
+    elements.push(md(`<font color='grey'>${foot}</font>`, { text_size: "notation" }));
+  }
+
+  return JSON.stringify({
+    schema: "2.0",
+    config: { update_multi: true },
+    header: {
+      template,
+      title: { tag: "plain_text", content: title || state },
+      ...(title ? { subtitle: { tag: "plain_text", content: state } } : {}),
+    },
+    body: { elements },
+  });
 }
 
 export interface ApprovalCardValue {

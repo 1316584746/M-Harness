@@ -13,6 +13,8 @@ rl.on("line", l => {
   const m = JSON.parse(l);
   if (m.method === "plugin/initialize") return send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: 1, plugin: { id }, capabilities: ["x"] } });
   if (m.method === "echo/hello") return send({ jsonrpc: "2.0", id: m.id, result: { echo: m.params, dir: process.env.DBX_PLUGIN_DATA_DIR, pid: process.pid } });
+  if (m.method === "plugin/ping") return send({ jsonrpc: "2.0", id: m.id, result: { ok: true } });
+  if (m.method === "mcp/tools") return send({ jsonrpc: "2.0", id: m.id, result: process.env.TOOLS_AS_OBJECT ? { tools: [{ name: "t1", description: "d" }] } : [{ name: "t1", description: "d", annotations: { readOnlyHint: true } }] });
   if (m.method === "boom") return send({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: "炸了" } });
   if (m.method === "emit") { send({ jsonrpc: "2.0", method: "tick", params: { n: 1 } }); return send({ jsonrpc: "2.0", id: m.id, result: true }); }
   if (m.method === "crash") process.exit(3);
@@ -172,6 +174,32 @@ describe("插件运行：后台程序", () => {
     const h = mk();
     h.trust("com.t.a");
     for (const m of ["plugin/initialize", "plugin/shutdown", "host/x", ""]) expect((await h.request("com.t.a", "backend.invoke", { method: m })).ok).toBe(false);
+  });
+
+  it("AI 工具清单：后台直接返回数组（SSH 就是这样）也认", async () => {
+    install("com.t.a");
+    const h = mk();
+    h.trust("com.t.a");
+    expect(await h.aiTools("com.t.a")).toEqual([{ name: "t1", description: "d", inputSchema: { type: "object", properties: {} }, readOnly: true }]);
+  });
+
+  it("剪贴板：写入随时可以，读取要声明 host.clipboard:read", async () => {
+    install("com.t.a");
+    install("com.t.b", { perms: ["host.clipboard:read"] });
+    let clip = "";
+    const h = new PluginHost({ localDir: path.join(tmp, "plugins"), dataRoot: path.join(tmp, "data"), consentFile: path.join(tmp, "consent.json"), launch: exe => ({ command: process.execPath, args: [exe] }), clipboard: { readText: () => clip, writeText: t => { clip = t; } } });
+    hosts.push(h);
+    expect((await h.request("com.t.a", "host.clipboard.writeText", { text: "abc" })).ok).toBe(true);
+    expect(clip).toBe("abc");
+    expect((await h.request("com.t.a", "host.clipboard.readText", {})).ok).toBe(false);
+    expect(await h.request("com.t.b", "host.clipboard.readText", {})).toEqual({ ok: true, result: "abc" });
+  });
+
+  it("plugin/ping 探活放行（界面靠它判断后台就绪，否则「发送」一直灰）", async () => {
+    install("com.t.a");
+    const h = mk();
+    h.trust("com.t.a");
+    expect(await h.request("com.t.a", "backend.invoke", { method: "plugin/ping" })).toEqual({ ok: true, result: { ok: true } });
   });
 
   it("崩溃后下次调用自动重启；停止后也能再起来", async () => {

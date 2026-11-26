@@ -54,6 +54,15 @@ describe("插件界面的注入脚本", () => {
     expect([...api.decodeBase64(s)]).toEqual([...bytes]);
   });
 
+  it("没有的能力不提供（插件靠它决定显不显示按钮），复制 / 剪贴板走宿主", () => {
+    const { api, posted } = boot();
+    expect(api.openWorkbench).toBeUndefined();
+    expect(api.executeCommand).toBeUndefined();
+    void api.copy("hi");
+    void api.clipboard.readText();
+    expect(posted.filter(p => p.kind === "request").map(p => p.method)).toEqual(["host.clipboard.writeText", "host.clipboard.readText"]);
+  });
+
   it("sendBinary 走宿主的 host.sendBinary", () => {
     const { api, posted } = boot();
     void api.sendBinary("ssh/terminal/in/s1", new Uint8Array([97]));

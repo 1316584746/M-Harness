@@ -104,11 +104,13 @@ export const PLUGIN_SHIM = `(function () {
     readAssetUrl: function (path) { return request("host.readAsset", { path: path, url: true }); },
     setTitle: function (title) { return request("host.setTitle", { title: title }); },
     getTitle: function () { return request("host.getTitle", {}); },
-    openWorkbench: unsupported("openWorkbench"),
-    executeCommand: unsupported("executeCommand"),
-    openFilesystem: unsupported("openFilesystem"),
-    getPlanCapabilities: unsupported("getPlanCapabilities"),
-    explainPlan: unsupported("explainPlan"),
+    // 注意：openWorkbench / executeCommand / openFilesystem / 执行计划 这几个本软件没有，故意不提供：
+    // 插件靠「有没有这个函数」决定是否显示对应按钮（如 XXL-JOB 的「新窗口打开日志」），放个会报错的空壳反而让按钮能点、点了就失败
+    copy: function (text) { return request("host.clipboard.writeText", { text: String(text == null ? "" : text) }).then(function () { return true; }); },
+    clipboard: {
+      writeText: function (text) { return request("host.clipboard.writeText", { text: String(text == null ? "" : text) }).then(function () {}); },
+      readText: function () { return request("host.clipboard.readText", {}); }
+    },
     getTableMetadata: function (req) { return request("host.getTableMetadata", req || {}); },
     queryData: function (req) { return request("host.queryData", req || {}); },
     getConnections: function () { return request("host.getConnections", {}); },

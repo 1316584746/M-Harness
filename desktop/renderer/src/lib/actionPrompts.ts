@@ -1,6 +1,7 @@
 // 自带动作的提示词：写成 markdown 文件放在 src/prompts 里，构建时打进应用。
 // 结构参照 Flowship：_shared.md（所有动作共用的规范）+ action-<id>.md（每个动作自己的流程和产物骨架）。
 import shared from "../prompts/_shared.md?raw";
+import alibaba from "../prompts/_alibaba.md?raw";
 import analysis from "../prompts/action-analysis.md?raw";
 import plan from "../prompts/action-plan.md?raw";
 import build from "../prompts/action-build.md?raw";
@@ -23,14 +24,20 @@ export const ACTION_FILES: Record<string, { file: string; body: string }> = {
 };
 
 /** 共享规范 + 动作自己的那份 */
-export function withShared(body: string): string {
-  return `${SHARED_PROMPT}\n\n---\n\n${body}`;
+export function withShared(body: string, id?: string): string {
+  const base = `${SHARED_PROMPT}\n\n---\n\n${body}`;
+  return id && ALIBABA_ACTIONS.includes(id) ? `${base}\n\n---\n\n${ALIBABA_PROMPT}` : base;
 }
+
+export const ALIBABA_PROMPT = alibaba.trim();
+
+/** 需要附上完整阿里巴巴 Java 开发手册的动作：方案设计、进行开发、代码CR（withShared 传了 id 才附） */
+export const ALIBABA_ACTIONS = ["plan", "build", "review"];
 
 /** 实际发给 AI 的完整提示词：共享规范 + 动作本身 */
 export function builtinPrompt(id: string): string {
   const a = ACTION_FILES[id];
-  return a ? withShared(a.body) : "";
+  return a ? withShared(a.body, id) : "";
 }
 
 export interface PromptVars {

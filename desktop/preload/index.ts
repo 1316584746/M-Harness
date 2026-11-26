@@ -149,6 +149,7 @@ const api: HarnessApi = {
 
   onRunEvent: cb => on<[{ runKey: string; event: any }]>("run:event", p => cb(p.runKey, p.event)),
   onGroupInbound: cb => on<[any]>("group:inbound", cb),
+  onRunAdvance: cb => on<[any]>("run:advance", cb),
   groupAck: (reqId, ok, queued) => ipcRenderer.invoke("group:ack", reqId, ok, queued),
   groupDrop: (reqId, why) => ipcRenderer.invoke("group:drop", reqId, why),
   onApproval: cb => on<[any]>("approval:request", cb),

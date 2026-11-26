@@ -82,9 +82,11 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
   useEffect(() => {
     const repoCfg = (parseCfg(state.configText)?.repos ?? {}) as Record<string, { path?: string }>;
     const list = tasks.tasks
-      .filter(t => t.groupId && !t.done)
+      .filter(t => !t.done)
       .map(t => ({
-        groupId: t.groupId as string,
+        // 没关联需求群的任务 groupId 为空：不参与「群 → 任务」的绑定，只用于飞书里发 /任务 时列出来供选
+        groupId: t.groupId ?? "",
+        updated: t.updated,
         taskId: t.id,
         title: t.title,
         briefing: preamble(t, t.repos.filter(n => repoCfg[n]?.path).map(n => ({ name: n, path: String(repoCfg[n].path) })), state.larkBound),
@@ -136,7 +138,7 @@ function Shell({ state, refresh }: { state: AppState; refresh: () => void }) {
       const repoCfg = (parseCfg(live.current.cfg)?.repos ?? {}) as Record<string, { path?: string }>;
       const repos = t.repos.filter(n => repoCfg[n]?.path).map(n => ({ name: n, path: String(repoCfg[n].path) }));
       const need = s.turns.length === 0 || t.ctxSent !== sigOf(t);
-      const hint = "（这条消息来自飞书需求群：你的回复会原样发回群里，请直接简短、适合在群里读；写文件 / 执行命令会先在群里问群主确认，不要向用户提问等待。）";
+      const hint = "（这条消息来自飞书（需求群，或你和机器人的单聊里选定了这个任务）：你的回复会原样发回群里，请直接简短、适合在群里读；写文件 / 执行命令会先在群里问群主确认，不要向用户提问等待。）";
       void live.current.send(`[群消息] ${m.text}`, undefined, `${need ? preamble(t, repos, live.current.lark) + "\n\n" : ""}${m.text}\n\n${hint}`, { sid: s.id, groupReq: m.reqId, ...(m.images?.length ? { images: m.images } : {}) });
       tasks.update(t.id, { ctxSent: sigOf(t) });
     }

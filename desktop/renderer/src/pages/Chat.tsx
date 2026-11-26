@@ -35,7 +35,6 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
   const [minH, setMinH] = useState(96);
   const bottom = useRef<HTMLDivElement>(null);
   const thread = useRef<HTMLDivElement>(null);
-  useStickBottom(thread);
   const area = useRef<HTMLTextAreaElement>(null);
   const pics = useImageAttach();
 
@@ -68,9 +67,8 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
     }, 0);
   };
 
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [active?.id, turns.length, last?.text, last?.events.length, ask?.id]);
+  // 只有停在底部才跟着往下滚；用户往上翻历史时不再被拽回底部。切换对话 / 发新消息才强制回底部
+  useStickBottom(thread, { follow: [last?.text, last?.events.length, ask?.id], force: `${active?.id}|${turns.length}` });
 
   useEffect(() => {
     const el = area.current;

@@ -105,6 +105,36 @@ describe("卡片", () => {
   it("进度卡：进行中蓝、完成绿", () => {
     expect(JSON.parse(progressCard("hi")).header.template).toBe("blue");
     expect(JSON.parse(progressCard("hi", true)).header.template).toBe("green");
+    expect(JSON.parse(progressCard("hi", true, true)).header.template).toBe("red");
+  });
+  it("答案卡（2.0）：标题 = 任务名、副标题 = 状态，问题 → 折叠的工具面板 → 正文 → 耗时·模型", () => {
+    const c = JSON.parse(progressCard("| a | b |\n|---|---|\n| 1 | 2 |", true, false, { title: "Harness应用构想探讨", question: "为啥这边新建的分支 IDEA搜不到？", model: "claude-sonnet-5-5", toolCount: 8, tools: ["🔧 shell {\"command\":\"git branch\"}"], ms: 216_000 }));
+    expect(c.schema).toBe("2.0");
+    expect(c.header).toMatchObject({ template: "green", title: { content: "Harness应用构想探讨" }, subtitle: { content: "已完成" } });
+    const els = c.body.elements;
+    expect(els.map((e: any) => e.tag)).toEqual(["markdown", "collapsible_panel", "markdown", "markdown"]);
+    expect(els[0].content).toContain("IDEA搜不到");
+    expect(els[1].expanded).toBe(false); // 做完收起
+    expect(els[1].header.title.content).toContain("思考与工具 · 8 次工具调用");
+    expect(els[2].content).toContain("| a | b |"); // 表格原样交给 markdown
+    expect(els[3].content).toContain("3m36s · claude-sonnet-5-5");
+    expect(els[3].text_size).toBe("notation");
+  });
+  it("答案卡：进行中面板展开、没有底部耗时；没有标题时标题就是状态；没有工具就没有面板", () => {
+    const running = JSON.parse(progressCard("⏳ 正在处理…", false, false, { toolCount: 1, tools: ["🔧 x"], ms: 5 }));
+    expect(running.header.subtitle).toBeUndefined();
+    expect(running.header.title.content).toBe("处理中…");
+    const panel = running.body.elements.find((e: any) => e.tag === "collapsible_panel");
+    expect(panel.expanded).toBe(true);
+    expect(running.body.elements.at(-1).content).toBe("⏳ 正在处理…");
+    const plain = JSON.parse(progressCard("答案", true));
+    expect(plain.body.elements.map((e: any) => e.tag)).toEqual(["markdown"]);
+  });
+  it("答案卡：问题 / 工具里的尖括号和反引号不会破坏 markdown", () => {
+    const c = JSON.parse(progressCard("x", true, false, { question: "a <at id=1> b\nc", toolCount: 1, tools: ["🔧 echo `<b>`"] }));
+    expect(c.body.elements[0].content).not.toMatch(/<at/);
+    expect(c.body.elements[0].content).not.toContain("\n");
+    expect(c.body.elements[1].elements[0].content).not.toContain("<b>");
   });
   it("解析 card.action.trigger：几种字段写法", () => {
     const v = { k: "mh-approval", t: "a1", v: "yes" };

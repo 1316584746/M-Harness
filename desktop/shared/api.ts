@@ -317,6 +317,8 @@ export interface TaskGroupBindingDTO {
   repos: string[];
   /** 群里 AI 的回复方式（global = 跟随全局） */
   reply?: "global" | "stream" | "whole";
+  /** 任务最近更新时间（毫秒）：飞书里发 /任务 列表时按它从新到旧排 */
+  updated?: number;
 }
 
 export interface FeishuSetupResult {
@@ -353,6 +355,15 @@ export interface RunRequest {
 }
 
 /** 飞书需求群里群主的一条消息：交给对应任务的对话处理（带任务完整上下文），结果由主进程回复到群里 */
+/** Agent 的 advance_next 登记：想在本轮结束后自动进入下一步 */
+export interface AdvanceRequestDTO {
+  runKey: string;
+  action: string;
+  instruction: string;
+  /** 用户原话（Agent 引用的授权那句） */
+  userWords: string;
+}
+
 export interface GroupInboundDTO {
   reqId: string;
   taskId: string;
@@ -670,6 +681,8 @@ export interface HarnessApi {
 
   onRunEvent(cb: (runKey: string, event: HarnessEvent) => void): () => void;
   onGroupInbound(cb: (m: GroupInboundDTO) => void): () => void;
+  /** Agent 登记了「本轮结束后自动进入下一步」（advance_next）；是否放行由界面按用户原话核对 */
+  onRunAdvance(cb: (m: AdvanceRequestDTO) => void): () => void;
   onApproval(cb: (req: ApprovalRequest) => void): () => void;
   onAsk(cb: (req: AskRequest) => void): () => void;
   onChannelLog(cb: (line: string) => void): () => void;
