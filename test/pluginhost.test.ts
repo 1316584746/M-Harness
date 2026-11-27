@@ -13,6 +13,7 @@ rl.on("line", l => {
   const m = JSON.parse(l);
   if (m.method === "plugin/initialize") return send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: 1, plugin: { id }, capabilities: ["x"] } });
   if (m.method === "echo/hello") return send({ jsonrpc: "2.0", id: m.id, result: { echo: m.params, dir: process.env.DBX_PLUGIN_DATA_DIR, pid: process.pid } });
+  if (m.method === "scope/env") { const fs = require("node:fs"), p = require("node:path"); const home = process.env.HARNESS_HOME || ""; return send({ jsonrpc: "2.0", id: m.id, result: { home, dir: process.env.DBX_PLUGIN_DATA_DIR, pid: process.pid, traces: home ? fs.readdirSync(p.join(home, ".traces")).sort() : null } }); }
   if (m.method === "plugin/ping") return send({ jsonrpc: "2.0", id: m.id, result: { ok: true } });
   if (m.method === "mcp/tools") return send({ jsonrpc: "2.0", id: m.id, result: process.env.TOOLS_AS_OBJECT ? { tools: [{ name: "t1", description: "d" }] } : [{ name: "t1", description: "d", annotations: { readOnlyHint: true } }] });
   if (m.method === "boom") return send({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: "炸了" } });
@@ -195,6 +196,40 @@ describe("插件运行：后台程序", () => {
     expect(await h.request("com.t.b", "host.clipboard.readText", {})).toEqual({ ok: true, result: "abc" });
   });
 
+  it("只看某几次运行：后台只看到这几次运行的 trace，和正常后台互不串，停掉后临时目录被清掉", async () => {
+    install("com.t.a");
+    const src = path.join(tmp, "traces-src");
+    fs.mkdirSync(src, { recursive: true });
+    for (const r of ["r1", "r2", "r3"]) fs.writeFileSync(path.join(src, `${r}.jsonl`), "{}\n");
+    const h = new PluginHost({ localDir: path.join(tmp, "plugins"), dataRoot: path.join(tmp, "data"), consentFile: path.join(tmp, "consent.json"), launch: exe => ({ command: process.execPath, args: [exe] }), scopeSource: () => ({ traceDir: src, config: { limits: { contextTokens: 9 }, apiKey: "x" } }) });
+    hosts.push(h);
+    h.trust("com.t.a");
+    const call = (scope?: unknown) => h.request("com.t.a", "backend.invoke", { method: "scope/env" }, scope);
+    const a = (await call({ key: "chat-a", runs: ["r1", "r2"] })) as { ok: true; result: { home: string; dir: string; pid: number; traces: string[] } };
+    const b = (await call({ key: "chat-b", runs: ["r3"] })) as typeof a;
+    const plain = (await call()) as { ok: true; result: { home: string; pid: number; traces: string[] | null } };
+    expect(a.result.traces).toEqual(["r1.jsonl", "r2.jsonl"]);
+    expect(b.result.traces).toEqual(["r3.jsonl"]);
+    expect(plain.result.traces).toBeNull(); // 正常后台没有被设成临时家目录
+    expect(new Set([a.result.pid, b.result.pid, plain.result.pid]).size).toBe(3);
+    expect(a.result.dir.startsWith(a.result.home)).toBe(true);
+    // 同一个范围再调：还是同一个后台；又多了一轮就同步进去
+    const a2 = (await call({ key: "chat-a", runs: ["r1", "r2", "r3"] })) as typeof a;
+    expect(a2.result.pid).toBe(a.result.pid);
+    expect(a2.result.traces).toEqual(["r1.jsonl", "r2.jsonl", "r3.jsonl"]);
+    // 同一个范围同时来好几个请求：只起一个后台
+    const burst = (await Promise.all([1, 2, 3].map(() => call({ key: "chat-c", runs: ["r1"] })))) as (typeof a)[];
+    expect(new Set(burst.map(x => x.result.pid)).size).toBe(1);
+    // 不合法的范围（路径穿越）直接当没带，走正常后台
+    const bad = (await call({ key: "../x", runs: ["r1"] })) as typeof plain;
+    expect(bad.result.traces).toBeNull();
+    const home = a.result.home;
+    expect(fs.existsSync(home)).toBe(true);
+    await h.stop("com.t.a");
+    await new Promise(r => setTimeout(r, 400));
+    expect(fs.existsSync(home)).toBe(false);
+  });
+
   it("plugin/ping 探活放行（界面靠它判断后台就绪，否则「发送」一直灰）", async () => {
     install("com.t.a");
     const h = mk();
@@ -215,6 +250,20 @@ describe("插件运行：后台程序", () => {
     await h.stop("com.t.a");
     const pid3 = ((await h.request("com.t.a", "backend.invoke", { method: "echo/hello" })).result as { pid: number }).pid;
     expect(pid3).not.toBe(pid2);
+  });
+
+  it("卸载期间不会再把后台拉起来；卸载完（endRemove）后又能正常起", async () => {
+    install("com.t.a");
+    const h = mk();
+    h.trust("com.t.a");
+    await h.request("com.t.a", "backend.invoke", { method: "echo/hello" });
+    h.beginRemove("com.t.a");
+    await h.stop("com.t.a");
+    const r = await h.request("com.t.a", "backend.invoke", { method: "echo/hello" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("正在卸载");
+    h.endRemove("com.t.a");
+    expect((await h.request("com.t.a", "backend.invoke", { method: "echo/hello" })).ok).toBe(true);
   });
 
   it("超时会报错而不是一直挂着", async () => {

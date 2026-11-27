@@ -4,6 +4,7 @@ import { pluginUrl } from "../../../shared/pluginhost";
 import { connKindOf, type ConnKind } from "../../../shared/connections";
 import { api } from "../api";
 import { isBenignPluginError } from "../lib/pluginErr";
+import type { PluginFocus, PluginScope } from "../lib/pluginFocus";
 import { GitlabFromHosts } from "./GitlabFromHosts";
 import { Icon } from "./Icon";
 
@@ -53,8 +54,12 @@ function DbPicker({ access, picked, onToggle }: { access: PluginDbAccess; picked
  * 它需要的一切都通过 postMessage 找这里，再转给主进程。
  * 带本机程序的插件，第一次运行前先让用户确认。
  */
-export function PluginView({ plugin, theme, active, onManageConnections }: { plugin: UiPlugin; theme: string; active: boolean; onManageConnections?: (kind?: ConnKind) => void }) {
+export function PluginView({ plugin, theme, active, onManageConnections, focus, scope }: { plugin: UiPlugin; theme: string; active: boolean; onManageConnections?: (kind?: ConnKind) => void; focus?: PluginFocus; scope?: PluginScope }) {
   const frame = useRef<HTMLIFrameElement>(null);
+  const focusRef = useRef(focus);
+  focusRef.current = focus;
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
   const [trusted, setTrusted] = useState(plugin.trusted);
   const [err, setErr] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -164,14 +169,15 @@ export function PluginView({ plugin, theme, active, onManageConnections }: { plu
         const caps = ((await api.pluginRequest(plugin.id, "host.getCapabilities", {})).result ?? {}) as Record<string, boolean>;
         const dc = connsRef.current.find(c => c.id === selRef.current);
         const ctx = kind && selRef.current ? { ...baseCtx.current, ...(kind === "database" ? { connectionId: selRef.current } : connCtx(selRef.current)), ...(kind === "database" && dc ? { id: dc.id, name: dc.name, dbType: dc.dbType, database: dc.database ?? "" } : {}) } : baseCtx.current;
-        post({ kind: "init", context: ctx, locale: "zh-CN", theme: { appearance: theme, tokens: themeTokens() }, capabilities: caps });
+        post({ kind: "init", context: focusRef.current ? { ...ctx, focus: focusRef.current } : ctx, locale: "zh-CN", theme: { appearance: theme, tokens: themeTokens() }, capabilities: caps });
       } else if (m.kind === "request" && typeof m.id === "number" && typeof m.method === "string") {
-        const r = await api.pluginRequest(plugin.id, m.method, m.params);
+        // 只看某几次运行：后台请求都带上范围，主进程用只含这几次运行的临时家目录来答
+        const r = await api.pluginRequest(plugin.id, m.method, m.params, m.method === "backend.invoke" ? scopeRef.current : undefined);
         if (!r.ok && m.method === "backend.invoke") setErr(isBenignPluginError(r.error ?? "") ? "" : (r.error ?? ""));
         else if (r.ok && m.method === "backend.invoke") setErr("");
         post({ kind: "response", id: m.id, ...(r.ok ? { result: r.result ?? null } : { error: r.error ?? "失败" }) });
       } else if (m.kind === "notify" && typeof m.method === "string") {
-        void api.pluginRequest(plugin.id, "backend.notify", { method: m.method, params: m.params });
+        void api.pluginRequest(plugin.id, "backend.notify", { method: m.method, params: m.params }, scopeRef.current);
       }
     };
     window.addEventListener("message", onMsg);
@@ -324,7 +330,7 @@ export function PluginView({ plugin, theme, active, onManageConnections }: { plu
           </button>
         </div>
       ) : (
-        (!kind || (conns && sel)) && <iframe key={`${kind === "database" ? sel : "f"}:${gen}`} ref={frame} className="plug-frame" data-testid="plugin-frame" title={plugin.name} sandbox="allow-scripts" src={pluginUrl(plugin.id)} onLoad={() => setLoaded(true)} />
+        (!kind || (conns && sel)) && <iframe key={`${kind === "database" ? sel : "f"}:${gen}`} ref={frame} className="plug-frame" data-testid="plugin-frame" title={plugin.name} sandbox="allow-scripts" src={pluginUrl(plugin.id) + (focus?.tab ? `?focus=${encodeURIComponent(focus.tab)}` : "")} onLoad={() => setLoaded(true)} />
       )}
     </div>
   );

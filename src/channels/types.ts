@@ -20,6 +20,8 @@ export interface IncomingMessage {
   approvalCard?: ApprovalCardIO;
   /** 流式回复：先发一条「处理中」，过程中编辑它，做完改成最终答案；不支持（或发不出）时返回 undefined，调用方退回整条发送 */
   stream?: (meta?: CardMeta) => Promise<StreamHandle | undefined>;
+  /** 把本机一张图片作为图片消息回到这条消息下（Agent 生成的截图等）；不支持的通道不提供 */
+  sendImage?: (file: string) => Promise<boolean>;
   /** 给这条消息点表情回应：收到 = Get（收到了、正在处理），做完 = DONE；不支持的通道不提供 */
   react?: (emoji: "Get" | "DONE") => Promise<void>;
 }

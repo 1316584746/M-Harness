@@ -497,6 +497,14 @@ try {
   await until(`${q("mcp-picker-empty")}`);
   ok("MCP 菜单里没有内置工具", await ev(`!document.querySelector('[data-testid^="mcp-picker-tool-"]') && !document.querySelector('[data-testid="tool-http_request"]')`));
   await ev(click("mcp-picker"));
+  // 输入框顶部的「上下文」按钮：新对话还没跑过，弹窗里提示稍后再看（不显示别的对话）；Esc 关闭
+  ok("输入框顶部有「上下文」按钮", await ev(`!!document.querySelector('.composer-top [data-testid="chat-ctx-btn"]')`));
+  await ev(click("chat-ctx-btn"));
+  await until(`${q("session-ctx-dialog")}`);
+  ok("新对话点「上下文」：提示还没跑完过一轮，不嵌插件页", await ev(`!!${q("session-ctx-none")} && !${q("session-ctx")}`));
+  await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  await until(`!${q("session-ctx-dialog")}`);
+  ok("Esc 关闭上下文弹窗", true);
   await ev(click("model-trigger"));
   await until(`${q("model-alpha-1")}`);
   await shot("3b-model-menu");
@@ -1156,7 +1164,7 @@ else { console.error("unknown"); process.exit(2); }`,
   await ev(click("gantt-bar"));
   await until(`document.querySelector('[data-testid="task-item"]')`);
   ok("排期标题旁显示当前登录账号", (await ev(`document.querySelector('[data-testid="wb-user"]')?.innerText ?? ''`)).includes("测试用户"));
-  ok("「进行中的需求」按需求列出（不管有没有排期），每个需求下是我负责的节点 / 子任务", await ev(`(() => { const a = [...document.querySelectorAll('[data-testid="wb-active-item"]')]; const t = a.map(x => x.innerText); return a.length === 2 && t[0].includes('飞书排期A') && t[0].includes('后端开发') && t[0].includes('技术排期') && t[1].includes('飞书进行中无排期') && t[1].includes('技术开发联调'); })()`));
+  ok("「进行中的需求」只列我名下有子任务或排期的需求；只挂名负责人、名下没有子任务也没有排期的（飞书进行中无排期）单独收进折叠的「仅挂名负责人」", await ev(`(() => { const a = [...document.querySelectorAll('[data-testid="wb-active-item"]')]; const t = a.map(x => x.innerText); const nom = document.querySelector('[data-testid="wb-nominal"]'); return a.length === 1 && t[0].includes('飞书排期A') && t[0].includes('后端开发') && t[0].includes('技术排期') && !document.body.innerText.includes('飞书进行中无排期') && !!nom && nom.querySelector('em').innerText === '1'; })()`));
   ok("节点是需求上的小标签，下面的列表只放子任务", await ev(`(() => { const it = document.querySelector('[data-testid="wb-active-item"]'); return !!it.querySelector('[data-testid="wb-node"]') && [...it.querySelectorAll('[data-testid="wb-child"]')].every(x => x.dataset.kind === 'subtask'); })()`));
   ok("子任务显示名字、负责人、人天；我名下已做完的也在，别人的子任务不在", await ev(`(() => { const r = [...document.querySelectorAll('[data-testid="wb-active-item"]')[0].querySelectorAll('[data-testid="wb-child"]')]; const t = r.map(x => x.innerText); return r.length === 2 && t[0].includes('后端开发') && t[0].includes('测试用户') && t[0].includes('1 人天') && t[1].includes('已做完的联调') && t[1].includes('0.5 人天') && !!r[1].querySelector('.sub-check.on') && !r[0].querySelector('.sub-check.on') && !document.body.innerText.includes('别人的子任务'); })()`));
   // 子任务列表可以折叠 / 展开
@@ -1186,6 +1194,8 @@ else { console.error("unknown"); process.exit(2); }`,
   await until(`!!${row(0)}.querySelector('.sub-check.on')`);
   await until(`true`);
   ok("点圆完成子任务，飞书那边也变成已完成", await (async () => { for (let i = 0; i < 20; i++) { if (subState()["101"]?.is_finished === true) return true; await sleep(250); } return false; })());
+  // 上一次点圆还在读回飞书的结果时（busy）按钮点不动，等它落定再点第二下
+  await until(`!${row(0)}.querySelector('.busy')`);
   await ev(`${row(0)}.querySelector('[data-testid="wb-child-check"]').click()`);
   await until(`!${row(0)}.querySelector('.sub-check.on')`);
   ok("再点一下回滚成未完成，飞书那边也回滚", await (async () => { for (let i = 0; i < 20; i++) { if (subState()["101"]?.is_finished === false) return true; await sleep(250); } return false; })());
@@ -1197,7 +1207,7 @@ else { console.error("unknown"); process.exit(2); }`,
   await ev(`${act0}.querySelector('[data-testid="sub-add-ok"]').click()`);
   await until(`${act0}.querySelectorAll('[data-testid="wb-child"]').length === 3 && ${act0}.innerText.includes('新增的测试子任务')`);
   ok("点「新增任务」输入名称：飞书那边（假飞书）建出了子任务，列表里马上多一行，输入框收起", (subState().__created || []).some(s => s.sub_task_name === "新增的测试子任务") && (await ev(`!${act0}.querySelector('[data-testid="sub-add-name"]')`)));
-  ok("需求自己的排期只显示、不能在本软件里改", await ev(`document.querySelectorAll('[data-testid="wb-active-item"]')[1].querySelector('[data-testid="wb-self-sched"]').tagName !== 'BUTTON'`));
+  ok("需求自己的排期只显示、不能在本软件里改", await ev(`document.querySelectorAll('[data-testid="wb-active-item"]')[0].querySelector('[data-testid="wb-self-sched"]').tagName !== 'BUTTON'`));
   ok("同一个需求只出现一次，未排期里不重复也不含进行中的", await ev(`(() => { const u = [...document.querySelectorAll('[data-testid="wb-todo"]')].map(x => x.querySelector('.wb-todo-title').innerText); return u.length === 1 && u[0] === '飞书未排期'; })()`));
   await ev(click("wb-sub-toggle"));
   await until(`document.querySelector('[data-testid="wb-unscheduled"] [data-testid="wb-child"]')`);
@@ -1333,14 +1343,17 @@ else { console.error("unknown"); process.exit(2); }`,
   ok("进行开发前基于基线分支新建 feature-需求名称-日期 并切过去", sb?.[0]?.ok === true && sb[0].created === true && sb[0].base === "main" && /^feature-飞书排期A-\d{8}$/.test(feat) && sb[0].branch === feat);
   g("switch", "main");
   g("branch", "-D", feat);
-  await until(`document.querySelector('[data-testid="task-diff"]').innerText.includes('+2')`);
-  ok("改动统计的是关联仓库相对 HEAD 的新增 / 删除行数", await ev(`document.querySelector('[data-testid="task-diff"]').innerText.includes('+2')`));
+  await until(`document.querySelector('[data-testid="task-diff"]').innerText.includes('+4')`);
+  ok("改动统计的是关联仓库相对基线分支的新增 / 删除行数（README 改了 2 行 + 两个未跟踪文件各 1 行 = +4，含未提交的）", await ev(`document.querySelector('[data-testid="task-diff"]').innerText.includes('+4')`));
   await ev(click("task-ctx-btn"));
+  await until(`document.querySelector('[data-testid="ctx-dialog"]')`);
+  ok("点「上下文」默认是会话上下文（还没跑过一轮：提示稍后再看，不会显示别的对话）", await ev(`document.querySelector('[data-testid="ctx-tab-session"]').getAttribute('aria-selected') === 'true' && !!document.querySelector('[data-testid="session-ctx-none"]') && !document.querySelector('[data-testid="ctx-content"]')`));
+  await ev(click("ctx-tab-docs"));
   await until(`document.querySelector('[data-testid="ctx-content"]')`);
   await ev(setVal('[data-testid="ctx-content"]', "接口文档：见群公告", "HTMLTextAreaElement", "input"));
   await ev(click("ctx-add"));
+  ok("任务文档写了内容后，上下文弹窗里「任务文档」标签的计数变成 1", await ev(`(document.querySelector('[data-testid="ctx-dialog"]')?.querySelector('[data-testid="ctx-tab-docs"] .num')?.innerText ?? '') === '1'`));
   await ev(`document.querySelector('[data-testid="ctx-dialog"] .cx-x').click()`);
-  ok("任务上下文写了内容后计数变成 1", await ev(`document.querySelector('[data-testid="task-ctx-btn"] .num').innerText === '1'`));
   await until(`document.querySelector('[data-testid="task-mcp-num"]') && /\\d+\\/\\d+/.test(document.querySelector('[data-testid="task-mcp-num"]').innerText)`);
   ok("MCP 显示 已连接 / 已启用 数量", true);
   await shot("0e-task");
@@ -1500,7 +1513,8 @@ else { console.error("unknown"); process.exit(2); }`,
   await until(`document.querySelector('[data-testid="office-switch-feishu"]')`);
   await officeOn("feishu");
   await until(`document.querySelector('[data-testid="feishu-integration"]')`);
-  ok("启用飞书平台会关掉钉钉项目管理", (c => !!c.feishuProject && !c.dingtalkProject)(JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations));
+  await sleep(800); // 配置是异步写盘的，等一下再读文件
+  ok("启用飞书平台：飞书卡片亮起、钉钉卡片关掉（关掉的平台设置保留，下次打开恢复）", await ev(`document.querySelector('[data-testid="office-card-feishu"]').dataset.on === 'true' && document.querySelector('[data-testid="office-card-dingtalk"]').dataset.on === 'false'`));
   await officeOn("dingtalk");
   ok("启用钉钉平台会关掉飞书项目", (c => !!c.dingtalkProject && !c.feishuProject)(JSON.parse(fs.readFileSync(path.join(home, "harness.config.json"), "utf8")).integrations));
   await shot("0h-project-exclusive");
@@ -1547,12 +1561,16 @@ else { console.error("unknown"); process.exit(2); }`,
   const mkVer = v => {
     const d = path.join(dbxRoot, "plugins", "io.dbx.ssh", "versions", v);
     fs.mkdirSync(d, { recursive: true });
-    fs.writeFileSync(path.join(d, "manifest.json"), "{}");
+    // 要有后台程序和 mcp 工具声明，「让 AI 使用插件」里才会列出它
+    fs.writeFileSync(path.join(d, "manifest.json"), JSON.stringify({ id: "io.dbx.ssh", name: "Terminal", version: v, permissions: ["host.ai"], entrypoints: { backend: { executable: "bin/x" } }, contributions: [{ type: "mcp", id: "m", tools: { list_hosts: {}, run: {} } }] }));
   };
   mkVer("0.7.13");
   await ev(click("plugin-refresh"));
   await sleep(800);
   ok("DBX 里装了同一个插件，不算本软件已安装：商店里仍是未安装，可以直接装", await ev(`${dbxCard}.dataset.state === 'none' && !!${dbxCard}.querySelector('[data-testid="plugin-install"]')`));
+  // 「让 AI 使用插件」只列本软件里装好的插件：把刚卸掉的再装回来
+  await ev(`${dbxCard}.querySelector('[data-testid="plugin-install"]').click()`);
+  await until(`${dbxCard}?.dataset.state === 'installed'`, 20000);
   await ev(click("plugin-tab-settings"));
   await until(`document.querySelector('[data-testid="ai-plugin-row"]')`);
   await sleep(400);
@@ -1567,6 +1585,13 @@ else { console.error("unknown"); process.exit(2); }`,
   await sleep(700);
   ok("关掉后不再给 AI 用", aiOn().length === 0);
   ok("设置里不再有 DBX 专用的桥接卡和「npm i -g @dbx-app/mcp-server」的提示", await ev(`!document.querySelector('[data-testid="dbx-bridge"]') && !document.body.innerText.includes('mcp-server')`));
+  // 上面为了「让 AI 使用插件」把插件装回来了，这里再卸掉，回到「本软件里什么都没装」
+  await ev(click("plugin-tab-installed"));
+  await until(`document.querySelector('[data-testid="installed-row"][data-key="DBX 插件中心:io.dbx.ssh"]')`);
+  await ev(`document.querySelector('[data-testid="installed-row"][data-key="DBX 插件中心:io.dbx.ssh"]').click()`);
+  await until(`document.querySelector('[data-testid="installed-detail"]')?.dataset.key === 'DBX 插件中心:io.dbx.ssh'`);
+  await ev(click("installed-uninstall"));
+  await until(`!document.querySelector('[data-testid="installed-detail"]')`, 10000);
   await ev(click("plugin-tab-installed"));
   await until(`document.querySelector('[data-testid="plugin-installed-empty"]')`);
   ok("已安装页只列装在本软件里的插件，DBX 里装的不列出，tab 上也没有数量", await ev(`!document.querySelector('[data-testid="installed-row"]') && !document.querySelector('[data-testid="plugin-tab-installed"] .px-count')`));
@@ -1645,6 +1670,9 @@ else { console.error("unknown"); process.exit(2); }`,
 
     // 商店里出现第三方仓库的插件，能直接装
     await ev(click("plugin-tab-store"));
+    // 商店一次只看一个插件库：切到第三方仓库
+    await until(`[...document.querySelectorAll('[data-testid="plugin-lib"] option')].some(o => o.value === '第三方仓库')`);
+    await ev(setVal('[data-testid="plugin-lib"]', "第三方仓库", "HTMLSelectElement", "change"));
     await until(`document.querySelector('[data-testid="plugin-card"][data-key="第三方仓库:com.third.tool"]')`);
     ok("商店里出现第三方仓库的插件，来源是这个仓库", true);
     await ev(`document.querySelector('[data-testid="plugin-card"][data-key="第三方仓库:com.third.tool"] [data-testid="plugin-install"]').click()`);
@@ -1717,7 +1745,7 @@ else { console.error("unknown"); process.exit(2); }`,
       '  await dbxPlugin.storage.set("k", { v: 1 });',
       '  const st = await dbxPlugin.storage.get("k");',
       '  let net = "open"; try { await fetch("https://not-declared.example.org/x"); } catch (e) { net = "blocked"; }',
-      '  let nosup = "ok"; try { await dbxPlugin.openWorkbench("x", {}); } catch (e) { nosup = e.message; }',
+      '  let nosup = "ok"; try { await dbxPlugin.ai.listProviders(); } catch (e) { nosup = e.message; }',
       '  await rep({ ctx: ctx.pluginId, n: r.n + 1, store: st, net, nosup, theme: root.dataset.dbxTheme, primary: root.style.getPropertyValue("--color-primary"), kit: !!getComputedStyle(root).getPropertyValue("--color-border") });',
       '  await dbxPlugin.invoke("emit");',
       '});',

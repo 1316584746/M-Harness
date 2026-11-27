@@ -1,5 +1,6 @@
 /* ───────── 设计变量 ───────── */
 :root {
+  color-scheme: light;
   --font: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", system-ui, -apple-system, sans-serif;
   --mono: "Cascadia Code", "JetBrains Mono", Consolas, "SFMono-Regular", Menlo, monospace;
 
@@ -39,6 +40,7 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark; /* 系统自带的控件（下拉列表、滚动条、日期选择）跟着夜间模式 */
   --bg: #181818;
   --surface: #1e1e1e;
   --surface-2: #272727;
@@ -695,6 +697,264 @@ pre.mini {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+.thread-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 对话右侧的提问导航：每问一根短线，当前那根更长；悬停看摘要，点击跳转 */
+.turn-rail {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  max-height: 60%;
+}
+.tr-tick {
+  position: relative;
+  flex: 0 1 10px;
+  min-height: 3px;
+  width: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  cursor: pointer;
+}
+.tr-line {
+  width: 10px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  transition: width 0.12s, background 0.12s;
+}
+.tr-tick:hover .tr-line,
+.tr-tick:focus-visible .tr-line {
+  width: 16px;
+  background: var(--text-3);
+}
+.tr-tick.on .tr-line {
+  width: 20px;
+  background: var(--text-2);
+}
+.tr-card {
+  position: absolute;
+  right: 32px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 280px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  pointer-events: none;
+}
+.tr-tick:hover .tr-card,
+.tr-tick:focus-visible .tr-card {
+  display: flex;
+}
+.tr-card b,
+.tr-card em {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-style: normal;
+}
+.tr-card b {
+  -webkit-line-clamp: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.tr-card em {
+  -webkit-line-clamp: 3;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+@media (max-width: 960px) {
+  .turn-rail {
+    display: none;
+  }
+}
+
+/* 「已编辑 N 个文件」卡片 + 悬停的改动预览 */
+.cc {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.cc-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+}
+.cc-ico {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex: none;
+}
+.cc-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.cc-title b {
+  font-size: 14px;
+  font-weight: 600;
+}
+.cc-sum,
+.cc-num {
+  font-size: 12px;
+  font-family: var(--mono);
+}
+.cc i {
+  font-style: normal;
+  font-weight: 600;
+}
+.cc i.add {
+  color: var(--ok);
+}
+.cc i.del {
+  color: var(--bad);
+}
+.cc-list {
+  border-top: 1px solid var(--border);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.cc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  cursor: default;
+}
+.cc-row:last-child {
+  border-bottom: 0;
+}
+.cc-row:hover,
+.cc-row.on {
+  background: var(--surface-2);
+}
+.cc-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+.cc-tag {
+  font-size: 11px;
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 6px;
+}
+.cc-pop {
+  position: fixed;
+  z-index: 1000;
+  max-height: 380px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #1c1d22;
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+}
+.cc-pop-head {
+  padding: 8px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: #9aa0ad;
+  border-bottom: 1px solid #2c2e36;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
+}
+.cc-diff {
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #d7dae0;
+  padding: 4px 0;
+}
+.cc-diff.new {
+  box-shadow: inset 3px 0 0 #2ea043;
+}
+.cc-diff.del {
+  box-shadow: inset 3px 0 0 #f85149;
+}
+.cc-l {
+  display: flex;
+  min-width: max-content;
+}
+.cc-no {
+  flex: none;
+  width: 52px;
+  padding-right: 10px;
+  text-align: right;
+  color: #6b7280;
+  user-select: none;
+}
+.cc-sign {
+  flex: none;
+  width: 18px;
+  text-align: center;
+  user-select: none;
+}
+.cc-code {
+  white-space: pre;
+  padding-right: 16px;
+}
+.cc-l.add {
+  background: rgba(46, 160, 67, 0.2);
+}
+.cc-l.add .cc-sign {
+  color: #56d364;
+}
+.cc-l.del {
+  background: rgba(248, 81, 73, 0.18);
+}
+.cc-l.del .cc-sign {
+  color: #ff7b72;
+}
+.cc-l.hunk {
+  background: rgba(130, 170, 255, 0.1);
+  color: #82aaff;
+}
+.cc-empty {
+  padding: 14px;
+  color: #9aa0ad;
+  font-family: var(--font);
 }
 .thread-inner {
   max-width: 780px;
@@ -4134,8 +4394,28 @@ body.resizing-nav {
   background: transparent;
   color: var(--text);
 }
-.px-toolbar .select {
+/* 下拉框：原来的 .select 类没有任何样式，夜间模式下是白底的系统控件，这里和 .input 对齐 */
+.px-toolbar select.select {
   height: 32px;
+  appearance: none;
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238c8c98' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0 30px 0 12px;
+  outline: 0;
+  cursor: pointer;
+  transition: border-color 0.12s;
+}
+.px-toolbar select.select:focus {
+  border-color: var(--accent);
+}
+.px-toolbar select.select option {
+  background: var(--surface);
+  color: var(--text);
 }
 .px-lib-sel { max-width: 220px; flex: none; }
 .px-view {
@@ -8700,3 +8980,16 @@ button.ft-row.tool:not(.can):hover{background:none}
   color: var(--bad);
 }
 
+
+/* 会话上下文：直接嵌「上下文洞察」插件的上下文页 */
+.sc-modal { width: min(1180px, 96vw); height: min(86vh, 900px); max-height: 92vh; padding: 14px 16px 16px; border-radius: 16px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+.sc-body { flex: 1; min-height: 0; display: flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.sc-body .plug-view { flex: 1; min-width: 0; }
+.sc-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 40px 20px; color: var(--text-3); font-size: 13px; text-align: center; }
+.sc-empty b { color: var(--text); font-size: 15px; }
+.cx-tabs { display: flex; gap: 4px; margin: -2px 0 0; }
+.cx-tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid transparent; border-radius: 8px; background: none; color: var(--text-2); font: inherit; font-size: 13px; cursor: pointer; }
+.cx-tab:hover { background: var(--surface-2); color: var(--text); }
+.cx-tab.on { background: var(--surface-2); border-color: var(--border); color: var(--text); font-weight: 600; }
+.cx-tab .num { color: var(--text-3); font-weight: 400; }
+.sc-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 12px; }

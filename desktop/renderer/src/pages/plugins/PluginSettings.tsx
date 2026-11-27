@@ -8,7 +8,7 @@ import type { PackageInstall } from "../../lib/pkgInstall";
 import { AiPlugins } from "./AiPlugins";
 import { Msg } from "./common";
 
-function Card({ icon, title, desc, right, children, testid }: { icon: IconName; title: string; desc: ReactNode; right?: ReactNode; children?: ReactNode; testid?: string }) {
+function Card({ icon, title, desc, right, children, testid }: { icon: IconName; title: string; desc?: ReactNode; right?: ReactNode; children?: ReactNode; testid?: string }) {
   return (
     <section className="px-set" data-testid={testid}>
       <div className="px-set-head">
@@ -17,7 +17,7 @@ function Card({ icon, title, desc, right, children, testid }: { icon: IconName; 
         </span>
         <div className="px-set-title">
           <h3>{title}</h3>
-          <p>{desc}</p>
+          {desc && <p>{desc}</p>}
         </div>
         {right}
       </div>
@@ -275,7 +275,7 @@ export function PluginSettings({ state, onChanged, market, loading, reload, pkg 
         )}
       </section>
 
-      <Card icon="bot" title="让 AI 使用插件" desc="已装的插件如果自带 AI 工具（DBX 插件清单里有 mcp 一项，或是 DSH 插件注册的工具），可以在这里逐个允许 AI 使用。工具由本软件直接调用插件的后台程序，不需要 DBX；DSH 插件是第三方 JavaScript，要先在这里确认信任才会运行；只读工具 AI 直接用，会改东西的每次都要你批准。连接类插件用「设置 → 连接」里的连接。" testid="ai-plugins-card">
+      <Card icon="bot" title="让 AI 使用插件" testid="ai-plugins-card">
         <AiPlugins />
       </Card>
 

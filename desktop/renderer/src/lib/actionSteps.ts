@@ -84,10 +84,16 @@ export function moveItem<T>(list: T[], i: number, dir: -1 | 1): T[] {
   return out;
 }
 
+/** 知识库技能本身；绑的就是它们时不用再加知识库前置 */
+const KB_SKILLS = ["knowledge-base-qa", "requirement-analyzer"];
+
+/** 绑了技能的动作统一加的前置：这件事碰到业务 / 模块 / 跨工程关系时，先对照工程知识库再动手 */
+const KB_PRELUDE = "## 先对照知识库\n\n动手前，如果这件事涉及业务规则、术语、模块归属或跨工程关系：先用技能「knowledge-base-qa」对照工程知识库（找不到该技能、知识库读不到或没有相关内容，就如实说明，不要编造），再按上面技能的说明执行；知识库和代码、需求冲突时以代码和需求为准，并把冲突点说出来。最后一条回复里用一行写明「知识库依据」用了哪些内容（不要改动技能规定的文档模板结构）。纯技术、和业务无关的事可以跳过这一步。";
+
 /** 绑了技能的动作：按「技能 + 产出要求」生成提示词模板（{{input}} 留给你填的指令） */
 export function skillTemplate(a: { skill: string; output?: string }): string {
   const out = a.output?.trim();
-  return [`请使用技能「${a.skill}」完成这件事：先读取该技能的完整说明，再严格按说明执行。`, out ? `## 产出要求\n\n${out}` : "", "## 本次指令\n\n{{input}}"].filter(Boolean).join("\n\n");
+  return [`请使用技能「${a.skill}」完成这件事：先读取该技能的完整说明，再严格按说明执行。`, KB_SKILLS.includes(a.skill) ? "" : KB_PRELUDE, out ? `## 产出要求\n\n${out}` : "", "## 本次指令\n\n{{input}}"].filter(Boolean).join("\n\n");
 }
 
 /** 动作的提示词模板：绑了技能的用生成的，否则用自己写的 prompt */

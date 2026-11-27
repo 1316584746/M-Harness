@@ -1,6 +1,6 @@
 {
   "name": "m-harness",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "多模型、可接入办公 OA 的 Agent Harness（引擎 + CLI + 桌面端 + 飞书/钉钉通道）",

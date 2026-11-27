@@ -5,7 +5,7 @@ import { discoverForeign } from "./foreign";
 import { netError } from "./neterr";
 import { importGithubRepo, loadTree, makeCtx, NOT_PLUGIN, parseGithubUrl } from "./repo-import";
 import { DBX_CATALOG_URL, DBX_SOURCE, dbxTarget, detectCatalogFormat, parseDbxCatalog, parseDshIndex, type DbxInfo, type LocalPluginInfo, type PluginEntry, type PluginRepo } from "../shared/plugins";
-import { OFFICIAL_HOSTS, installDbxp, installDbxpBuffer, installDbxpFromUrl, readLocalInfo, uninstallDbxp } from "./dbxp";
+import { OFFICIAL_HOSTS, installDbxp, installDbxpBuffer, installDbxpFromUrl, readLocalInfo, uninstallDbxp, uninstallDbxpAsync } from "./dbxp";
 
 const TTL = 10 * 60_000;
 const MAX_BYTES = 5_000_000;
@@ -133,6 +133,11 @@ export class DbxBridge {
 
   uninstall(id: string): boolean {
     return uninstallDbxp(id, this.localDir);
+  }
+
+  /** 界面用的卸载：异步删，目录被刚退出的后台进程占着时慢慢重试，不卡主进程 */
+  uninstallAsync(id: string): Promise<boolean> {
+    return uninstallDbxpAsync(id, this.localDir);
   }
 
   /** 本机的情况（每次现读，装完马上能看到） */

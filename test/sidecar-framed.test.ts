@@ -6,7 +6,7 @@ import { Sidecar, frameBinary, frameJson } from "../desktop/main/sidecar";
 import { CONN_ADAPTERS } from "../desktop/main/plugin-conn";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-framed-"));
-afterAll(() => fs.rmSync(tmp, { recursive: true, force: true }));
+afterAll(() => { try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 12, retryDelay: 250 }); } catch { /* 临时目录清不掉不算测试失败 */ } }); // Windows 上子进程刚退出时目录还被占着
 
 /** 一个说 stdio-framed 的假插件：JSON 帧回显，收到二进制帧就用事件告诉宿主，要求 emitBin 时发一个二进制帧 */
 const FAKE = `

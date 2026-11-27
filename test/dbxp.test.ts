@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { makeZip } from "../scripts/zip.mjs";
 import { DbxBridge, scanDbxPlugins } from "../desktop/main/dbx";
-import { installDbxp, readLocalInfo, readZip, uninstallDbxp } from "../desktop/main/dbxp";
+import { installDbxp, readLocalInfo, readZip, uninstallDbxp, uninstallDbxpAsync } from "../desktop/main/dbxp";
 import { parseDbxCatalog } from "../desktop/shared/plugins";
 
 const sha = (b: Buffer | string) => crypto.createHash("sha256").update(b).digest("hex");
@@ -119,6 +119,16 @@ describe("installDbxp", () => {
     expect(uninstallDbxp("a.b", root)).toBe(false);
     expect(() => uninstallDbxp("../x", root)).toThrow();
     expect(fs.existsSync(root)).toBe(true);
+  });
+
+  it("异步卸载：删得掉、再删返回 false、不合法的 id 报错", async () => {
+    const root = tmp();
+    const buf = pack();
+    await installDbxp(spec(buf), root, { fetchImpl: serve(buf) });
+    expect(await uninstallDbxpAsync("a.b", root)).toBe(true);
+    expect(fs.existsSync(path.join(root, "a.b"))).toBe(false);
+    expect(await uninstallDbxpAsync("a.b", root)).toBe(false);
+    await expect(uninstallDbxpAsync("../x", root)).rejects.toThrow();
   });
 });
 

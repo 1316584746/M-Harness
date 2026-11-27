@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, AskRequest, HarnessEvent, Msg } from "../../../shared/api";
+import type { AppState, AskRequest, FileChangeDTO, HarnessEvent, Msg } from "../../../shared/api";
 import { api } from "../api";
 import { toolBudgetFor } from "./budget";
 
@@ -35,6 +35,10 @@ export interface Turn {
   startedAt?: number;
   status?: "running" | "done" | "error" | "aborted";
   traceFile?: string;
+  /** 这一轮的运行 id（取改动的 diff 正文用） */
+  runId?: string;
+  /** 这一轮改了哪些文件（工作区是 git 仓库、且有改动时才有） */
+  changes?: FileChangeDTO[];
   /** 这一轮用掉的 token 总数（外部 Agent 没报用量时没有） */
   tokens?: number;
 }
@@ -222,6 +226,8 @@ export function useChatStore(state: AppState, storageKey = KEY) {
                         ...t,
                         status,
                         traceFile: r.traceFile,
+                        ...(r.runId ? { runId: r.runId } : {}),
+                        ...(r.changes?.length ? { changes: r.changes } : {}),
                         ...(r.tokens > 0 ? { tokens: r.tokens } : {}),
                         text: r.reason === "final" ? r.text || "（模型没有返回内容）" : `${r.error ?? r.reason}${r.text ? "\n\n" + r.text : ""}`,
                       }

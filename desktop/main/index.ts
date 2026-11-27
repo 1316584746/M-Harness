@@ -259,7 +259,7 @@ function registerIpc() {
   ipcMain.handle("pluginhost:trust", (_e, id: string, grants?: string[]) => backend.pluginTrust(String(id), grants));
   ipcMain.handle("pluginhost:db-access", (_e, id: string) => backend.pluginDbAccess(String(id)));
   ipcMain.handle("pluginhost:db-grants", (_e, id: string, ids: string[]) => backend.pluginSetGrants(String(id), ids));
-  ipcMain.handle("pluginhost:request", (_e, id: string, method: string, params: unknown) => backend.pluginRequest(String(id), String(method), params));
+  ipcMain.handle("pluginhost:request", (_e, id: string, method: string, params: unknown, scope?: unknown) => backend.pluginRequest(String(id), String(method), params, scope));
   ipcMain.handle("workbench:todos", () => backend.workbenchTodos());
   ipcMain.handle("workbench:todos-cached", () => backend.workbenchTodosCached());
   ipcMain.handle("workbench:subtask-update", (_e, req) => backend.workbenchSubtaskUpdate(req));
@@ -322,6 +322,7 @@ function registerIpc() {
 
   ipcMain.handle("run:start", (_e, req: RunRequest) => backend.run(req));
   ipcMain.handle("run:abort", (_e, runKey: string) => backend.abort(runKey));
+  ipcMain.handle("run:change-patch", (_e, runId: string, file: string) => backend.runChangePatch(String(runId), String(file)));
   ipcMain.handle("ask:respond", (_e, id: string, answers: unknown) => backend.respondAsk(String(id), Array.isArray(answers) ? (answers as never) : null));
   ipcMain.handle("approval:respond", (_e, id: string, ok: boolean, remember: boolean) =>
     backend.respondApproval(id, !!ok, !!remember),

@@ -1,6 +1,9 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { Sidecar } from "./sidecar";
+import { cleanScope, prepareScopeHome, sweepScopeRoot, type PluginScope } from "./plugin-scope";
 import { scanDbxPlugins } from "./dbx";
 import { PLUGIN_KIT_CSS, PLUGIN_SHIM } from "./pluginshim";
 import type { PluginConn, PluginDbAccess, PluginReply, UiPlugin } from "../shared/pluginhost";
@@ -92,6 +95,8 @@ export interface PluginHostOpts {
   };
   /** 记录「哪个插件可以用哪些数据库连接」的文件 */
   grantsFile?: string;
+  /** 「只看某几次运行」时的来源：真正的 trace 目录和 harness 配置（用来复制出一份只含这几次运行的临时家目录） */
+  scopeSource?: () => { traceDir: string; config: unknown };
   /** 系统剪贴板（插件的「复制」「终端粘贴」靠它；沙箱里的页面自己碰不到剪贴板） */
   clipboard?: { readText(): string | Promise<string>; writeText(text: string): void | Promise<void> };
 }
@@ -142,6 +147,20 @@ function under(root: string, rel: string | undefined): string | undefined {
 export class PluginHost {
   private sidecars = new Map<string, Sidecar>();
   private starting = new Map<string, Promise<Sidecar>>();
+  /** 正在卸载的插件：这期间不许再把它的后台程序拉起来（界面里的定时请求会把刚停掉的后台又启动，占着目录删不掉） */
+  private removing = new Set<string>();
+
+  beginRemove(id: string): void {
+    this.removing.add(id.toLowerCase());
+  }
+
+  endRemove(id: string): void {
+    this.removing.delete(id.toLowerCase());
+  }
+  /** 「只看某几次运行」的专用后台：键 = 插件 id + 范围 key，闲置一阵就停掉并删临时目录 */
+  private scoped = new Map<string, { sc: Sidecar; home: string; id: string; timer?: ReturnType<typeof setTimeout> }>();
+  private scopedStarting = new Map<string, Promise<Sidecar>>();
+  private swept = false;
   private titles = new Map<string, string>();
   /** 已经交给后台程序的连接：同一个后台进程、同样的配置就不重复连 */
   private connected = new Map<string, { sc: Sidecar; sig: string }>();
@@ -330,9 +349,10 @@ export class PluginHost {
     return p;
   }
 
-  private async startSidecar(id: string): Promise<Sidecar> {
+  private async startSidecar(id: string, scopeHome?: string): Promise<Sidecar> {
     const r = this.resolve(id);
     if (!r) throw new Error("这个插件已经不在了");
+    if (this.removing.has(r.id.toLowerCase())) throw new Error("这个插件正在卸载");
     const rel = r.manifest.entrypoints?.backend?.executable;
     if (!rel) throw new Error("这个插件没有后台程序");
     if (this.trustedVersion(r.id) !== r.version) throw new Error("还没有确认信任这个插件");
@@ -352,51 +372,102 @@ export class PluginHost {
       command: l.command,
       args: l.args,
       cwd: r.dir,
-      env: { ...l.env, DBX_PLUGIN_DATA_DIR: this.dataDir(r.id), DBX_PLUGIN_ID: r.id },
+      env: scopeHome
+        ? { ...l.env, HARNESS_HOME: scopeHome, DBX_PLUGIN_DATA_DIR: path.join(scopeHome, "plugin-data", r.id), DBX_PLUGIN_ID: r.id }
+        : { ...l.env, DBX_PLUGIN_DATA_DIR: this.dataDir(r.id), DBX_PLUGIN_ID: r.id },
       pluginId: r.id,
       version: r.version,
       permissions: Array.isArray(r.manifest.permissions) ? r.manifest.permissions.map(String) : [],
       hostVersion: HOST_COMPAT_VERSION,
       transport: r.manifest.entrypoints?.backend?.transport === "stdio-framed" ? "stdio-framed" : "stdio-jsonl",
+      // 只看某几次运行的专用后台不往界面转事件 / 二进制（那些是给正常打开的插件界面的，别串了）
       onBinary: (channel, data) => {
-        if (r.manifest.permissions?.includes("host.binary")) this.o.onBinary?.(r.id, channel, data);
+        if (!scopeHome && r.manifest.permissions?.includes("host.binary")) this.o.onBinary?.(r.id, channel, data);
       },
       onEvent: (m, params) => {
-        if (r.manifest.permissions?.includes("host.events")) this.o.onEvent?.(r.id, m, params);
+        if (!scopeHome && r.manifest.permissions?.includes("host.events")) this.o.onEvent?.(r.id, m, params);
       },
       onExit: () => {
-        if (this.sidecars.get(r.id) === sc) this.sidecars.delete(r.id);
+        if (!scopeHome && this.sidecars.get(r.id) === sc) this.sidecars.delete(r.id);
       },
     });
     await sc.start();
-    this.sidecars.set(r.id, sc);
+    if (!scopeHome) this.sidecars.set(r.id, sc);
     return sc;
+  }
+
+  // ───────── 只看某几次运行的后台 ─────────
+
+  private static readonly SCOPE_IDLE_MS = 3 * 60_000;
+
+  private dropScoped(k: string): void {
+    const e = this.scoped.get(k);
+    if (!e) return;
+    this.scoped.delete(k);
+    if (e.timer) clearTimeout(e.timer);
+    void e.sc.stop().finally(() => fs.rmSync(e.home, { recursive: true, force: true }));
+  }
+
+  /** 给这个范围（一段对话的运行）起一个专用后台：先把这几次运行的文件同步进临时家目录，再用它启动 */
+  private async scopedSidecar(r: Resolved, scope: PluginScope): Promise<Sidecar> {
+    const src = this.o.scopeSource?.();
+    if (!src) throw new Error("本软件没有提供这个功能所需要的数据来源");
+    const root = path.join(os.tmpdir(), "m-harness-plugin-scope", r.id.replace(/[^A-Za-z0-9._-]/g, "_"));
+    const home = prepareScopeHome(root, scope, src.traceDir, src.config, r.id);
+    const k = `${r.id}\n${scope.key}`;
+    let e = this.scoped.get(k);
+    if (!e || !e.sc.alive) {
+      if (e) this.dropScoped(k);
+      // 界面一打开会同时发好几个请求：同一个范围只启动一次
+      let going = this.scopedStarting.get(k);
+      if (!going) {
+        going = this.startSidecar(r.id, home).finally(() => this.scopedStarting.delete(k));
+        this.scopedStarting.set(k, going);
+      }
+      const sc = await going;
+      e = this.scoped.get(k);
+      if (!e || e.sc !== sc) {
+        e = { sc, home, id: r.id };
+        this.scoped.set(k, e);
+      }
+    }
+    if (e.timer) clearTimeout(e.timer);
+    e.timer = setTimeout(() => this.dropScoped(k), PluginHost.SCOPE_IDLE_MS);
+    e.timer.unref?.();
+    return e.sc;
   }
 
   /** 停掉某个插件的后台程序（更新 / 卸载前必须停，否则 Windows 上文件被占用） */
   async stop(id: string): Promise<void> {
     const sc = this.sidecars.get(id) ?? [...this.sidecars].find(([k]) => k.toLowerCase() === id.toLowerCase())?.[1];
     for (const [k, v] of this.sidecars) if (v === sc) this.sidecars.delete(k);
+    for (const [k, e] of [...this.scoped]) if (e.id.toLowerCase() === id.toLowerCase()) this.dropScoped(k);
     await sc?.stop();
+    // 正在启动中的那个（还没登记进 sidecars）也要等它起来再停掉，不然它会在停止之后冒出来
+    const going = [...this.starting].find(([k]) => k.toLowerCase() === id.toLowerCase())?.[1];
+    if (going) await going.then(s => s.stop(), () => undefined);
+    for (const [k, v] of [...this.sidecars]) if (k.toLowerCase() === id.toLowerCase() && v !== sc) this.sidecars.delete(k);
   }
 
   async stopAll(): Promise<void> {
     const all = [...this.sidecars.values()];
     this.sidecars.clear();
+    for (const k of [...this.scoped.keys()]) this.dropScoped(k);
     await Promise.all(all.map(sc => sc.stop()));
   }
 
   // ───────── 界面发来的请求 ─────────
 
-  async request(idIn: string, method: string, params: unknown): Promise<PluginReply> {
+  /** scope：界面要求只看某几次运行时带上（只对 backend.invoke 生效），后台用只含这几次运行的临时家目录 */
+  async request(idIn: string, method: string, params: unknown, scope?: unknown): Promise<PluginReply> {
     try {
-      return { ok: true, result: await this.dispatch(idIn, method, params) };
+      return { ok: true, result: await this.dispatch(idIn, method, params, cleanScope(scope)) };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   }
 
-  private async dispatch(idIn: string, method: string, params: unknown): Promise<unknown> {
+  private async dispatch(idIn: string, method: string, params: unknown, scope?: PluginScope): Promise<unknown> {
     const r = this.resolve(idIn);
     if (!r?.entry) throw new Error("这个插件已经不在了");
     const p = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
@@ -407,6 +478,7 @@ export class PluginHost {
         const m = String(p.method ?? "");
         if (!m || m.length > 200 || (m !== "plugin/ping" && /^(plugin|host)\//.test(m))) throw new Error("不允许的方法名");
         const timeout = typeof p.timeoutMs === "number" ? p.timeoutMs : undefined;
+        if (scope) return (await this.scopedSidecar(r, scope)).call(m, p.params ?? {}, timeout);
         const cid = this.provider(r) && p.params && typeof p.params === "object" ? (p.params as Record<string, unknown>).connectionId : undefined;
         if (typeof cid !== "string" || !cid) return (await this.sidecar(r.id)).call(m, p.params ?? {}, timeout);
         await this.connect(r.id, cid);
@@ -423,7 +495,7 @@ export class PluginHost {
       case "backend.notify": {
         const m = String(p.method ?? "");
         if (!m || m.length > 200 || /^(plugin|host)\//.test(m)) throw new Error("不允许的方法名");
-        (await this.sidecar(r.id)).notify(m, p.params ?? {});
+        (scope ? await this.scopedSidecar(r, scope) : await this.sidecar(r.id)).notify(m, p.params ?? {});
         return null;
       }
       case "host.sendBinary": {

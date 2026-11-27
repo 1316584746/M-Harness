@@ -18,6 +18,9 @@ import { RunSteps, ToolCard } from "../components/Steps";
 import { isRunning, type ChatStore, type Turn } from "../lib/chatStore";
 import { buildRunView, fmtMs } from "../lib/steps";
 import { useStickBottom } from "../lib/useStickBottom";
+import { TurnRail } from "../components/TurnRail";
+import { ChangesCard } from "../components/ChangesCard";
+import { SessionContextDialog } from "../components/SessionContext";
 
 /** 输入框最高多少：不超过 420，也不超过窗口高度的 45%（窗口矮时给上面的对话留出地方） */
 const maxInputH = () => Math.max(96, Math.min(420, Math.round(window.innerHeight * 0.45)));
@@ -32,6 +35,7 @@ const SUGGESTIONS = [
 export function Chat({ state, store, onChanged, prefill }: { state: AppState; store: ChatStore; onChanged: () => void; prefill?: { text: string; n: number } | null }) {
   const { active, provider, workspace } = store;
   const [input, setInput] = useState("");
+  const [ctxOpen, setCtxOpen] = useState(false);
   const [minH, setMinH] = useState(96);
   const bottom = useRef<HTMLDivElement>(null);
   const thread = useRef<HTMLDivElement>(null);
@@ -165,6 +169,8 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
         )}
       </header>
 
+      <div className="thread-wrap">
+      <TurnRail scroller={thread} turns={turns} />
       <div className="thread" ref={thread}>
         <div className="thread-inner">
           {!turns.length ? (
@@ -184,12 +190,15 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
               </div>
             </div>
           ) : (
-            turns.map(t => (t.role === "user" ? <UserMsg key={t.id} text={t.text} images={t.images} /> : <AssistantMsg key={t.id} t={t} />))
+            turns.map(t => (t.role === "user" ? <UserMsg key={t.id} id={t.id} text={t.text} images={t.images} /> : <AssistantMsg key={t.id} t={t} />))
           )}
           {ask && <AskForm key={ask.id} req={ask} onSubmit={a => void store.answerAsk(ask.id, a)} />}
           <div ref={bottom} />
         </div>
       </div>
+      </div>
+
+      {ctxOpen && <SessionContextDialog convId={active?.id ?? "chat"} turns={turns} title={active?.title || "新对话"} onClose={() => setCtxOpen(false)} />}
 
       <div className="composer-wrap">
         <div className="composer-inner">
@@ -214,6 +223,10 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
               <WorkspacePicker current={ws} repos={repos} onPick={store.setWorkspace} onBrowse={pickWs} disabled={running} />
               <BranchPicker dir={ws} disabled={running} refreshKey={running} />
               <McpPicker disabled={store.disabledTools} onChange={store.setDisabledTools} busy={running} />
+              <button type="button" className={`chipbtn ${ctxOpen ? "on" : ""}`} data-testid="chat-ctx-btn" onClick={() => setCtxOpen(true)} title="看这段对话的上下文：构成、token、耗时和时间线（来自「上下文洞察」插件）">
+                <Icon name="list" size={14} />
+                <span>上下文</span>
+              </button>
             </div>
             <ImageStrip images={pics.images} error={pics.error} onRemove={pics.remove} />
             <textarea
@@ -272,9 +285,9 @@ export function Chat({ state, store, onChanged, prefill }: { state: AppState; st
   );
 }
 
-export function UserMsg({ text, images }: { text: string; images?: string[] }) {
+export function UserMsg({ id, text, images }: { id?: string; text: string; images?: string[] }) {
   return (
-    <div className="msg-u">
+    <div className="msg-u" {...(id ? { "data-turn": id } : {})}>
       <div className="msg-u-card">
         <MsgImages images={images} />
         {text}
@@ -326,6 +339,7 @@ export function AssistantMsg({ t, onRunSql }: { t: Turn; onRunSql?: (sql: string
         </div>
       )}
       {t.text && (failed ? <div className="errtext">{t.text}</div> : <Markdown text={t.text} onRunSql={onRunSql} />)}
+      {!!t.changes?.length && <ChangesCard runId={t.runId} changes={t.changes} />}
 
       {t.events.length > 0 && (
         <div className="msg-a-foot">

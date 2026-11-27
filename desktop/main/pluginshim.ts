@@ -48,6 +48,42 @@ export const PLUGIN_SHIM = `(function () {
       });
     }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   }
+  // 宿主要求直接停在某个标签页（context.focus.tab）：插件界面按 data-tab 标记标签按钮，等它画出来后点一下
+  function focusTab(tab) {
+    if (!tab) { reveal(); return; }
+    var tries = 0;
+    (function go() {
+      var b = document.querySelector('[data-tab="' + String(tab).replace(/[^\\w-]/g, "") + '"]');
+      // 页面脚本（给标签按钮挂点击处理的那段）要等整页解析完才跑：太早点了不会有反应，所以等 readyState 不是 loading，
+      // 点完再看这个标签有没有真的亮起来（on），没有就过一会儿再点
+      if (b && document.readyState !== "loading") {
+        if (b.classList.contains("on")) { reveal(); return; }
+        b.click();
+      }
+      if (++tries < 60) setTimeout(go, 80); else reveal();
+    })();
+  }
+  // 地址带 ?focus= 时（宿主要直接停在某个标签页）：先整页藏着，等切到目标标签再显示，免得先闪一下默认的首页（最多藏 6 秒兜底）
+  var holdEl = null;
+  function reveal() {
+    if (!holdEl) return;
+    var e = holdEl;
+    holdEl = null;
+    setTimeout(function () { if (e.parentNode) e.parentNode.removeChild(e); }, 150);
+  }
+  if (typeof location !== "undefined" && /[?&]focus=/.test(location.search)) {
+    holdEl = document.createElement("style");
+    holdEl.textContent = "html{visibility:hidden!important}";
+    (document.head || document.documentElement).appendChild(holdEl);
+    setTimeout(reveal, 6000);
+  }
+  // 宿主要求藏掉界面里的某些部分（context.focus.hide：CSS 选择器列表），比如已经定位到某次运行，就不需要再让用户选运行了
+  function hideParts(list) {
+    if (!list || !list.length) return;
+    var st = document.createElement("style");
+    st.textContent = list.join(",") + "{display:none!important}";
+    document.head.appendChild(st);
+  }
   function off(list, fn) { return function () { var i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); }; }
   function unsupported(name) { return function () { return Promise.reject(new Error("本软件暂不支持 " + name)); }; }
   window.addEventListener("message", function (e) {
@@ -62,6 +98,8 @@ export const PLUGIN_SHIM = `(function () {
       ctx = m.context; loc = m.locale; th = m.theme; caps = m.capabilities || {};
       applyTheme();
       readyRes(ctx);
+      focusTab(ctx && ctx.focus && ctx.focus.tab);
+      hideParts(ctx && ctx.focus && ctx.focus.hide);
       onInit.slice().forEach(function (f) { try { f(ctx); } catch (_) {} });
     } else if (m.kind === "context") {
       ctx = m.context;

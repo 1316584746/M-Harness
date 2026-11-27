@@ -10,6 +10,7 @@ import { ProviderPicker } from "../components/ProviderPicker";
 import { FlowLive, FlowTranscript } from "../components/FlowRun";
 import { AdvanceDialog, type AdvanceOptions } from "../components/AdvanceDialog";
 import { ContextDialog } from "../components/ContextDialog";
+
 import { GroupDialog } from "../components/GroupDialog";
 import { InfoDialog } from "../components/InfoDialog";
 import { RunFailure } from "../components/RunLive";
@@ -21,6 +22,7 @@ import { useStickBottom } from "../lib/useStickBottom";
 import { isRunning, type ChatStore, type StepRef, type Turn } from "../lib/chatStore";
 import { blockedSteps, branchNote, composeStep, visibleSteps } from "../lib/actionSteps";
 import { verifyAdvance } from "../lib/advance";
+import { ChangesCard } from "../components/ChangesCard";
 import { parseCfg } from "../lib/configEdit";
 import { buildRunView, fmtMs, fmtTokens } from "../lib/steps";
 import { progressDigest } from "../lib/flow";
@@ -549,7 +551,7 @@ export function TaskPage({
             <Icon name="info" size={13} /> 基本信息
           </button>
           <button className={`act-chip ${ctxOpen ? "on" : ""}`} data-testid="task-ctx-btn" onClick={() => setCtxOpen(true)}>
-            <Icon name="file" size={13} /> 任务上下文 <span className="num">{(task.docs?.length ?? 0) + (task.context.trim() ? 1 : 0)}</span>
+            <Icon name="list" size={13} /> 上下文
           </button>
           <div className="pop-wrap">
             <button className={`act-chip ${pop === "mcp" ? "on" : ""}`} data-testid="task-mcp-btn" onClick={() => setPop(pop === "mcp" ? null : "mcp")}>
@@ -597,7 +599,7 @@ export function TaskPage({
 
       {advOpen && <AdvanceDialog builtins={steps.builtins} actions={steps.custom} blocked={blocked} hasHistory={turns.length > 0} agent={<><ProviderPicker providers={state.providers} value={provider} onChange={chat.setProvider} disabled={running} /><ModelPicker provider={provider} info={info} value={chat.model} onChange={chat.setModel} disabled={running} /></>} vars={stepVars} onClose={() => setAdvOpen(false)} onAdvance={(t, o) => { chainRef.current = 0; setAdvNote(""); void advance(t, o); }} />}
       {infoOpen && <InfoDialog task={task} repos={repos} sourceText={SOURCE_TEXT[task.source]} schedule={range(task)} onClose={() => setInfoOpen(false)} onSave={patch => tasks.update(task.id, patch)} onRepos={setTaskRepos} />}
-      {ctxOpen && <ContextDialog task={task} onClose={() => setCtxOpen(false)} onChange={patch => tasks.update(task.id, patch)} />}
+      {ctxOpen && <ContextDialog task={task} turns={turns} onClose={() => setCtxOpen(false)} onChange={patch => tasks.update(task.id, patch)} />}
       {grpOpen && (
         <GroupDialog
           task={task}
@@ -743,6 +745,7 @@ export function TaskPage({
                   {r.ai && (
                     <div className="flow-proc" data-testid="flow-proc">
                       <FlowTranscript events={r.ai.events} times={r.ai.times?.length === r.ai.events.length ? r.ai.times : undefined} startedAt={r.ai.startedAt} running={st === "running"} brief={!!r.user.step} />
+                      {!!r.ai.changes?.length && <ChangesCard runId={r.ai.runId} changes={r.ai.changes} />}
                       {(st === "error" || st === "aborted") && <RunFailure text={r.ai.text ?? ""} aborted={st === "aborted"} onRetry={!running && r.n === lastRound?.n ? () => retry(r) : undefined} />}
                     </div>
                   )}

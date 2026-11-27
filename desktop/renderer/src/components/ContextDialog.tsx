@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { docKind, taskUrl, type Task, type TaskDoc } from "../lib/taskStore";
 import { Icon, type IconName } from "./Icon";
+import { SessionContext } from "./SessionContext";
 
 const KIND: Record<ReturnType<typeof docKind>, { label: string; icon: IconName }> = {
   url: { label: "URL", icon: "link" },
@@ -11,7 +12,9 @@ const KIND: Record<ReturnType<typeof docKind>, { label: string; icon: IconName }
 const SOURCE_NAME: Record<Task["source"], string> = { feishu: "飞书 story", dingtalk: "钉钉待办", manual: "手动新建的任务" };
 
 /** 任务上下文：一条一条加文档（链接 / 本机路径 / 文字），发给 AI 前一起带上 */
-export function ContextDialog({ task, onClose, onChange }: { task: Task; onClose: () => void; onChange: (patch: Partial<Task>) => void }) {
+export function ContextDialog({ task, turns, onClose, onChange }: { task: Task; turns: { runId?: string; traceFile?: string }[]; onClose: () => void; onChange: (patch: Partial<Task>) => void }) {
+  // 点「上下文」先看这个任务会话的上下文（「上下文洞察」插件里的信息）；发给 AI 的文档清单在另一个标签页
+  const [tab, setTab] = useState<"session" | "docs">("session");
   const docs = task.docs ?? [];
   const url = taskUrl(task);
   const [title, setTitle] = useState("");
@@ -55,16 +58,25 @@ export function ContextDialog({ task, onClose, onChange }: { task: Task; onClose
 
   return (
     <div className="modal-mask" data-testid="ctx-dialog" onMouseDown={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal cx-modal" role="dialog" aria-label="任务上下文">
+      <div className={`modal ${tab === "session" ? "sc-modal" : "cx-modal"}`} role="dialog" aria-label="任务上下文">
         <div className="cx-head">
-          <h3>任务上下文</h3>
+          <h3 className="sc-title" title={task.title}>{task.title}</h3>
           <button className="cx-x" onClick={onClose} aria-label="关闭">
             <Icon name="x" size={16} />
           </button>
         </div>
-        <p className="cx-sub">每次发给 AI 前都会带上这些清单；链接和本机文件由 AI 按需读取（点条目看全文）</p>
+        <div className="cx-tabs" role="tablist">
+          <button className={`cx-tab ${tab === "session" ? "on" : ""}`} role="tab" aria-selected={tab === "session"} data-testid="ctx-tab-session" onClick={() => setTab("session")}>
+            <Icon name="list" size={13} /> 会话上下文
+          </button>
+          <button className={`cx-tab ${tab === "docs" ? "on" : ""}`} role="tab" aria-selected={tab === "docs"} data-testid="ctx-tab-docs" onClick={() => setTab("docs")}>
+            <Icon name="file" size={13} /> 任务文档 <span className="num">{docs.length + (task.context.trim() ? 1 : 0)}</span>
+          </button>
+        </div>
+        {tab === "session" && <SessionContext convId={`task-${task.id}`} turns={turns} />}
+        {tab === "docs" && <p className="cx-sub">每次发给 AI 前都会带上这些清单；链接和本机文件由 AI 按需读取（点条目看全文）</p>}
 
-        <div className="cx-list">
+        {tab === "docs" && <div className="cx-list">
           {url && (
             <div className="cx-item static">
               <a className="cx-item-head cx-open" href={url} target="_blank" rel="noreferrer" title={`在浏览器中打开：${url}`} data-testid="ctx-url">
@@ -93,9 +105,9 @@ export function ContextDialog({ task, onClose, onChange }: { task: Task; onClose
           {docs.map(d => (
             <Row key={d.id} d={d} />
           ))}
-        </div>
+        </div>}
 
-        <div className="cx-form">
+        {tab === "docs" && <div className="cx-form">
           <div className="cx-form-title">
             <Icon name="plus" size={14} /> 添加新文档
           </div>
@@ -121,7 +133,7 @@ export function ContextDialog({ task, onClose, onChange }: { task: Task; onClose
               添加
             </button>
           </div>
-        </div>
+        </div>}
       </div>
     </div>
   );

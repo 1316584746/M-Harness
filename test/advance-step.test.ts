@@ -107,6 +107,20 @@ describe("自定义动作：绑定技能 + 产出要求", () => {
     expect(t).toContain("输出：慢点位置和建议");
     expect(t).toContain("{{input}}");
   });
+  it("绑了技能的动作统一带「先对照知识库」前置；绑的就是知识库技能时不重复", () => {
+    expect(skillTemplate({ skill: "wiki-design-scaffold" })).toContain("knowledge-base-qa");
+    expect(skillTemplate({ skill: "wiki-design-scaffold" })).toContain("知识库依据");
+    expect(skillTemplate({ skill: "knowledge-base-qa" })).not.toContain("先对照知识库");
+    expect(skillTemplate({ skill: "requirement-analyzer" })).not.toContain("先对照知识库");
+  });
+  it("业务分析 / 方案设计的内置提示词都有「先查知识库」这一步和「知识库依据」", () => {
+    for (const id of ["analysis", "plan"]) {
+      const p = builtinSteps({}).find(s => s.id === id)!.prompt;
+      expect(p).toContain("先查知识库");
+      expect(p).toContain("knowledge-base-qa");
+      expect(p).toContain("知识库依据");
+    }
+  });
   it("没写产出要求就不带这一段", () => {
     expect(skillTemplate({ skill: "x" })).not.toContain("产出要求");
   });

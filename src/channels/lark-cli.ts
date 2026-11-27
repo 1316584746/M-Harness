@@ -1,4 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import path from "node:path";
 import readline from "node:readline";
 import type { HarnessConfig } from "../config";
 import { spawnCli } from "../tools/cli-spawn";
@@ -237,9 +238,21 @@ export class LarkCliChannel {
       chatId: ev.chat_id,
       isGroup,
       react: emoji => this.react(messageId, emoji),
+      sendImage: file => this.sendImage(messageId, file),
       stream: meta => this.openStream(messageId, meta),
       approvalCard: this.cfg.card === false ? undefined : this.approvalCardIO(messageId),
     });
+  }
+
+  /**
+   * 回一张图片消息。lark-cli 的 --image 只认「相对 cwd 的路径」（绝对路径会被拒），
+   * 所以把 cwd 设成图片所在目录、只传文件名。
+   */
+  async sendImage(messageId: string, file: string): Promise<boolean> {
+    const name = path.basename(file);
+    const r = await this.exec([...this.cfg.binArgs, "im", "+messages-reply", "--message-id", messageId, "--as", "bot", "--image", name.startsWith("-") ? `./${name}` : name], undefined, path.dirname(file));
+    if (r.code !== 0) this.log(`[feishu-cli] 发图片失败：${(r.stderr || r.stdout).slice(0, 200)}`);
+    return r.code === 0;
   }
 
   /** 最近一次收到真人消息的时间 */

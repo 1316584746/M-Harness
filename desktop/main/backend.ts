@@ -47,6 +47,9 @@ import { ProgressText, type StreamHandle } from "../../src/channels/stream";
 import type { IncomingMessage } from "../../src/channels/types";
 import { createChat, fetchWorkItemChat, inspectChat, parseChatRef, type WorkChat } from "../../src/tools/work-chat";
 import { advanceNextTool } from "../../src/tools/advance-next";
+import { findReplyImages } from "../../src/channels/images-out";
+import { diffSnapshots, snapshotWorkTree, type WorkSnap } from "../../src/tools/run-changes";
+import { readRunPatch, saveRunChanges } from "./run-changes-store";
 import { fetchDingtalkTodos, fetchFeishuTodos, sortTodos, createFeishuSubtask, updateFeishuSubtask, type SubtaskCreated, type SubtaskResult, type SubtaskUpdate, type TodoSource } from "../../src/tools/workbench";
 import { addChild, patchChild } from "../shared/todoPatch";
 import { branchInfo, cloneRepo, detectBaseBranch, diffStat, inspectRepo, listBranches, repoStatus, startFeatureBranch, switchBranch, syncBaseBranch, type StartBranchResult } from "../../src/tools/git";
@@ -1055,6 +1058,16 @@ export class Backend {
       dataRoot: path.join(this.home, "plugin-data"),
       consentFile: path.join(this.home, "plugin-consent.json"),
       grantsFile: path.join(this.home, "plugin-db-grants.json"),
+      scopeSource: () => {
+        let config: unknown = {};
+        try {
+          config = JSON.parse(fs.readFileSync(path.join(this.home, "harness.config.json"), "utf8").replace(/^\uFEFF/, ""));
+        } catch {
+          /* 没有配置文件就按默认 */
+        }
+        const td = (config as { traceDir?: unknown } | null)?.traceDir;
+        return { traceDir: path.resolve(this.home, typeof td === "string" && td ? td : ".traces"), config };
+      },
       db: this.db,
       clipboard: this.host.clipboard,
       // 仅自动化测试用：让后台程序可以是一段脚本（正式插件都是原生程序）
@@ -1140,8 +1153,8 @@ export class Backend {
     this.pluginHost.setGrants(id, Array.isArray(ids) ? ids.map(String) : []);
   }
 
-  pluginRequest(id: string, method: string, params: unknown): Promise<PluginReply> {
-    return this.pluginHost.request(id, method, params);
+  pluginRequest(id: string, method: string, params: unknown, scope?: unknown): Promise<PluginReply> {
+    return this.pluginHost.request(id, method, params, scope);
   }
 
   /** 直接把目录里的插件装到本软件的插件目录（下载 + 校验 + 解压），不需要 DBX */
@@ -1171,8 +1184,14 @@ export class Backend {
         if (done) this.pluginAi.forget(id, true);
         return done ? { ok: true } : { ok: false, error: "本软件里没有装这个插件" };
       }
-      await this._pluginHost?.stop(id);
-      return this.dbx.uninstall(id) ? { ok: true } : { ok: false, error: "本软件里没有装这个插件" };
+      // 先挂上「卸载中」，再停后台：界面里的定时请求会把刚停掉的后台又拉起来，Windows 上它占着目录就删不掉
+      this._pluginHost?.beginRemove(id);
+      try {
+        await this._pluginHost?.stop(id);
+        return (await this.dbx.uninstallAsync(id)) ? { ok: true } : { ok: false, error: "本软件里没有装这个插件" };
+      } finally {
+        this._pluginHost?.endRemove(id);
+      }
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -1386,12 +1405,15 @@ export class Backend {
     const cardModel = req.model || (g ? this.rt.registry.modelOf(req.provider) : undefined);
     const stream: StreamHandle | undefined = g && g.mode === "stream" && g.msg.stream ? await g.msg.stream({ ...(g.title ? { title: g.title } : {}), question: g.msg.text, ...(cardModel ? { model: cardModel } : {}) }).catch(() => undefined) : undefined;
     const prog = stream ? new ProgressText() : undefined;
+    const runStartedAt = Date.now();
     const finishGroup = async (r: { reason: string; text?: string; error?: string }) => {
       if (!g) return;
       const body = replyBody(r);
       try {
         if (stream) await stream.finish(body, r.reason !== "final");
         else await g.msg.reply(body);
+        // 这次运行里生成的截图 / 图片：文字里只写路径群里看不到，补发成图片消息
+        if (r.reason === "final" && g.msg.sendImage) for (const f of findReplyImages(r.text ?? "", runStartedAt)) await g.msg.sendImage(f).catch(() => false);
         if (r.reason === "final") await g.msg.react?.("DONE");
       } catch (e: any) {
         this.log(`[飞书] 群里回复失败：${e?.message ?? e}`);
@@ -1399,6 +1421,9 @@ export class Backend {
     };
     const mir = req.mirror && typeof req.mirror.question === "string" ? { title: String(req.mirror.title ?? ""), question: req.mirror.question } : undefined;
     if (mir) this.mirror().question(mir.title, mir.question, Array.isArray(req.images) ? req.images.length : 0);
+    // 运行前给工作区拍个快照，结束后再拍一次，两次一比就知道这一轮改了哪些文件（界面上「已编辑 N 个文件」）；不是 git 仓库就没有
+    const changeRoot = req.workspace ? path.resolve(req.workspace) : this.rt.workspace;
+    const before = await Promise.race([snapshotWorkTree(changeRoot).catch(() => undefined), new Promise<undefined>(res => setTimeout(() => res(undefined), 8000))]);
     try {
       const r = await this.rt.runTask({
         input: req.input,
@@ -1425,6 +1450,7 @@ export class Backend {
       });
       if (mir) this.mirror().answer(mir.title, { reason: r.reason, text: r.text, error: r.error });
       await finishGroup(r);
+      const changes = before ? await this.collectChanges(before, r.runId) : undefined;
       return {
         reason: r.reason,
         text: r.text,
@@ -1434,6 +1460,7 @@ export class Backend {
         messages: r.messages,
         traceFile: r.traceFile,
         runId: r.runId,
+        ...(changes?.length ? { changes } : {}),
       };
     } catch (e: any) {
       // 例如 provider 缺 Key：作为一次失败的运行返回，而不是让 IPC 抛异常
@@ -1445,6 +1472,24 @@ export class Backend {
       this.groupActive.delete(req.runKey);
       this.denyPending(req.runKey);
     }
+  }
+
+  /** 这一轮运行改了哪些文件：和运行前的快照比，diff 正文落盘（鼠标放上去才取），返回摘要 */
+  private async collectChanges(before: WorkSnap, runId: string) {
+    try {
+      const after = await snapshotWorkTree(before.root);
+      if (!after) return undefined;
+      const { files, patches } = await diffSnapshots(before, after);
+      saveRunChanges(path.join(this.home, "run-changes"), runId, patches);
+      return files;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 取某次运行里某个文件的 diff 正文 */
+  runChangePatch(runId: string, file: string): string {
+    return readRunPatch(path.join(this.home, "run-changes"), String(runId), String(file));
   }
 
   // ───────────── 缺陷提醒 ─────────────

@@ -416,7 +416,19 @@ export interface RuleFileDTO {
   chars: number;
 }
 
+/** 一次运行里改动的一个文件 */
+export interface FileChangeDTO {
+  path: string;
+  /** A 新增 / M 修改 / D 删除 */
+  status: "A" | "M" | "D";
+  added: number;
+  removed: number;
+  binary?: boolean;
+}
+
 export interface RunOutcome {
+  /** 这一轮改了哪些文件（工作区是 git 仓库、且有改动时才有） */
+  changes?: FileChangeDTO[];
   reason: "final" | "max_steps" | "aborted" | "error";
   text: string;
   error?: string;
@@ -566,7 +578,8 @@ export interface HarnessApi {
   pluginDbAccess(id: string): Promise<import("./pluginhost").PluginDbAccess>;
   pluginSetGrants(id: string, ids: string[]): Promise<void>;
   /** 插件界面发来的请求（backend.invoke 等），由主进程转给插件后台 */
-  pluginRequest(id: string, method: string, params: unknown): Promise<import("./pluginhost").PluginReply>;
+  /** scope：只看某几次运行（插件后台用只含这几次运行的临时家目录，见 main/plugin-scope.ts） */
+  pluginRequest(id: string, method: string, params: unknown, scope?: { key: string; runs: string[] }): Promise<import("./pluginhost").PluginReply>;
   onPluginEvent(cb: (e: { id: string; method: string; params: unknown }) => void): () => void;
   /** 插件后台发来的二进制数据（终端输出等；插件要有 host.binary 权限） */
   onPluginBinary(cb: (e: { id: string; channel: string; data: Uint8Array }) => void): () => void;
@@ -667,6 +680,8 @@ export interface HarnessApi {
   /** 同步窗口标题栏按钮（最小化/最大化/关闭）的配色 */
   setTheme(theme: "light" | "dark"): Promise<void>;
   run(req: RunRequest): Promise<RunOutcome>;
+  /** 某次运行里某个改动文件的 diff 正文（空串 = 没有 / 已过期） */
+  runChangePatch(runId: string, file: string): Promise<string>;
   abort(runKey: string): Promise<void>;
   respondApproval(id: string, approved: boolean, remember: boolean): Promise<void>;
   /** 回答 AI 的提问；answers 传 null = 跳过 */

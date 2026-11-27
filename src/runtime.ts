@@ -8,6 +8,7 @@ import type { Asker, Emit, HostTool, Msg, RunResult, Tool } from "./core/types";
 import { askUserTool } from "./tools/ask-user";
 import { toHostTools } from "./tools/host-tools";
 import { agentSafetyPrompt } from "./prompt/agent-safety";
+import { askGuidePrompt } from "./prompt/ask-guide";
 import { builtinTools } from "./tools/builtin";
 import { dingtalkProjectTools } from "./tools/dingtalk-project";
 import { feishuProjectTools } from "./tools/feishu-project";
@@ -153,7 +154,7 @@ export class Runtime {
     const pluginTools = provider.kind === "agent" ? (this.extra?.tools() ?? []).filter(t => !req.disabledTools?.includes(t.name)) : [];
     const hostTools = provider.kind === "agent" ? { ...toHostTools(pluginTools, { guard, approve, root, signal, ask: req.ask, emit }), ...(req.hostTools ?? {}) } : undefined;
     const pluginNote = pluginTools.length ? `【插件工具】你可以直接调用名字以 plugin__ 开头的工具，它们是用户在「插件中心」里允许你用的插件能力（${[...new Set(pluginTools.map(t => t.name.split("__")[1]))].join("、")}）。用户让你操作这些插件对应的东西（查数据库、发 HTTP 请求、连服务器等）时，优先用它们，不要自己去装客户端或另找办法；写操作会弹窗让用户批准。` : undefined;
-    const system = [req.system ?? this.config.system, buildRulesSection(this.config.rules, root), skillsPrompt(skills), customOfficePrompt(this.config.office), safety, pluginNote].filter(Boolean).join("\n\n");
+    const system = [req.system ?? this.config.system, buildRulesSection(this.config.rules, root), skillsPrompt(skills), customOfficePrompt(this.config.office), safety, req.ask ? askGuidePrompt() : undefined, pluginNote].filter(Boolean).join("\n\n");
 
     const result = await run({
       provider,

@@ -198,8 +198,70 @@ export function uninstallDbxp(id: string, root: string): boolean {
   if (!safeId(id)) throw new Error("插件 id 不合法");
   const dir = path.join(root, id);
   if (!fs.existsSync(dir)) return false;
-  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 });
   return true;
+}
+
+/**
+ * 卸载（异步版，界面用）。
+ * Windows 上刚停掉的后台进程要过几秒才真正退出，这期间它的工作目录（就是插件的版本目录）删不掉：
+ * 直接 rm -r 会在最外层的目录上报 EBUSY / EPERM，里面的文件一个都没删。
+ * 所以自己从里往外删：先把文件删光（文件不被占用），目录删不掉就留着；
+ * 文件都没了，插件就算卸载了（没有清单文件，列表里不会再出现），剩下的空目录过一会儿再悄悄清掉。
+ */
+export async function uninstallDbxpAsync(id: string, root: string): Promise<boolean> {
+  if (!safeId(id)) throw new Error("插件 id 不合法");
+  const dir = path.join(root, id);
+  if (!fs.existsSync(dir)) return false;
+  for (let i = 0; i < 10; i++) {
+    wipeTree(dir);
+    if (!fs.existsSync(dir)) return true;
+    if (!hasAnyFile(dir)) break;
+    await new Promise(r => setTimeout(r, 300));
+  }
+  if (hasAnyFile(dir)) throw new Error("插件文件还被占着，删不掉。关掉正在用它的程序，等几秒再试一次");
+  // 只剩被占着的空目录：过一会儿再清，清不掉也不影响（里面没有文件）
+  let n = 0;
+  const later = (): void => {
+    wipeTree(dir);
+    if (fs.existsSync(dir) && ++n < 6) setTimeout(later, 15_000).unref?.();
+  };
+  setTimeout(later, 5_000).unref?.();
+  return true;
+}
+
+/** 从里往外删：文件删得掉就删，目录删不掉就留着（不抛错） */
+function wipeTree(dir: string): void {
+  let ents: fs.Dirent[] = [];
+  try {
+    ents = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of ents) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) wipeTree(p);
+    else {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        /* 被占着，下一轮再试 */
+      }
+    }
+  }
+  try {
+    fs.rmdirSync(dir);
+  } catch {
+    /* 目录还被占着 */
+  }
+}
+
+function hasAnyFile(dir: string): boolean {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true }).some(e => (e.isDirectory() ? hasAnyFile(path.join(dir, e.name)) : true));
+  } catch {
+    return false;
+  }
 }
 
 export interface LocalInfo {

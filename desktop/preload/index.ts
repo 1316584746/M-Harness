@@ -77,7 +77,7 @@ const api: HarnessApi = {
   pluginTrust: (id, grants) => ipcRenderer.invoke("pluginhost:trust", id, grants),
   pluginDbAccess: id => ipcRenderer.invoke("pluginhost:db-access", id),
   pluginSetGrants: (id, ids) => ipcRenderer.invoke("pluginhost:db-grants", id, ids),
-  pluginRequest: (id, method, params) => ipcRenderer.invoke("pluginhost:request", id, method, params),
+  pluginRequest: (id, method, params, scope) => ipcRenderer.invoke("pluginhost:request", id, method, params, scope),
   onPluginEvent: cb => on<[{ id: string; method: string; params: unknown }]>("pluginhost:event", p => cb(p)),
   onPluginBinary: cb => on<[{ id: string; channel: string; data: Uint8Array }]>("pluginhost:binary", p => cb(p)),
   workbenchTodos: () => ipcRenderer.invoke("workbench:todos"),
@@ -137,6 +137,7 @@ const api: HarnessApi = {
 
   run: req => ipcRenderer.invoke("run:start", req),
   abort: runKey => ipcRenderer.invoke("run:abort", runKey),
+  runChangePatch: (runId, file) => ipcRenderer.invoke("run:change-patch", runId, file),
   respondAsk: (id, answers) => ipcRenderer.invoke("ask:respond", id, answers),
   respondApproval: (id, approved, remember) => ipcRenderer.invoke("approval:respond", id, approved, remember),
 

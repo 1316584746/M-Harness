@@ -4,6 +4,7 @@ import type { IncomingMessage } from "./types";
 import type { CardAction } from "./cards";
 import { ApprovalGate, approvalPrompt, groupSystem, replyBody, replyModeOf, type GroupResolver } from "./group-task";
 import { ProgressText } from "./stream";
+import { findReplyImages } from "./images-out";
 
 interface Session {
   history: Msg[];
@@ -289,6 +290,7 @@ export class SessionManager {
     }
     s.bound = boundId;
     s.controller = new AbortController();
+    const startedAt = Date.now();
     const fresh = s.fresh;
     s.fresh = false;
     try {
@@ -314,6 +316,8 @@ export class SessionManager {
       const body = replyBody(r);
       if (stream) await stream.finish(body, r.reason !== "final").catch(e => this.log(`[${msg.channel}] 回复失败：${e?.message ?? e}`));
       else await this.safeReply(msg, body);
+      // 这次运行里生成的截图 / 图片：文字里只写路径对方看不到，补发成图片消息（访客不发）
+      if (r.reason === "final" && !msg.guest && msg.sendImage) for (const f of findReplyImages(r.text ?? "", startedAt)) await msg.sendImage(f).catch(() => false);
       if (r.reason === "final") await msg.react?.("DONE");
     } catch (e: any) {
       this.log(`[${msg.channel}] 运行异常：${e?.message ?? e}`);
