@@ -6,6 +6,7 @@ import { run } from "./core/loop";
 import { createJsonlTrace, fanout, newRunId } from "./core/trace";
 import type { Asker, Emit, HostTool, Msg, RunResult, Tool } from "./core/types";
 import { askUserTool } from "./tools/ask-user";
+import { toHostTools } from "./tools/host-tools";
 import { agentSafetyPrompt } from "./prompt/agent-safety";
 import { builtinTools } from "./tools/builtin";
 import { dingtalkProjectTools } from "./tools/dingtalk-project";
@@ -146,7 +147,13 @@ export class Runtime {
     const baseTools = [...this.tools, ...(skills.length ? [skillTool(skills)] : []), ...(req.ask && provider.kind === "model" ? [askUserTool] : [])];
     // 外部 Agent 用自己的终端和文件工具、不受路径沙箱约束：用提示词划好操作边界（有人可问时让它用 ask_user 问）
     const safety = provider.kind === "agent" ? agentSafetyPrompt(root, !!req.ask) : undefined;
-    const system = [req.system ?? this.config.system, buildRulesSection(this.config.rules, root), skillsPrompt(skills), customOfficePrompt(this.config.office), safety].filter(Boolean).join("\n\n");
+    // 外部 Agent 自己没有「插件中心」里的工具：把用户允许 AI 用的插件工具作为自定义工具挂给它（走本软件护栏：写操作要批准）
+    const guard = this.guardFor(mode, req.guest);
+    const signal = req.signal ?? new AbortController().signal;
+    const pluginTools = provider.kind === "agent" ? (this.extra?.tools() ?? []).filter(t => !req.disabledTools?.includes(t.name)) : [];
+    const hostTools = provider.kind === "agent" ? { ...toHostTools(pluginTools, { guard, approve, root, signal, ask: req.ask, emit }), ...(req.hostTools ?? {}) } : undefined;
+    const pluginNote = pluginTools.length ? `【插件工具】你可以直接调用名字以 plugin__ 开头的工具，它们是用户在「插件中心」里允许你用的插件能力（${[...new Set(pluginTools.map(t => t.name.split("__")[1]))].join("、")}）。用户让你操作这些插件对应的东西（查数据库、发 HTTP 请求、连服务器等）时，优先用它们，不要自己去装客户端或另找办法；写操作会弹窗让用户批准。` : undefined;
+    const system = [req.system ?? this.config.system, buildRulesSection(this.config.rules, root), skillsPrompt(skills), customOfficePrompt(this.config.office), safety, pluginNote].filter(Boolean).join("\n\n");
 
     const result = await run({
       provider,
@@ -157,10 +164,10 @@ export class Runtime {
       history: req.history,
       maxSteps: this.config.limits.maxSteps,
       timeoutMs: (provider.kind === "model" ? this.config.limits.timeoutSec : Math.max(this.config.limits.timeoutSec, this.config.limits.agentTimeoutSec)) * 1000,
-      guard: this.guardFor(mode, req.guest),
+      guard,
       approve,
       ask: req.ask,
-      ...(provider.kind === "agent" && req.hostTools ? { hostTools: req.hostTools } : {}),
+      ...(hostTools && Object.keys(hostTools).length ? { hostTools } : {}),
       context: new ContextManager({ maxTokens: this.config.limits.contextTokens }, emit),
       emit,
       signal: req.signal,
